@@ -1,0 +1,403 @@
+from __future__ import annotations
+
+from typing import Tuple
+
+from PyQt6 import QtCore, QtGui, QtWidgets
+
+from app.constants import SETTINGS_APP, SETTINGS_ORG
+from app.device_manager import DeviceManager
+from app.hw_discovery import scan_all
+from app.models import Connections, SaveRoot
+from app.settings import get_app_settings
+from app.ui.helpers import apply_tooltip, set_standard_input_height, style_form_layout
+from app.ui.widgets.collapsible_section import CollapsibleSection
+from app.ui.widgets.status_panel import StatusPanel
+from app.ui.widgets.resource_combo import ResourceComboBox
+
+
+class ScanWorker(QtCore.QThread):
+    results_ready = QtCore.pyqtSignal(dict)
+    scan_failed = QtCore.pyqtSignal(str)
+
+    def run(self):
+        try:
+            self.results_ready.emit(scan_all())
+        except Exception as ex:
+            self.scan_failed.emit(str(ex))
+
+
+class ScientificDoubleSpinBox(QtWidgets.QDoubleSpinBox):
+    def validate(self, text: str, pos: int):
+        if text.strip() in {"", "-", "+", ".", "-.", "+."}:
+            return (QtGui.QValidator.State.Intermediate, text, pos)
+        try:
+            float(text)
+            return (QtGui.QValidator.State.Acceptable, text, pos)
+        except ValueError:
+            return (QtGui.QValidator.State.Invalid, text, pos)
+
+    def valueFromText(self, text: str) -> float:
+        try:
+            return float(text)
+        except ValueError:
+            return self.minimum()
+
+    def textFromValue(self, value: float) -> str:
+        return f"{value:.0e}"
+
+    def stepBy(self, steps: int):
+        current = max(self.value(), self.minimum())
+        exponent = int(f"{current:.0e}".split("e")[1])
+        next_value = current + steps * (10 ** exponent)
+        self.setValue(min(max(next_value, self.minimum()), self.maximum()))
+
+
+class ConnDock(QtWidgets.QWidget):
+    stop_requested = QtCore.pyqtSignal()
+
+    AMP_MIN_A = 1e-12
+    LIA_MIN_V = 1e-6
+
+    def __init__(self, device_manager: DeviceManager | None = None):
+        super().__init__()
+        self.conns = Connections()
+        self.save_root = SaveRoot()
+        self.device_manager = device_manager
+        self._scan_thread = None
+        self._build()
+        QtCore.QTimer.singleShot(0, self._start_scan)
+        self._bind_device_manager()
+
+    def _build(self):
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+
+        grp_hw = QtWidgets.QGroupBox("Hardware Addresses")
+        form_hw = QtWidgets.QFormLayout(grp_hw)
+        style_form_layout(form_hw)
+        self.btn_scan = QtWidgets.QPushButton("Scan Hardware")
+        self.btn_scan.clicked.connect(self._start_scan)
+        self.lbl_scan_status = QtWidgets.QLabel("Click Scan to detect connected instruments.")
+        scan_row = QtWidgets.QHBoxLayout()
+        scan_row.setContentsMargins(0, 0, 0, 0)
+        scan_row.addStretch()
+        scan_row.addWidget(self.btn_scan)
+        scan_wrap = QtWidgets.QWidget()
+        scan_wrap.setLayout(scan_row)
+
+        self.cbo_g1 = ResourceComboBox()
+        self.cbo_g2 = ResourceComboBox()
+        self.cbo_g3 = ResourceComboBox()
+        self.cbo_daq = ResourceComboBox()
+        self.cbo_mono = ResourceComboBox()
+        self.ed_g1 = self.cbo_g1
+        self.ed_g2 = self.cbo_g2
+        self.ed_g3 = self.cbo_g3
+        self.ed_daq = self.cbo_daq
+        self.ed_mono = self.cbo_mono
+        self.cbo_g1.setCurrentText(self.conns.gate1)
+        self.cbo_g2.setCurrentText(self.conns.gate2)
+        self.cbo_g3.setCurrentText(self.conns.gate3)
+        self.cbo_daq.setCurrentText(self.conns.daq_dev)
+        self.cbo_mono.setCurrentText(self.conns.mono)
+        for widget in (self.cbo_g1, self.cbo_g2, self.cbo_g3, self.cbo_daq, self.cbo_mono):
+            widget.currentTextChanged.connect(self._update_reconnect_indicators)
+
+        lbl_g1 = QtWidgets.QLabel("Gate1/Vtg:")
+        lbl_g2 = QtWidgets.QLabel("Gate2/Vbg:")
+        lbl_g3 = QtWidgets.QLabel("G3 (Vds Source):")
+        lbl_daq = QtWidgets.QLabel("DAQ:")
+        lbl_mono = QtWidgets.QLabel("Mono:")
+        form_hw.addRow("", scan_wrap)
+        form_hw.addRow(lbl_g1, self.cbo_g1)
+        form_hw.addRow(lbl_g2, self.cbo_g2)
+        form_hw.addRow(lbl_g3, self.cbo_g3)
+        form_hw.addRow(lbl_daq, self.cbo_daq)
+        form_hw.addRow(lbl_mono, self.cbo_mono)
+        self.lbl_reconnect_hint = QtWidgets.QLabel("")
+        self.lbl_reconnect_hint.setWordWrap(True)
+        self.lbl_reconnect_hint.setProperty("role", "warning-hint")
+        form_hw.addRow("", self.lbl_reconnect_hint)
+        form_hw.addRow("", self.lbl_scan_status)
+        self.exp_hw = CollapsibleSection("Hardware Addresses", grp_hw, expanded=False)
+        layout.addWidget(self.exp_hw)
+
+        grp_save = QtWidgets.QGroupBox("Save Settings")
+        form_save = QtWidgets.QFormLayout(grp_save)
+        style_form_layout(form_save)
+        self.ed_user = QtWidgets.QLineEdit(self.save_root.user)
+        self.ed_sample = QtWidgets.QLineEdit(self.save_root.sample)
+        self.ed_base = QtWidgets.QLineEdit(self.save_root.base)
+        lbl_user = QtWidgets.QLabel("User:")
+        lbl_sample = QtWidgets.QLabel("Sample:")
+        lbl_base = QtWidgets.QLabel("Base:")
+        form_save.addRow(lbl_user, self.ed_user)
+        form_save.addRow(lbl_sample, self.ed_sample)
+        form_save.addRow(lbl_base, self.ed_base)
+        self.exp_save = CollapsibleSection("Save Settings", grp_save, expanded=False)
+        layout.addWidget(self.exp_save)
+
+        grp_rate = QtWidgets.QGroupBox("Signal Chain")
+        form_rate = QtWidgets.QFormLayout(grp_rate)
+        style_form_layout(form_rate)
+        self.sp_amp = ScientificDoubleSpinBox()
+        self.sp_amp.setDecimals(12)
+        self.sp_amp.setRange(self.AMP_MIN_A, 1.0)
+        self.sp_amp.setValue(1e-7)
+        self.sp_lkn = QtWidgets.QDoubleSpinBox()
+        self.sp_lkn.setDecimals(6)
+        self.sp_lkn.setRange(self.LIA_MIN_V, 10.0)
+        self.sp_lkn.setSingleStep(0.001)
+        self.sp_lkn.setValue(0.1)
+        lbl_amp = QtWidgets.QLabel("Pre-amp Sensitivity (A):")
+        lbl_lkn = QtWidgets.QLabel("Lock-in Sensitivity (V):")
+        form_rate.addRow(lbl_amp, self.sp_amp)
+        form_rate.addRow(lbl_lkn, self.sp_lkn)
+        layout.addWidget(grp_rate)
+
+        grp_conn = QtWidgets.QGroupBox("Connections")
+        lay_conn = QtWidgets.QVBoxLayout(grp_conn)
+        lay_conn.setContentsMargins(10, 18, 10, 10)
+        lay_conn.setSpacing(8)
+        row_conn = QtWidgets.QHBoxLayout()
+        self.btn_connect_all = QtWidgets.QPushButton("Connect All")
+        self.btn_disconnect_all = QtWidgets.QPushButton("Disconnect All")
+        row_conn.addWidget(self.btn_connect_all)
+        row_conn.addWidget(self.btn_disconnect_all)
+        lay_conn.addLayout(row_conn)
+        status_row = QtWidgets.QHBoxLayout()
+        status_row.setContentsMargins(0, 0, 0, 0)
+        status_row.setSpacing(6)
+        self.lbl_connection_status = QtWidgets.QLabel("Ready")
+        self.lbl_connection_status.setProperty("role", "hint")
+        self.btn_connection_details = QtWidgets.QToolButton()
+        self.btn_connection_details.setText("Details")
+        self.btn_connection_details.setAutoRaise(True)
+        self.btn_connection_details.setProperty("role", "status-detail")
+        self.btn_connection_details.clicked.connect(self._show_connection_details)
+        self.btn_connection_details.hide()
+        status_row.addWidget(self.lbl_connection_status, 1)
+        status_row.addWidget(self.btn_connection_details)
+        self._connection_detail = "Connect hardware from here. Tabs will reuse the same sessions."
+        self.dock_status_panel = StatusPanel(["g1", "g2", "g3", "daq", "mono"])
+        lay_conn.addLayout(status_row)
+        lay_conn.addWidget(self.dock_status_panel)
+        layout.addWidget(grp_conn)
+
+        sep = QtWidgets.QFrame()
+        sep.setProperty("role", "separator")
+        sep.setFrameShape(QtWidgets.QFrame.Shape.HLine)
+        layout.addWidget(sep)
+
+        self.btn_stop = QtWidgets.QPushButton("STOP / ZERO ALL")
+        self.btn_stop.setProperty("role", "danger")
+        self.btn_stop.setMinimumHeight(44)
+        self.btn_stop.clicked.connect(self.stop_requested.emit)
+        layout.addWidget(self.btn_stop)
+        layout.addStretch()
+
+        for widget in [self.cbo_g1, self.cbo_g2, self.cbo_g3, self.cbo_daq, self.cbo_mono, self.ed_user, self.ed_sample, self.ed_base]:
+            set_standard_input_height(widget, 26)
+
+        apply_tooltip("Scan VISA, DAQ, and serial resources and refresh the address lists.", self.btn_scan)
+        apply_tooltip("Address used for the top-gate instrument session.", lbl_g1, self.cbo_g1)
+        apply_tooltip("Address used for the back-gate instrument session.", lbl_g2, self.cbo_g2)
+        apply_tooltip("Address used when a tab drives Vds from a Keithley source.", lbl_g3, self.cbo_g3)
+        apply_tooltip("DAQ device used for current acquisition and any NI AO-based Vds output.", lbl_daq, self.cbo_daq)
+        apply_tooltip("Monochromator / serial resource used by the Photocurrent tab.", lbl_mono, self.cbo_mono)
+        apply_tooltip("Operator name added to the save path.", lbl_user, self.ed_user)
+        apply_tooltip("Sample identifier added to the save path.", lbl_sample, self.ed_sample)
+        apply_tooltip("Root folder where all CSV output is stored.", lbl_base, self.ed_base)
+        apply_tooltip("Pre-amp sensitivity shown on the amplifier front panel, entered in amps.", lbl_amp, self.sp_amp)
+        apply_tooltip("Lock-in sensitivity shown on the lock-in front panel, entered in volts.", lbl_lkn, self.sp_lkn)
+        apply_tooltip("Open all configured hardware sessions so tabs can reuse them.", self.btn_connect_all)
+        apply_tooltip("Close all instrument sessions managed by the dock.", self.btn_disconnect_all)
+        apply_tooltip("Immediately request stop and ramp outputs back to 0 V where supported.", self.btn_stop)
+
+    def get_rates(self):
+        preamp_sensitivity_a = max(float(self.sp_amp.value()), self.AMP_MIN_A)
+        lockin_sensitivity_v = max(float(self.sp_lkn.value()), self.LIA_MIN_V)
+        amp_v_per_a = 1.0 / preamp_sensitivity_a
+        lockin_legacy_scale = lockin_sensitivity_v * 1000.0
+        return amp_v_per_a, lockin_legacy_scale
+
+    def to_models(self) -> Tuple[Connections, SaveRoot, bool]:
+        c = Connections(
+            gate1=self.cbo_g1.current_address(),
+            gate2=self.cbo_g2.current_address(),
+            gate3=self.cbo_g3.current_address(),
+            daq_dev=self.cbo_daq.current_address(),
+            mono=self.cbo_mono.current_address(),
+        )
+        s = SaveRoot(user=self.ed_user.text(), sample=self.ed_sample.text(), base=self.ed_base.text())
+        return c, s, True
+
+    def save_settings(self):
+        s = get_app_settings()
+        s.setValue("addr/g1", self.cbo_g1.current_address())
+        s.setValue("addr/g2", self.cbo_g2.current_address())
+        s.setValue("addr/g3", self.cbo_g3.current_address())
+        s.setValue("addr/daq", self.cbo_daq.current_address())
+        s.setValue("addr/mono", self.cbo_mono.current_address())
+        s.setValue("path/user", self.ed_user.text())
+        s.setValue("path/sample", self.ed_sample.text())
+        s.setValue("path/base", self.ed_base.text())
+        s.setValue("rates/amp", float(self.sp_amp.value()))
+        s.setValue("rates/lkn", float(self.sp_lkn.value()))
+
+    def load_settings(self):
+        s = get_app_settings()
+        self.cbo_g1.setCurrentText(str(s.value("addr/g1", self.conns.gate1)))
+        self.cbo_g2.setCurrentText(str(s.value("addr/g2", self.conns.gate2)))
+        self.cbo_g3.setCurrentText(str(s.value("addr/g3", self.conns.gate3)))
+        self.cbo_daq.setCurrentText(str(s.value("addr/daq", self.conns.daq_dev)))
+        self.cbo_mono.setCurrentText(str(s.value("addr/mono", self.conns.mono)))
+        self.ed_user.setText(str(s.value("path/user", self.save_root.user)))
+        self.ed_sample.setText(str(s.value("path/sample", self.save_root.sample)))
+        self.ed_base.setText(str(s.value("path/base", self.save_root.base)))
+        saved_amp = float(s.value("rates/amp", 1e7))
+        saved_lkn = float(s.value("rates/lkn", 100.0))
+
+        # Backward compatibility:
+        # Old builds stored pre-amp as V/A and lock-in sensitivity as a millivolt-style scalar.
+        display_amp = (1.0 / saved_amp) if saved_amp > 1.0 else saved_amp
+        display_lkn = (saved_lkn / 1000.0) if saved_lkn > 10.0 else saved_lkn
+        self.sp_amp.setValue(max(display_amp, self.AMP_MIN_A))
+        self.sp_lkn.setValue(max(display_lkn, self.LIA_MIN_V))
+
+    def set_device_manager(self, device_manager: DeviceManager):
+        self.device_manager = device_manager
+        self._bind_device_manager()
+
+    def _bind_device_manager(self):
+        if self.device_manager is None:
+            return
+        self.btn_connect_all.clicked.connect(self._on_connect_all_clicked)
+        self.btn_disconnect_all.clicked.connect(self._on_disconnect_all_clicked)
+        self.device_manager.status_changed.connect(self._on_device_status_changed)
+        self.device_manager.operation_changed.connect(self._on_operation_changed)
+        for name in ("g1", "g2", "g3", "daq", "mono"):
+            self._on_device_status_changed(name, self.device_manager.state(name), self.device_manager.detail(name))
+        self._update_reconnect_indicators()
+
+    def _on_connect_all_clicked(self):
+        if hasattr(self.window(), "refresh_models_from_ui"):
+            self.window().refresh_models_from_ui()
+        self.device_manager.connect_all()
+
+    def _on_disconnect_all_clicked(self):
+        self.device_manager.disconnect_all()
+
+    def _on_device_status_changed(self, name: str, state: str, detail: str):
+        self.dock_status_panel.set_status(name, state, detail if state == "err" else None)
+        self._update_reconnect_indicators()
+
+    def _on_operation_changed(self, busy: bool, message: str):
+        self.btn_connect_all.setEnabled(not busy)
+        self.btn_disconnect_all.setEnabled(not busy)
+        self._connection_detail = message
+        if busy:
+            summary = "Working..."
+            role = "hint"
+        elif "fail" in message.lower() or "cannot" in message.lower():
+            summary = "Connection issue"
+            role = "warning-hint"
+        elif "connect" in message.lower():
+            summary = "Connected"
+            role = "hint"
+        elif "disconnect" in message.lower():
+            summary = "Disconnected"
+            role = "hint"
+        else:
+            summary = "Ready"
+            role = "hint"
+        self.lbl_connection_status.setText(summary)
+        self.lbl_connection_status.setProperty("role", role)
+        self.lbl_connection_status.style().unpolish(self.lbl_connection_status)
+        self.lbl_connection_status.style().polish(self.lbl_connection_status)
+        self.lbl_connection_status.setToolTip(message)
+        self.btn_connection_details.setVisible(bool(message))
+        self._update_reconnect_indicators()
+
+    def _show_connection_details(self):
+        if not self._connection_detail:
+            return
+        dialog = QtWidgets.QMessageBox(self)
+        dialog.setWindowTitle("Connection Status Details")
+        dialog.setIcon(QtWidgets.QMessageBox.Icon.Information)
+        dialog.setText(self.lbl_connection_status.text())
+        dialog.setDetailedText(self._connection_detail)
+        dialog.setStandardButtons(QtWidgets.QMessageBox.StandardButton.Ok)
+        dialog.exec()
+
+    def _set_reconnect_state(self, widget: QtWidgets.QWidget, needs_reconnect: bool, tooltip: str = ""):
+        widget.setProperty("reconnect", "true" if needs_reconnect else "false")
+        widget.style().unpolish(widget)
+        widget.style().polish(widget)
+        widget.setToolTip(tooltip)
+
+    def _update_reconnect_indicators(self):
+        if self.device_manager is None:
+            return
+        mapping = {
+            "g1": self.cbo_g1,
+            "g2": self.cbo_g2,
+            "g3": self.cbo_g3,
+            "daq": self.cbo_daq,
+            "mono": self.cbo_mono,
+        }
+        changed = []
+        for name, widget in mapping.items():
+            needs = self.device_manager.needs_reconnect(name)
+            tooltip = ""
+            if needs:
+                changed.append(name.upper())
+                tooltip = (
+                    f"Live session still uses {self.device_manager.connected_address(name)}. "
+                    "Reconnect from Instrument Setup to apply the edited address."
+                )
+            self._set_reconnect_state(widget, needs, tooltip)
+        self.lbl_reconnect_hint.setText(
+            f"Reconnect required to apply edited addresses for: {', '.join(changed)}" if changed else ""
+        )
+
+    def _start_scan(self):
+        if self._scan_thread is not None and self._scan_thread.isRunning():
+            return
+        self.btn_scan.setEnabled(False)
+        self.lbl_scan_status.setText("Scanning...")
+        self.lbl_scan_status.setStyleSheet("color: #757575;")
+        self._scan_thread = ScanWorker(self)
+        self._scan_thread.results_ready.connect(self._on_scan_results)
+        self._scan_thread.scan_failed.connect(self._on_scan_failed)
+        self._scan_thread.finished.connect(self._on_scan_finished)
+        self._scan_thread.start()
+
+    def _on_scan_results(self, results: dict):
+        gpib = results.get("gpib", [])
+        daq = results.get("daq", [])
+        asrl = results.get("asrl", [])
+        self.cbo_g1.populate(gpib, self.cbo_g1.current_address())
+        self.cbo_g2.populate(gpib, self.cbo_g2.current_address())
+        self.cbo_g3.populate(gpib, self.cbo_g3.current_address())
+        self.cbo_daq.populate(daq, self.cbo_daq.current_address())
+        self.cbo_mono.populate(asrl, self.cbo_mono.current_address())
+
+        total = len(gpib) + len(daq) + len(asrl)
+        if total == 0:
+            self.lbl_scan_status.setText("No devices found - check cable connections.")
+            self.lbl_scan_status.setStyleSheet("color: #E65100;")
+        else:
+            self.lbl_scan_status.setText(f"Found: {len(gpib)} GPIB, {len(daq)} DAQ, {len(asrl)} ASRL")
+            self.lbl_scan_status.setStyleSheet("color: #2E7D32;")
+
+    def _on_scan_failed(self, message: str):
+        self.lbl_scan_status.setText(f"Scan failed - {message or 'check VISA installation.'}")
+        self.lbl_scan_status.setStyleSheet("color: #E65100;")
+
+    def _on_scan_finished(self):
+        self.btn_scan.setEnabled(True)
+        if self._scan_thread is not None:
+            self._scan_thread.deleteLater()
+            self._scan_thread = None

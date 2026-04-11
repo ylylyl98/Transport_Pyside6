@@ -1,0 +1,158 @@
+from __future__ import annotations
+
+import sys
+
+from PyQt6 import QtWidgets
+from PyQt6.QtCore import Qt
+
+from app.device_manager import DeviceManager
+from app.settings import get_app_settings
+from app.ui.dock import ConnDock
+from app.ui.style import APP_STYLE
+from app.ui.tabs.cosweep_tab import CoSweepTab
+from app.ui.tabs.dual_gate_tab import DualGateTab
+from app.ui.tabs.gate_scan_tab import GateScanTab
+from app.ui.tabs.photocurrent_tab import PhotocurrentTab
+
+
+class MainWindow(QtWidgets.QMainWindow):
+    def __init__(self):
+        super().__init__()
+        app = QtWidgets.QApplication.instance()
+        if app is not None:
+            app.setStyleSheet(APP_STYLE)
+
+        self.setWindowTitle("Transport Measurement")
+        self.resize(1400, 860)
+
+        self.conn_dock = ConnDock()
+        self.conn_dock.load_settings()
+        self.conn_dock.stop_requested.connect(self.on_emergency_stop)
+
+        self.instrument_dock = QtWidgets.QDockWidget("Instrument Setup", self)
+        self.instrument_dock.setWidget(self.conn_dock)
+        self.instrument_dock.setMinimumWidth(240)
+        self.instrument_dock.setFeatures(
+            QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetClosable
+            | QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetMovable
+        )
+        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.instrument_dock)
+        self.menuBar().addMenu("View").addAction(self.instrument_dock.toggleViewAction())
+
+        self.save_root = self.conn_dock.save_root
+        self.connections = self.conn_dock.conns
+        self.device_manager = DeviceManager(self.connections)
+        self.conn_dock.set_device_manager(self.device_manager)
+
+        self.tabs = QtWidgets.QTabWidget()
+        self.setCentralWidget(self.tabs)
+        self.tab_dual = DualGateTab(self.save_root, self.connections, self.device_manager, get_global_rates_callable=self.conn_dock.get_rates)
+        self.tab_cosweep = CoSweepTab(self.save_root, self.connections, self.device_manager, get_global_rates_callable=self.conn_dock.get_rates, get_ao_items_callable=self.tab_dual.get_ao_items_if_available)
+        self.tab_gate_scan = GateScanTab(self.save_root, self.connections, self.device_manager, get_global_rates_callable=self.conn_dock.get_rates, get_ao_items_callable=self.tab_dual.get_ao_items_if_available)
+        self.tab_photocurrent = PhotocurrentTab(self.save_root, self.connections, self.device_manager, get_global_rates_callable=self.conn_dock.get_rates, get_ao_items_callable=self.tab_dual.get_ao_items_if_available)
+        self.tabs.addTab(self.tab_dual, "Vds Sweep")
+        self.tabs.addTab(self.tab_gate_scan, "Gate Scan")
+        self.tabs.addTab(self.tab_cosweep, "2D Map")
+        self.tabs.addTab(self.tab_photocurrent, "Photocurrent")
+        self._bind_plot_mode_settings()
+        self._load_plot_mode_settings()
+
+    def refresh_models_from_ui(self):
+        c, s, _ = self.conn_dock.to_models()
+        self.save_root.user = s.user
+        self.save_root.sample = s.sample
+        self.save_root.base = s.base
+        self.connections.gate1 = c.gate1
+        self.connections.gate2 = c.gate2
+        self.connections.gate3 = c.gate3
+        self.connections.daq_dev = c.daq_dev
+        self.connections.mono = c.mono
+        self.device_manager.sync_addresses()
+
+    def closeEvent(self, event):
+        self._save_plot_mode_settings()
+        self.conn_dock.save_settings()
+        self.device_manager.shutdown()
+        event.accept()
+
+    def _plot_mode_tabs(self):
+        return {
+            "vds_sweep": self.tab_dual,
+            "gate_scan": self.tab_gate_scan,
+            "map_2d": self.tab_cosweep,
+            "photocurrent": self.tab_photocurrent,
+        }
+
+    def _bind_plot_mode_settings(self):
+        for _key, tab in self._plot_mode_tabs().items():
+            tab.plot.plot_mode_changed.connect(lambda _mode, current_tab=tab: self._save_single_plot_mode(current_tab))
+
+    def _load_plot_mode_settings(self):
+        settings = get_app_settings()
+        for key, tab in self._plot_mode_tabs().items():
+            saved_mode = str(settings.value(f"plot_mode/{key}", "Single Plot"))
+            if saved_mode not in ("Single Plot", "4-Channel Compare"):
+                saved_mode = "Single Plot"
+            tab.plot.set_selected_plot_mode(saved_mode)
+            if hasattr(tab, "_redraw_plot"):
+                tab._redraw_plot()
+
+    def _save_plot_mode_settings(self):
+        settings = get_app_settings()
+        for _key, tab in self._plot_mode_tabs().items():
+            self._save_single_plot_mode(tab, settings)
+        settings.sync()
+
+    def _save_single_plot_mode(self, tab, settings=None):
+        settings = settings or get_app_settings()
+        for key, candidate in self._plot_mode_tabs().items():
+            if candidate is tab:
+                settings.setValue(f"plot_mode/{key}", tab.plot.current_plot_mode())
+                settings.sync()
+                break
+
+    def on_emergency_stop(self):
+        tabs = [self.tab_dual, self.tab_gate_scan, self.tab_cosweep, self.tab_photocurrent]
+        for tab in tabs:
+            if tab.worker:
+                tab.worker.request_stop()
+                tab.log.appendPlainText("!!! EMERGENCY STOP REQUESTED !!!")
+
+        daq_zeroed_log = []
+        for tab in tabs:
+            vds_source_text = tab.cbo_source.currentText()
+            if "NI DAQ" in vds_source_text:
+                try:
+                    chan_idx = int(vds_source_text.split()[-1].replace("ao", ""))
+                    daq_zeroed_log.append(f"Zeroed ao{chan_idx} (Vds)")
+                except Exception:
+                    pass
+            if hasattr(tab, "run_panel"):
+                tab.run_panel.set_running(False)
+
+        daq_channels = []
+        for entry in daq_zeroed_log:
+            try:
+                daq_channels.append(int(entry.split("ao")[1].split(" ")[0]))
+            except Exception:
+                pass
+        self.device_manager.emergency_stop(daq_channels)
+
+        msg = "Stop signal sent to all workers.\n\n"
+        msg += "Actions taken:\n"
+        msg += "- All Keithley Gates (G1, G2, G3) ramped to 0V.\n"
+        if daq_zeroed_log:
+            msg += f"- DAQ Vds Source: {', '.join(set(daq_zeroed_log))}\n"
+        else:
+            msg += "- DAQ AO channels were NOT touched (not set as Vds source).\n"
+        QtWidgets.QMessageBox.critical(self, "Emergency Stop", msg)
+
+
+def launch_in_notebook(show: bool = True) -> MainWindow:
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        app = QtWidgets.QApplication(sys.argv)
+    w = MainWindow()
+    if show:
+        w.show()
+    return w
