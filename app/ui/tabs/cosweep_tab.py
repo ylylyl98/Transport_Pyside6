@@ -221,6 +221,7 @@ class CoSweepTab(BaseMeasurementTab):
         self.cbo_fast.currentIndexChanged.connect(self.on_fast_combo_changed)
         self.cbo_slow.currentIndexChanged.connect(self.on_slow_combo_changed)
         self.cbo_source.currentIndexChanged.connect(self._update_connection_hint)
+        self.cbo_source.currentIndexChanged.connect(self._update_manual_buttons)
         self.cbo_source.currentIndexChanged.connect(self._update_plot_axis_choices)
         self.cbo_y.currentTextChanged.connect(self.set_plot_axis_source)
         self._update_plot_axis_choices()
@@ -230,10 +231,17 @@ class CoSweepTab(BaseMeasurementTab):
 
     def _update_manual_buttons(self):
         self._sync_sessions_from_manager()
-        self.btn_set_vtg.setEnabled(self.s_g1 is not None)
-        self.btn_set_vbg.setEnabled(self.s_g2 is not None)
-        self.btn_set_vds.setEnabled(self.s_g3 is not None or self.s_daq is not None)
-        self.btn_start.setEnabled(self.s_daq is not None and self.worker_thread is None)
+        self.btn_set_vtg.setEnabled(self.s_g1 is not None and self.device_manager.is_voltage_source_mode("g1"))
+        self.btn_set_vbg.setEnabled(self.s_g2 is not None and self.device_manager.is_voltage_source_mode("g2"))
+        self.btn_set_vds.setEnabled(
+            ("NI DAQ" in self.cbo_source.currentText() and self.s_daq is not None)
+            or (self.s_g3 is not None and self.device_manager.is_voltage_source_mode("g3"))
+        )
+        source_ready = (
+            self.cbo_source.currentText() != "Keithley 2400"
+            or (self.s_g3 is not None and self.device_manager.is_voltage_source_mode("g3"))
+        )
+        self.btn_start.setEnabled(self.s_daq is not None and source_ready and self.worker_thread is None)
         self._update_connection_hint()
 
     def _sync_sessions_from_manager(self):
@@ -292,6 +300,9 @@ class CoSweepTab(BaseMeasurementTab):
         if missing:
             QtWidgets.QMessageBox.warning(self, "Missing Device", f"Connect required devices first: {', '.join(missing).upper()}")
             return False
+        if self.cbo_source.currentText() == "Keithley 2400" and not self.device_manager.is_voltage_source_mode("g3"):
+            QtWidgets.QMessageBox.warning(self, "Keithley Mode", "G3 must be in 2-wire voltage source mode for a Keithley-driven 2D map.")
+            return False
         return True
 
     def _update_connection_hint(self):
@@ -299,6 +310,12 @@ class CoSweepTab(BaseMeasurementTab):
         optional = ["g1", "g2"]
         missing_required = [name.upper() for name in required if not self.device_manager.is_connected(name)]
         missing_optional = [name.upper() for name in optional if not self.device_manager.is_connected(name)]
+        if self.device_manager.is_connected("g1") and not self.device_manager.is_voltage_source_mode("g1"):
+            missing_optional.append("G1 mode")
+        if self.device_manager.is_connected("g2") and not self.device_manager.is_voltage_source_mode("g2"):
+            missing_optional.append("G2 mode")
+        if self.cbo_source.currentText() == "Keithley 2400" and self.device_manager.is_connected("g3") and not self.device_manager.is_voltage_source_mode("g3"):
+            missing_required.append("G3 mode")
         if self.device_manager.is_busy():
             text = "Hardware is busy with another connection or disconnect operation from Instrument Setup."
             self.lbl_connection_hint.setProperty("role", "warning-hint")

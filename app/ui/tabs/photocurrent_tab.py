@@ -185,9 +185,11 @@ class PhotocurrentTab(BaseMeasurementTab):
         self.btn_set_vds.clicked.connect(self.on_set_vds)
         self.btn_go_wl.clicked.connect(self.on_go_wl)
         self.chk_use_vds.toggled.connect(self._update_connection_hint)
+        self.chk_use_vds.toggled.connect(self._update_manual_buttons)
         self.chk_use_vds.toggled.connect(self._update_plot_axis_choices)
         self.chk_use_vds.toggled.connect(self._update_vds_bias_state)
         self.cbo_source.currentIndexChanged.connect(self._update_connection_hint)
+        self.cbo_source.currentIndexChanged.connect(self._update_manual_buttons)
         self.cbo_source.currentIndexChanged.connect(self._update_plot_axis_choices)
         self.cbo_y.currentTextChanged.connect(self.set_plot_axis_source)
         self._update_plot_axis_choices()
@@ -197,11 +199,22 @@ class PhotocurrentTab(BaseMeasurementTab):
 
     def _update_manual_buttons(self):
         self._sync_sessions_from_manager()
-        self.btn_set_vtg.setEnabled(self.s_g1 is not None)
-        self.btn_set_vbg.setEnabled(self.s_g2 is not None)
-        self.btn_set_vds.setEnabled((self.s_g3 is not None or self.s_daq is not None) and self.chk_use_vds.isChecked())
+        self.btn_set_vtg.setEnabled(self.s_g1 is not None and self.device_manager.is_voltage_source_mode("g1"))
+        self.btn_set_vbg.setEnabled(self.s_g2 is not None and self.device_manager.is_voltage_source_mode("g2"))
+        self.btn_set_vds.setEnabled(
+            self.chk_use_vds.isChecked()
+            and (
+                ("NI DAQ" in self.cbo_source.currentText() and self.s_daq is not None)
+                or (self.s_g3 is not None and self.device_manager.is_voltage_source_mode("g3"))
+            )
+        )
         self.btn_go_wl.setEnabled(self.s_mono is not None)
-        self.btn_start.setEnabled(self.s_mono is not None and self.s_daq is not None and self.worker_thread is None)
+        source_ready = (
+            not self.chk_use_vds.isChecked()
+            or self.cbo_source.currentText() != "Keithley 2400"
+            or (self.s_g3 is not None and self.device_manager.is_voltage_source_mode("g3"))
+        )
+        self.btn_start.setEnabled(self.s_mono is not None and self.s_daq is not None and source_ready and self.worker_thread is None)
         self._update_connection_hint()
         self._update_vds_bias_state()
 
@@ -265,6 +278,9 @@ class PhotocurrentTab(BaseMeasurementTab):
         if missing:
             QtWidgets.QMessageBox.warning(self, "Missing Device", f"Connect required devices first: {', '.join(missing).upper()}")
             return False
+        if self.chk_use_vds.isChecked() and self.cbo_source.currentText() == "Keithley 2400" and not self.device_manager.is_voltage_source_mode("g3"):
+            QtWidgets.QMessageBox.warning(self, "Keithley Mode", "G3 must be in 2-wire voltage source mode when photocurrent uses Keithley Vds bias.")
+            return False
         return True
 
     def _update_connection_hint(self):
@@ -274,6 +290,17 @@ class PhotocurrentTab(BaseMeasurementTab):
             optional.append("g3")
         missing_required = [name.upper() for name in required if not self.device_manager.is_connected(name)]
         missing_optional = [name.upper() for name in optional if not self.device_manager.is_connected(name)]
+        if self.device_manager.is_connected("g1") and not self.device_manager.is_voltage_source_mode("g1"):
+            missing_optional.append("G1 mode")
+        if self.device_manager.is_connected("g2") and not self.device_manager.is_voltage_source_mode("g2"):
+            missing_optional.append("G2 mode")
+        if (
+            self.chk_use_vds.isChecked()
+            and self.cbo_source.currentText() == "Keithley 2400"
+            and self.device_manager.is_connected("g3")
+            and not self.device_manager.is_voltage_source_mode("g3")
+        ):
+            missing_required.append("G3 mode")
         if self.device_manager.is_busy():
             text = "Hardware is busy with another connection or disconnect operation from Instrument Setup."
             self.lbl_connection_hint.setProperty("role", "warning-hint")
@@ -299,8 +326,13 @@ class PhotocurrentTab(BaseMeasurementTab):
         self.sp_vds.setEnabled(enabled)
         self.sp_vds_ramp.setEnabled(enabled)
         self.cbo_source.setEnabled(enabled)
-        if not enabled:
-            self.btn_set_vds.setEnabled(False)
+        self.btn_set_vds.setEnabled(
+            enabled
+            and (
+                ("NI DAQ" in self.cbo_source.currentText() and self.s_daq is not None)
+                or (self.s_g3 is not None and self.device_manager.is_voltage_source_mode("g3"))
+            )
+        )
 
     def on_set_vtg(self):
         if self.s_g1:

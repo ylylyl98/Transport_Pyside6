@@ -9,6 +9,9 @@ class Connections:
     gate1: str = "GPIB1::23::INSTR"
     gate2: str = "GPIB1::03::INSTR"
     gate3: str = "GPIB1::07::INSTR"
+    gate1_mode: str = "voltage_2w"
+    gate2_mode: str = "voltage_2w"
+    gate3_mode: str = "voltage_2w"
     daq_dev: str = "Dev1"
     mono: str = "ASRL13::INSTR"
 

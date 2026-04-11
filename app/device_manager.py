@@ -4,9 +4,10 @@ from typing import Dict, Iterable, List, Optional, Set
 
 from PyQt6 import QtCore
 
+from app.keithley_modes import KEITHLEY_MODE_LABELS, KEITHLEY_MODE_OHM_4W, KEITHLEY_MODE_VOLTAGE_2W, keithley_mode_label
 from app.models import Connections
 from app.utils import _safe
-from instruments import DaqCard, Keithley2400VoltMode, SP2300
+from instruments import DaqCard, Keithley2400OhmMode, Keithley2400VoltMode, SP2300
 
 
 class ConnectWorker(QtCore.QThread):
@@ -54,6 +55,7 @@ class DeviceManager(QtCore.QObject):
         self.states: Dict[str, str] = {name: "idle" for name in self.sessions}
         self.details: Dict[str, str] = {name: "" for name in self.sessions}
         self._connected_addresses: Dict[str, str] = {name: self._address_for(name) for name in self.sessions}
+        self._connected_modes: Dict[str, str] = {name: self._mode_for(name) for name in self.sessions}
         self._in_use: Set[str] = set()
         self._operation_thread: Optional[QtCore.QThread] = None
 
@@ -64,6 +66,15 @@ class DeviceManager(QtCore.QObject):
             "g3": self.connections.gate3,
             "daq": self.connections.daq_dev,
             "mono": self.connections.mono,
+        }[name]
+
+    def _mode_for(self, name: str) -> str:
+        return {
+            "g1": self.connections.gate1_mode,
+            "g2": self.connections.gate2_mode,
+            "g3": self.connections.gate3_mode,
+            "daq": "",
+            "mono": "",
         }[name]
 
     def _emit_status(self, name: str, state: str, detail: str = ""):
@@ -80,11 +91,29 @@ class DeviceManager(QtCore.QObject):
     def connected_address(self, name: str) -> str:
         return self._connected_addresses.get(name, "")
 
+    def connected_mode(self, name: str) -> str:
+        return self._connected_modes.get(name, "")
+
     def needs_reconnect(self, name: str) -> bool:
         session = self.sessions.get(name)
         if session is None:
             return False
-        return self._address_for(name) != self._connected_addresses.get(name, "")
+        return (
+            self._address_for(name) != self._connected_addresses.get(name, "")
+            or self._mode_for(name) != self._connected_modes.get(name, "")
+        )
+
+    def is_voltage_source_mode(self, name: str) -> bool:
+        return self.connected_mode(name) == KEITHLEY_MODE_VOLTAGE_2W
+
+    def is_ohm_mode(self, name: str) -> bool:
+        return self.connected_mode(name) == KEITHLEY_MODE_OHM_4W
+
+    def mode_summary(self, name: str) -> str:
+        mode = self.connected_mode(name)
+        if name in {"g1", "g2", "g3"} and mode:
+            return keithley_mode_label(mode)
+        return ""
 
     def get_session(self, name: str):
         return self.sessions.get(name)
@@ -126,12 +155,14 @@ class DeviceManager(QtCore.QObject):
         changed = []
         for name in self.sessions:
             new_addr = self._address_for(name)
-            if self.sessions[name] is not None and new_addr != self._connected_addresses.get(name):
+            new_mode = self._mode_for(name)
+            if self.sessions[name] is not None and (new_addr != self._connected_addresses.get(name) or new_mode != self._connected_modes.get(name)):
                 changed.append(name)
         for name in changed:
             self._close_device(name)
             self._emit_status(name, "idle", "Address changed")
             self._connected_addresses[name] = self._address_for(name)
+            self._connected_modes[name] = self._mode_for(name)
 
     def connect_all(self) -> bool:
         if self.is_busy():
@@ -192,20 +223,23 @@ class DeviceManager(QtCore.QObject):
 
     def _connect_keithley(self, name: str, curr_comp: float, volt_comp: float, emitter):
         address = self._address_for(name)
+        mode = self._mode_for(name)
         if not address:
             self._close_device(name)
             emitter.emit(name, "idle", "")
             return
-        if self.sessions[name] is not None and self._connected_addresses.get(name) == address:
-            emitter.emit(name, "ok", "")
+        if self.sessions[name] is not None and self._connected_addresses.get(name) == address and self._connected_modes.get(name) == mode:
+            emitter.emit(name, "ok", keithley_mode_label(mode))
             return
         self._close_device(name)
         try:
-            session = Keithley2400VoltMode(name, address, curr_comp=curr_comp, volt_comp=volt_comp)
+            session_cls = Keithley2400OhmMode if mode == KEITHLEY_MODE_OHM_4W else Keithley2400VoltMode
+            session = session_cls(name, address, curr_comp=curr_comp, volt_comp=volt_comp)
             session.connect()
             self.sessions[name] = session
             self._connected_addresses[name] = address
-            emitter.emit(name, "ok", "")
+            self._connected_modes[name] = mode
+            emitter.emit(name, "ok", keithley_mode_label(mode))
         except Exception as ex:
             self.sessions[name] = None
             emitter.emit(name, "err", str(ex))
@@ -259,6 +293,7 @@ class DeviceManager(QtCore.QObject):
         _safe(session, "close")
         self.sessions[name] = None
         self._connected_addresses[name] = self._address_for(name)
+        self._connected_modes[name] = self._mode_for(name)
 
     def _close_daq_outputs(self):
         daq = self.sessions.get("daq")

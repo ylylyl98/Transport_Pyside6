@@ -7,6 +7,7 @@ from PyQt6 import QtCore, QtGui, QtWidgets
 from app.constants import SETTINGS_APP, SETTINGS_ORG
 from app.device_manager import DeviceManager
 from app.hw_discovery import scan_all
+from app.keithley_modes import KEITHLEY_MODE_LABELS, keithley_mode_label, keithley_mode_options
 from app.models import Connections, SaveRoot
 from app.settings import get_app_settings
 from app.ui.helpers import apply_tooltip, set_standard_input_height, style_form_layout
@@ -89,6 +90,9 @@ class ConnDock(QtWidgets.QWidget):
         self.cbo_g1 = ResourceComboBox()
         self.cbo_g2 = ResourceComboBox()
         self.cbo_g3 = ResourceComboBox()
+        self.cbo_g1_mode = QtWidgets.QComboBox()
+        self.cbo_g2_mode = QtWidgets.QComboBox()
+        self.cbo_g3_mode = QtWidgets.QComboBox()
         self.cbo_daq = ResourceComboBox()
         self.cbo_mono = ResourceComboBox()
         self.ed_g1 = self.cbo_g1
@@ -99,9 +103,16 @@ class ConnDock(QtWidgets.QWidget):
         self.cbo_g1.setCurrentText(self.conns.gate1)
         self.cbo_g2.setCurrentText(self.conns.gate2)
         self.cbo_g3.setCurrentText(self.conns.gate3)
+        for value, label in keithley_mode_options():
+            self.cbo_g1_mode.addItem(label, value)
+            self.cbo_g2_mode.addItem(label, value)
+            self.cbo_g3_mode.addItem(label, value)
+        self._set_combo_data(self.cbo_g1_mode, self.conns.gate1_mode)
+        self._set_combo_data(self.cbo_g2_mode, self.conns.gate2_mode)
+        self._set_combo_data(self.cbo_g3_mode, self.conns.gate3_mode)
         self.cbo_daq.setCurrentText(self.conns.daq_dev)
         self.cbo_mono.setCurrentText(self.conns.mono)
-        for widget in (self.cbo_g1, self.cbo_g2, self.cbo_g3, self.cbo_daq, self.cbo_mono):
+        for widget in (self.cbo_g1, self.cbo_g2, self.cbo_g3, self.cbo_daq, self.cbo_mono, self.cbo_g1_mode, self.cbo_g2_mode, self.cbo_g3_mode):
             widget.currentTextChanged.connect(self._update_reconnect_indicators)
 
         lbl_g1 = QtWidgets.QLabel("Gate1/Vtg:")
@@ -110,9 +121,9 @@ class ConnDock(QtWidgets.QWidget):
         lbl_daq = QtWidgets.QLabel("DAQ:")
         lbl_mono = QtWidgets.QLabel("Mono:")
         form_hw.addRow("", scan_wrap)
-        form_hw.addRow(lbl_g1, self.cbo_g1)
-        form_hw.addRow(lbl_g2, self.cbo_g2)
-        form_hw.addRow(lbl_g3, self.cbo_g3)
+        form_hw.addRow(lbl_g1, self._make_address_mode_row(self.cbo_g1, self.cbo_g1_mode))
+        form_hw.addRow(lbl_g2, self._make_address_mode_row(self.cbo_g2, self.cbo_g2_mode))
+        form_hw.addRow(lbl_g3, self._make_address_mode_row(self.cbo_g3, self.cbo_g3_mode))
         form_hw.addRow(lbl_daq, self.cbo_daq)
         form_hw.addRow(lbl_mono, self.cbo_mono)
         self.lbl_reconnect_hint = QtWidgets.QLabel("")
@@ -197,13 +208,14 @@ class ConnDock(QtWidgets.QWidget):
         layout.addWidget(self.btn_stop)
         layout.addStretch()
 
-        for widget in [self.cbo_g1, self.cbo_g2, self.cbo_g3, self.cbo_daq, self.cbo_mono, self.ed_user, self.ed_sample, self.ed_base]:
+        for widget in [self.cbo_g1, self.cbo_g2, self.cbo_g3, self.cbo_g1_mode, self.cbo_g2_mode, self.cbo_g3_mode, self.cbo_daq, self.cbo_mono, self.ed_user, self.ed_sample, self.ed_base]:
             set_standard_input_height(widget, 26)
 
         apply_tooltip("Scan VISA, DAQ, and serial resources and refresh the address lists.", self.btn_scan)
         apply_tooltip("Address used for the top-gate instrument session.", lbl_g1, self.cbo_g1)
         apply_tooltip("Address used for the back-gate instrument session.", lbl_g2, self.cbo_g2)
         apply_tooltip("Address used when a tab drives Vds from a Keithley source.", lbl_g3, self.cbo_g3)
+        apply_tooltip("Choose whether this Keithley should be configured as a 2-wire voltage source or a 4-wire ohms meter after connection.", self.cbo_g1_mode, self.cbo_g2_mode, self.cbo_g3_mode)
         apply_tooltip("DAQ device used for current acquisition and any NI AO-based Vds output.", lbl_daq, self.cbo_daq)
         apply_tooltip("Monochromator / serial resource used by the Photocurrent tab.", lbl_mono, self.cbo_mono)
         apply_tooltip("Operator name added to the save path.", lbl_user, self.ed_user)
@@ -222,11 +234,27 @@ class ConnDock(QtWidgets.QWidget):
         lockin_legacy_scale = lockin_sensitivity_v * 1000.0
         return amp_v_per_a, lockin_legacy_scale
 
+    def _make_address_mode_row(self, address_widget: QtWidgets.QWidget, mode_widget: QtWidgets.QWidget) -> QtWidgets.QWidget:
+        wrap = QtWidgets.QWidget()
+        row = QtWidgets.QHBoxLayout(wrap)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(6)
+        row.addWidget(address_widget, 2)
+        row.addWidget(mode_widget, 1)
+        return wrap
+
+    def _set_combo_data(self, combo: QtWidgets.QComboBox, value: str):
+        idx = combo.findData(value)
+        combo.setCurrentIndex(idx if idx >= 0 else 0)
+
     def to_models(self) -> Tuple[Connections, SaveRoot, bool]:
         c = Connections(
             gate1=self.cbo_g1.current_address(),
             gate2=self.cbo_g2.current_address(),
             gate3=self.cbo_g3.current_address(),
+            gate1_mode=self.cbo_g1_mode.currentData(),
+            gate2_mode=self.cbo_g2_mode.currentData(),
+            gate3_mode=self.cbo_g3_mode.currentData(),
             daq_dev=self.cbo_daq.current_address(),
             mono=self.cbo_mono.current_address(),
         )
@@ -238,6 +266,9 @@ class ConnDock(QtWidgets.QWidget):
         s.setValue("addr/g1", self.cbo_g1.current_address())
         s.setValue("addr/g2", self.cbo_g2.current_address())
         s.setValue("addr/g3", self.cbo_g3.current_address())
+        s.setValue("mode/g1", self.cbo_g1_mode.currentData())
+        s.setValue("mode/g2", self.cbo_g2_mode.currentData())
+        s.setValue("mode/g3", self.cbo_g3_mode.currentData())
         s.setValue("addr/daq", self.cbo_daq.current_address())
         s.setValue("addr/mono", self.cbo_mono.current_address())
         s.setValue("path/user", self.ed_user.text())
@@ -251,6 +282,9 @@ class ConnDock(QtWidgets.QWidget):
         self.cbo_g1.setCurrentText(str(s.value("addr/g1", self.conns.gate1)))
         self.cbo_g2.setCurrentText(str(s.value("addr/g2", self.conns.gate2)))
         self.cbo_g3.setCurrentText(str(s.value("addr/g3", self.conns.gate3)))
+        self._set_combo_data(self.cbo_g1_mode, str(s.value("mode/g1", self.conns.gate1_mode)))
+        self._set_combo_data(self.cbo_g2_mode, str(s.value("mode/g2", self.conns.gate2_mode)))
+        self._set_combo_data(self.cbo_g3_mode, str(s.value("mode/g3", self.conns.gate3_mode)))
         self.cbo_daq.setCurrentText(str(s.value("addr/daq", self.conns.daq_dev)))
         self.cbo_mono.setCurrentText(str(s.value("addr/mono", self.conns.mono)))
         self.ed_user.setText(str(s.value("path/user", self.save_root.user)))
@@ -347,6 +381,11 @@ class ConnDock(QtWidgets.QWidget):
             "daq": self.cbo_daq,
             "mono": self.cbo_mono,
         }
+        mode_widgets = {
+            "g1": self.cbo_g1_mode,
+            "g2": self.cbo_g2_mode,
+            "g3": self.cbo_g3_mode,
+        }
         changed = []
         for name, widget in mapping.items():
             needs = self.device_manager.needs_reconnect(name)
@@ -354,12 +393,15 @@ class ConnDock(QtWidgets.QWidget):
             if needs:
                 changed.append(name.upper())
                 tooltip = (
-                    f"Live session still uses {self.device_manager.connected_address(name)}. "
-                    "Reconnect from Instrument Setup to apply the edited address."
+                    f"Live session still uses {self.device_manager.connected_address(name)}"
+                    f" in {keithley_mode_label(self.device_manager.connected_mode(name)) if name in {'g1','g2','g3'} else 'its current mode'}. "
+                    "Reconnect from Instrument Setup to apply the edited address or mode."
                 )
             self._set_reconnect_state(widget, needs, tooltip)
+            if name in mode_widgets:
+                self._set_reconnect_state(mode_widgets[name], needs, tooltip)
         self.lbl_reconnect_hint.setText(
-            f"Reconnect required to apply edited addresses for: {', '.join(changed)}" if changed else ""
+            f"Reconnect required to apply edited address or mode for: {', '.join(changed)}" if changed else ""
         )
 
     def _start_scan(self):

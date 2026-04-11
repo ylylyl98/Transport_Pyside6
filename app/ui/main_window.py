@@ -65,6 +65,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.connections.gate1 = c.gate1
         self.connections.gate2 = c.gate2
         self.connections.gate3 = c.gate3
+        self.connections.gate1_mode = c.gate1_mode
+        self.connections.gate2_mode = c.gate2_mode
+        self.connections.gate3_mode = c.gate3_mode
         self.connections.daq_dev = c.daq_dev
         self.connections.mono = c.mono
         self.device_manager.sync_addresses()

@@ -295,6 +295,7 @@ class GateScanTab(BaseMeasurementTab):
         self.rad_sweep_doping.toggled.connect(self._update_derived_labels)
         self.cbo_derived_vds_mode.currentIndexChanged.connect(self._update_derived_vds_mode)
         self.cbo_source.currentIndexChanged.connect(self._update_connection_hint)
+        self.cbo_source.currentIndexChanged.connect(self._update_manual_buttons)
         self.cbo_x.currentIndexChanged.connect(self._update_plot_axis_label)
 
         for chk in (self.chk_raw_vtg_active, self.chk_raw_vbg_active, self.chk_raw_vds_active):
@@ -374,7 +375,11 @@ class GateScanTab(BaseMeasurementTab):
 
     def _update_manual_buttons(self):
         self._sync_sessions_from_manager()
-        self.btn_start.setEnabled(all(self.device_manager.is_connected(name) for name in self._required_devices()) and self.worker_thread is None)
+        self.btn_start.setEnabled(
+            all(self.device_manager.is_connected(name) for name in self._required_devices())
+            and not self._missing_mode_requirements()
+            and self.worker_thread is None
+        )
         self._update_connection_hint()
 
     def _required_devices(self) -> list[str]:
@@ -383,11 +388,33 @@ class GateScanTab(BaseMeasurementTab):
             required.append("g3")
         return required
 
+    def _missing_mode_requirements(self) -> list[str]:
+        required_modes: list[str] = []
+        if self.device_manager.is_connected("g1") and not self.device_manager.is_voltage_source_mode("g1"):
+            required_modes.append("G1 mode")
+        if self.device_manager.is_connected("g2") and not self.device_manager.is_voltage_source_mode("g2"):
+            required_modes.append("G2 mode")
+        if (
+            self.cbo_source.currentText() == "Keithley 2400"
+            and self.device_manager.is_connected("g3")
+            and not self.device_manager.is_voltage_source_mode("g3")
+        ):
+            required_modes.append("G3 mode")
+        return required_modes
+
     def _validate_required_sessions(self) -> bool:
         self._sync_sessions_from_manager()
         missing = [name for name in self._required_devices() if not self.device_manager.is_connected(name)]
         if missing:
             QtWidgets.QMessageBox.warning(self, "Missing Device", f"Connect required devices first: {', '.join(missing).upper()}")
+            return False
+        missing_modes = self._missing_mode_requirements()
+        if missing_modes:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Keithley Mode",
+                "Gate Scan requires 2-wire voltage source mode for: " + ", ".join(missing_modes) + ".",
+            )
             return False
         return True
 
@@ -480,6 +507,7 @@ class GateScanTab(BaseMeasurementTab):
     def _update_connection_hint(self):
         required = self._required_devices()
         missing_required = [name.upper() for name in required if not self.device_manager.is_connected(name)]
+        missing_modes = self._missing_mode_requirements()
         mode_text = "raw trajectory" if self.rad_mode_raw.isChecked() else "derived trajectory"
         if self.device_manager.is_busy():
             text = "Hardware is busy with another connection or disconnect operation from Instrument Setup."
@@ -489,6 +517,14 @@ class GateScanTab(BaseMeasurementTab):
             text = f"Required before start for {mode_text}: {', '.join(missing_required)}. Connect from Instrument Setup."
             self.lbl_connection_hint.setProperty("role", "warning-hint")
             self.btn_start.setToolTip(f"Connect required devices from Instrument Setup: {', '.join(missing_required)}")
+        elif missing_modes:
+            text = (
+                f"{mode_text.capitalize()} requires 2-wire voltage source mode for: "
+                + ", ".join(missing_modes)
+                + ". Update the Keithley mode in Instrument Setup and reconnect."
+            )
+            self.lbl_connection_hint.setProperty("role", "warning-hint")
+            self.btn_start.setToolTip("Set the required Keithley mode in Instrument Setup, then reconnect")
         else:
             text = f"Ready to run {mode_text} with dock-managed sessions."
             self.lbl_connection_hint.setProperty("role", "hint")

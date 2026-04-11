@@ -5,7 +5,7 @@ from math import nan
 
 BASE_PLOT_CHANNELS = ["Ids_DC", "Ids_X", "Ids_Y"]
 KEITHLEY_CHANNEL = "Ids_Keithley"
-COMPARE_CHANNELS = ["Ids_DC", "Ids_Y", "Ids_X", KEITHLEY_CHANNEL]
+COMPARE_CHANNELS = ["Ids_DC", KEITHLEY_CHANNEL, "Ids_Y", "Ids_X"]
 
 
 def has_keithley_channel(vds_source: str) -> bool:
