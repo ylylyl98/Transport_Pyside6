@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 
 
@@ -19,11 +20,12 @@ class Connections:
 @dataclass
 class SaveRoot:
     user: str = "User"
-    sample: str = "YZ315"
+    device_id: str = "YZ315"
     base: str = r"D:\\photocurrent\\data"
 
     def path(self) -> str:
-        out = os.path.join(self.base, self.user, self.sample)
+        safe_id = re.sub(r"[^-_.A-Za-z0-9]+", "_", self.device_id).strip("_") or "device"
+        out = os.path.join(self.base, self.user, safe_id)
         os.makedirs(out, exist_ok=True)
         return out
 
@@ -43,6 +45,7 @@ class DualGateParams:
     n_sample: int = 3
     plot_choice: str = "Ids_DC"
     ao_channel: int = 0
+    sweep_both_ways: bool = False
 
 
 @dataclass
@@ -106,6 +109,7 @@ class LineSweepParams:
     n_sample: int = 3
     plot_choice: str = "Ids_DC"
     plot_x_axis: str = "Auto"
+    sweep_both_ways: bool = False
 
 
 @dataclass

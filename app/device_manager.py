@@ -44,6 +44,41 @@ class DisconnectWorker(QtCore.QThread):
             self.failed.emit(str(ex))
 
 
+class EmergencyRampWorker(QtCore.QThread):
+    ramp_finished = QtCore.pyqtSignal(str)
+
+    def __init__(self, sessions: dict, daq_channels: list):
+        super().__init__()
+        self._sessions = dict(sessions)
+        self._daq_channels = list(daq_channels or [])
+
+    def run(self):
+        from app.constants import SAFE_RAMP_STEP_T, SAFE_RAMP_STEP_V
+        from app.utils import safe_ramp
+
+        for name in ("g1", "g2", "g3"):
+            session = self._sessions.get(name)
+            if session is not None:
+                try:
+                    safe_ramp(session.set_voltage, getattr(session, "voltage", None) or 0.0, 0.0, SAFE_RAMP_STEP_V, SAFE_RAMP_STEP_T)
+                except Exception:
+                    pass
+        daq = self._sessions.get("daq")
+        if daq is not None:
+            for chan in self._daq_channels:
+                try:
+                    safe_ramp(
+                        lambda v, c=chan: daq.set_voltage(c, v),
+                        daq.get_ao_value(chan),
+                        0.0,
+                        SAFE_RAMP_STEP_V,
+                        SAFE_RAMP_STEP_T,
+                    )
+                except Exception:
+                    pass
+        self.ramp_finished.emit("Emergency safe ramp complete: all outputs at 0 V.")
+
+
 class DeviceManager(QtCore.QObject):
     status_changed = QtCore.pyqtSignal(str, str, str)
     operation_changed = QtCore.pyqtSignal(bool, str)
@@ -58,6 +93,7 @@ class DeviceManager(QtCore.QObject):
         self._connected_modes: Dict[str, str] = {name: self._mode_for(name) for name in self.sessions}
         self._in_use: Set[str] = set()
         self._operation_thread: Optional[QtCore.QThread] = None
+        self._emergency_worker: Optional[QtCore.QThread] = None
 
     def _address_for(self, name: str) -> str:
         return {
@@ -209,11 +245,14 @@ class DeviceManager(QtCore.QObject):
         self._connect_mono(emitter=emitter)
 
     def _disconnect_all_in_thread(self, emitter):
+        from app.constants import SAFE_RAMP_STEP_T, SAFE_RAMP_STEP_V
+        from app.utils import safe_ramp
+
         for session_name in ("g1", "g2", "g3"):
             session = self.sessions.get(session_name)
             if session is not None:
                 try:
-                    session.ramp_voltage(0.0, 1.0)
+                    safe_ramp(session.set_voltage, getattr(session, "voltage", None) or 0.0, 0.0, SAFE_RAMP_STEP_V, SAFE_RAMP_STEP_T)
                 except Exception:
                     pass
         self._close_daq_outputs()
@@ -296,34 +335,41 @@ class DeviceManager(QtCore.QObject):
         self._connected_modes[name] = self._mode_for(name)
 
     def _close_daq_outputs(self):
+        from app.constants import SAFE_RAMP_STEP_T, SAFE_RAMP_STEP_V
+        from app.utils import safe_ramp
+
         daq = self.sessions.get("daq")
         if daq is None:
             return
         for ao in self.get_ao_items():
             try:
                 idx = int(ao[2:])
-                daq.ramp_voltage(idx, 0.0, 0.1)
+                safe_ramp(
+                    lambda v, i=idx: daq.set_voltage(i, v),
+                    daq.get_ao_value(idx),
+                    0.0,
+                    SAFE_RAMP_STEP_V,
+                    SAFE_RAMP_STEP_T,
+                )
             except Exception:
                 pass
 
     def emergency_stop(self, daq_channels: Optional[Iterable[int]] = None):
-        for name in ("g1", "g2", "g3"):
-            session = self.sessions.get(name)
-            if session is not None:
-                try:
-                    session.ramp_voltage(0.0, 1.0)
-                except Exception:
-                    pass
-        daq = self.sessions.get("daq")
-        if daq is not None:
-            for chan in daq_channels or []:
-                try:
-                    daq.ramp_voltage(chan, 0.0, 0.1)
-                except Exception:
-                    pass
+        if self._emergency_worker is not None and self._emergency_worker.isRunning():
+            return
+        worker = EmergencyRampWorker(self.sessions, list(daq_channels or []))
+        self._emergency_worker = worker
+        worker.ramp_finished.connect(lambda msg: self.operation_changed.emit(False, msg))
+        worker.finished.connect(self._clear_emergency_worker)
+        worker.finished.connect(worker.deleteLater)
+        self.operation_changed.emit(True, "Emergency stop: ramping all outputs to 0 V safely...")
+        worker.start()
+
+    def _clear_emergency_worker(self):
+        self._emergency_worker = None
 
     def shutdown(self):
-        self.emergency_stop()
+        self._disconnect_all_in_thread(self.status_changed)
         for name in ("g1", "g2", "g3", "daq", "mono"):
             self._close_device(name)
             self._emit_status(name, "idle", "")

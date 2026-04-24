@@ -68,11 +68,19 @@ class DualGateTab(BaseMeasurementTab):
         lbl_vds_start = QtWidgets.QLabel("Start (V):")
         lbl_vds_stop = QtWidgets.QLabel("Stop (V):")
         lbl_vds_step = QtWidgets.QLabel("Step (V):")
-        lbl_vds_ramp = QtWidgets.QLabel("Ramp (V/s):")
+        lbl_vds_ramp = QtWidgets.QLabel("Vds Step (V):")
         form_vds.addRow(lbl_vds_start, self.sp_vds_start)
         form_vds.addRow(lbl_vds_stop, self.sp_vds_stop)
         form_vds.addRow(lbl_vds_step, self.sp_vds_step)
         form_vds.addRow(lbl_vds_ramp, self.sp_vds_ramp)
+        self.chk_sweep_bidirectional = QtWidgets.QCheckBox("Sweep forward and backward")
+        self.chk_sweep_bidirectional.setChecked(False)
+        set_standard_input_height(self.chk_sweep_bidirectional)
+        apply_tooltip(
+            "When checked, sweeps from start to stop then back to start. Forward trace shown in blue, backward in red.",
+            self.chk_sweep_bidirectional,
+        )
+        form_vds.addRow("", self.chk_sweep_bidirectional)
         ctl_layout.addWidget(grp_vds)
 
         ctl_layout.addWidget(SectionHeader("Bias"))
@@ -93,7 +101,7 @@ class DualGateTab(BaseMeasurementTab):
         self.sp_vg_ramp.setValue(0.2)
         lbl_vtg = QtWidgets.QLabel("Vtg (V):")
         lbl_vbg = QtWidgets.QLabel("Vbg (V):")
-        lbl_vg_ramp = QtWidgets.QLabel("Gate Ramp (V/s):")
+        lbl_vg_ramp = QtWidgets.QLabel("Gate Step (V):")
         form_gate.addRow(lbl_vtg, self._make_set_row(self.sp_vtg, self.btn_set_vtg))
         form_gate.addRow(lbl_vbg, self._make_set_row(self.sp_vbg, self.btn_set_vbg))
         form_gate.addRow(lbl_vg_ramp, self.sp_vg_ramp)
@@ -160,16 +168,25 @@ class DualGateTab(BaseMeasurementTab):
             self.ed_base, self.cbo_source, self.cbo_y,
             self.sp_vds_start, self.sp_vds_stop, self.sp_vds_step, self.sp_vds_ramp,
             self.sp_vtg, self.sp_vbg, self.sp_vg_ramp, self.sp_delay, self.sp_nsamp,
+            self.chk_sweep_bidirectional,
         ]:
             set_standard_input_height(widget)
 
         apply_tooltip("First Vds value sent during the sweep.", lbl_vds_start, self.sp_vds_start)
         apply_tooltip("Last Vds value included in the sweep.", lbl_vds_stop, self.sp_vds_stop)
         apply_tooltip("Spacing between Vds points.", lbl_vds_step, self.sp_vds_step)
-        apply_tooltip("Ramp speed used when moving the Vds source.", lbl_vds_ramp, self.sp_vds_ramp)
+        apply_tooltip(
+            "Voltage step size for Vds moves between measurement points. Transition ramps to start and to 0 V always use the built-in safe rate.",
+            lbl_vds_ramp,
+            self.sp_vds_ramp,
+        )
         apply_tooltip("Top-gate bias held fixed during the run. The Set button applies it immediately.", lbl_vtg, self.sp_vtg, self.btn_set_vtg)
         apply_tooltip("Back-gate bias held fixed during the run. The Set button applies it immediately.", lbl_vbg, self.sp_vbg, self.btn_set_vbg)
-        apply_tooltip("Ramp speed used for manual gate changes before the run.", lbl_vg_ramp, self.sp_vg_ramp)
+        apply_tooltip(
+            "Voltage step size for gate moves to the set bias before the sweep. Transition ramps always use the built-in safe rate.",
+            lbl_vg_ramp,
+            self.sp_vg_ramp,
+        )
         apply_tooltip("Wait time after each Vds step before acquiring data.", lbl_delay, self.sp_delay)
         apply_tooltip("Number of DAQ reads averaged at each Vds point.", lbl_nsamp, self.sp_nsamp)
         apply_tooltip("Base filename for the CSV saved at the end of the run.", lbl_base, self.ed_base)
@@ -339,6 +356,7 @@ class DualGateTab(BaseMeasurementTab):
         self.p.delay = float(self.sp_delay.value())
         self.p.n_sample = int(self.sp_nsamp.value())
         self.p.plot_choice = self.cbo_y.currentText()
+        self.p.sweep_both_ways = self.chk_sweep_bidirectional.isChecked()
 
     def start_run(self):
         if self.worker_thread:
@@ -412,17 +430,20 @@ class DualGateTab(BaseMeasurementTab):
         self._redraw_plot()
 
     def _redraw_plot(self):
-        xs = [record["x"] for record in self._plot_records]
+        fwd = [r for r in self._plot_records if r.get("direction", "forward") == "forward"]
+        bwd = [r for r in self._plot_records if r.get("direction") == "backward"]
         if self.plot.current_plot_mode() == "4-Channel Compare":
             axes = self.plot.get_axes()
             channels = self.plot.compare_channels()
             for axis, channel in zip(axes, channels):
                 axis.clear()
-                ys = [plot_channel_value(record, channel) for record in self._plot_records]
-                if xs:
-                    axis.plot(xs, ys, marker="o")
-                    axis.relim()
-                    axis.autoscale_view()
+                if fwd:
+                    axis.plot([r["x"] for r in fwd], [plot_channel_value(r, channel) for r in fwd], "b-o", markersize=3, label="Forward")
+                if bwd:
+                    axis.plot([r["x"] for r in bwd], [plot_channel_value(r, channel) for r in bwd], "r-o", markersize=3, label="Backward")
+                    axis.legend(loc="best", fontsize=7)
+                axis.relim()
+                axis.autoscale_view()
                 axis.set_ylabel(f"{channel} (A)")
                 axis.grid(True)
             if axes:
@@ -431,11 +452,13 @@ class DualGateTab(BaseMeasurementTab):
             source = self.cbo_y.currentText()
             ax = self.plot.ax
             ax.clear()
-            ys = [plot_channel_value(record, source) for record in self._plot_records]
-            if xs:
-                ax.plot(xs, ys, marker="o")
-                ax.relim()
-                ax.autoscale_view()
+            if fwd:
+                ax.plot([r["x"] for r in fwd], [plot_channel_value(r, source) for r in fwd], "b-o", markersize=3, label="Forward")
+            if bwd:
+                ax.plot([r["x"] for r in bwd], [plot_channel_value(r, source) for r in bwd], "r-o", markersize=3, label="Backward")
+                ax.legend(loc="best", fontsize=7)
+            ax.relim()
+            ax.autoscale_view()
             ax.set_xlabel("Vds (V)")
             ax.set_ylabel(f"{source} (A)")
             ax.grid(True)

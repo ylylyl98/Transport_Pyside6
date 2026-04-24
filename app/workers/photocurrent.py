@@ -48,7 +48,8 @@ class PhotocurrentWorker(RunWorker):
                     tag_vds = "keth"
             g1_tag = "Tg" if self.g1 else "NoTg"
             g2_tag = "Bg" if self.g2 else "NoBg"
-            stem = f"{_sanitize_base(self.p.base_name)}_{g1_tag}_{g2_tag}_pc_{tag_vds}_Vtg{self.p.vtg_set:+.3f}V_Vbg{self.p.vbg_set:+.3f}V_{ts}"
+            device_id = _sanitize_base(self.save.device_id)
+            stem = f"{device_id}_{_sanitize_base(self.p.base_name)}_{g1_tag}_{g2_tag}_pc_{tag_vds}_Vtg{self.p.vtg_set:+.3f}V_Vbg{self.p.vbg_set:+.3f}V_{ts}"
             csv_path = os.path.join(self.save.path(), stem + ".csv")
             self.log.emit(f"Save -> {csv_path}")
 
@@ -56,7 +57,7 @@ class PhotocurrentWorker(RunWorker):
             with open(csv_path, "a", newline="", buffering=1, encoding="utf-8") as f:
                 w = csv.writer(f)
                 if need_header:
-                    w.writerow(["Wavelength", "Vg1", "Vg2", "Vds", "raw_X", "raw_Y", "raw_DC", "Ids_X", "Ids_Y", "Ids_DC", KEITHLEY_CHANNEL])
+                    w.writerow(["Wavelength", "Vtg", "Vbg", "Vbias", "raw_X", "raw_Y", "raw_DC", "Ids_X", "Ids_Y", "Ids_DC", KEITHLEY_CHANNEL])
                     w.writerow(["nm", "V", "V", "V", "A", "A", "A", "A", "A", "A", "A"])
                     self.log.emit("[csv] header written")
 

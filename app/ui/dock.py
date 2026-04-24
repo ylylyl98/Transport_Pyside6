@@ -80,9 +80,9 @@ class ConnDock(QtWidgets.QWidget):
         self.btn_scan = QtWidgets.QPushButton("Scan Hardware")
         self.btn_scan.clicked.connect(self._start_scan)
         self.lbl_scan_status = QtWidgets.QLabel("Click Scan to detect connected instruments.")
+        self.lbl_scan_status.setWordWrap(True)
         scan_row = QtWidgets.QHBoxLayout()
         scan_row.setContentsMargins(0, 0, 0, 0)
-        scan_row.addStretch()
         scan_row.addWidget(self.btn_scan)
         scan_wrap = QtWidgets.QWidget()
         scan_wrap.setLayout(scan_row)
@@ -117,7 +117,7 @@ class ConnDock(QtWidgets.QWidget):
 
         lbl_g1 = QtWidgets.QLabel("Gate1/Vtg:")
         lbl_g2 = QtWidgets.QLabel("Gate2/Vbg:")
-        lbl_g3 = QtWidgets.QLabel("G3 (Vds Source):")
+        lbl_g3 = QtWidgets.QLabel("G3/Vias:")
         lbl_daq = QtWidgets.QLabel("DAQ:")
         lbl_mono = QtWidgets.QLabel("Mono:")
         form_hw.addRow("", scan_wrap)
@@ -138,15 +138,15 @@ class ConnDock(QtWidgets.QWidget):
         form_save = QtWidgets.QFormLayout(grp_save)
         style_form_layout(form_save)
         self.ed_user = QtWidgets.QLineEdit(self.save_root.user)
-        self.ed_sample = QtWidgets.QLineEdit(self.save_root.sample)
+        self.ed_device_id = QtWidgets.QLineEdit(self.save_root.device_id)
         self.ed_base = QtWidgets.QLineEdit(self.save_root.base)
         lbl_user = QtWidgets.QLabel("User:")
-        lbl_sample = QtWidgets.QLabel("Sample:")
+        lbl_device_id = QtWidgets.QLabel("Device ID:")
         lbl_base = QtWidgets.QLabel("Base:")
         form_save.addRow(lbl_user, self.ed_user)
-        form_save.addRow(lbl_sample, self.ed_sample)
+        form_save.addRow(lbl_device_id, self.ed_device_id)
         form_save.addRow(lbl_base, self.ed_base)
-        self.exp_save = CollapsibleSection("Save Settings", grp_save, expanded=False)
+        self.exp_save = CollapsibleSection("Save Settings", grp_save, expanded=True)
         layout.addWidget(self.exp_save)
 
         grp_rate = QtWidgets.QGroupBox("Signal Chain")
@@ -161,8 +161,8 @@ class ConnDock(QtWidgets.QWidget):
         self.sp_lkn.setRange(self.LIA_MIN_V, 10.0)
         self.sp_lkn.setSingleStep(0.001)
         self.sp_lkn.setValue(0.1)
-        lbl_amp = QtWidgets.QLabel("Pre-amp Sensitivity (A):")
-        lbl_lkn = QtWidgets.QLabel("Lock-in Sensitivity (V):")
+        lbl_amp = QtWidgets.QLabel("Pre-amp (A):")
+        lbl_lkn = QtWidgets.QLabel("Lock-in (V):")
         form_rate.addRow(lbl_amp, self.sp_amp)
         form_rate.addRow(lbl_lkn, self.sp_lkn)
         layout.addWidget(grp_rate)
@@ -171,7 +171,8 @@ class ConnDock(QtWidgets.QWidget):
         lay_conn = QtWidgets.QVBoxLayout(grp_conn)
         lay_conn.setContentsMargins(10, 18, 10, 10)
         lay_conn.setSpacing(8)
-        row_conn = QtWidgets.QHBoxLayout()
+        row_conn = QtWidgets.QVBoxLayout()
+        row_conn.setSpacing(6)
         self.btn_connect_all = QtWidgets.QPushButton("Connect All")
         self.btn_disconnect_all = QtWidgets.QPushButton("Disconnect All")
         row_conn.addWidget(self.btn_connect_all)
@@ -191,7 +192,7 @@ class ConnDock(QtWidgets.QWidget):
         status_row.addWidget(self.lbl_connection_status, 1)
         status_row.addWidget(self.btn_connection_details)
         self._connection_detail = "Connect hardware from here. Tabs will reuse the same sessions."
-        self.dock_status_panel = StatusPanel(["g1", "g2", "g3", "daq", "mono"])
+        self.dock_status_panel = StatusPanel(["g1", "g2", "g3", "daq", "mono"], columns=1)
         lay_conn.addLayout(status_row)
         lay_conn.addWidget(self.dock_status_panel)
         layout.addWidget(grp_conn)
@@ -208,8 +209,14 @@ class ConnDock(QtWidgets.QWidget):
         layout.addWidget(self.btn_stop)
         layout.addStretch()
 
-        for widget in [self.cbo_g1, self.cbo_g2, self.cbo_g3, self.cbo_g1_mode, self.cbo_g2_mode, self.cbo_g3_mode, self.cbo_daq, self.cbo_mono, self.ed_user, self.ed_sample, self.ed_base]:
+        for widget in [self.cbo_g1, self.cbo_g2, self.cbo_g3, self.cbo_g1_mode, self.cbo_g2_mode, self.cbo_g3_mode, self.cbo_daq, self.cbo_mono, self.ed_user, self.ed_device_id, self.ed_base]:
             set_standard_input_height(widget, 26)
+            widget.setMinimumWidth(0)
+            widget.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
+
+        for widget in (self.sp_amp, self.sp_lkn):
+            widget.setMinimumWidth(0)
+            widget.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
 
         apply_tooltip("Scan VISA, DAQ, and serial resources and refresh the address lists.", self.btn_scan)
         apply_tooltip("Address used for the top-gate instrument session.", lbl_g1, self.cbo_g1)
@@ -219,7 +226,7 @@ class ConnDock(QtWidgets.QWidget):
         apply_tooltip("DAQ device used for current acquisition and any NI AO-based Vds output.", lbl_daq, self.cbo_daq)
         apply_tooltip("Monochromator / serial resource used by the Photocurrent tab.", lbl_mono, self.cbo_mono)
         apply_tooltip("Operator name added to the save path.", lbl_user, self.ed_user)
-        apply_tooltip("Sample identifier added to the save path.", lbl_sample, self.ed_sample)
+        apply_tooltip("Device identifier added to the save path.", lbl_device_id, self.ed_device_id)
         apply_tooltip("Root folder where all CSV output is stored.", lbl_base, self.ed_base)
         apply_tooltip("Pre-amp sensitivity shown on the amplifier front panel, entered in amps.", lbl_amp, self.sp_amp)
         apply_tooltip("Lock-in sensitivity shown on the lock-in front panel, entered in volts.", lbl_lkn, self.sp_lkn)
@@ -236,11 +243,11 @@ class ConnDock(QtWidgets.QWidget):
 
     def _make_address_mode_row(self, address_widget: QtWidgets.QWidget, mode_widget: QtWidgets.QWidget) -> QtWidgets.QWidget:
         wrap = QtWidgets.QWidget()
-        row = QtWidgets.QHBoxLayout(wrap)
+        row = QtWidgets.QVBoxLayout(wrap)
         row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(6)
-        row.addWidget(address_widget, 2)
-        row.addWidget(mode_widget, 1)
+        row.setSpacing(4)
+        row.addWidget(address_widget)
+        row.addWidget(mode_widget)
         return wrap
 
     def _set_combo_data(self, combo: QtWidgets.QComboBox, value: str):
@@ -258,7 +265,7 @@ class ConnDock(QtWidgets.QWidget):
             daq_dev=self.cbo_daq.current_address(),
             mono=self.cbo_mono.current_address(),
         )
-        s = SaveRoot(user=self.ed_user.text(), sample=self.ed_sample.text(), base=self.ed_base.text())
+        s = SaveRoot(user=self.ed_user.text(), device_id=self.ed_device_id.text(), base=self.ed_base.text())
         return c, s, True
 
     def save_settings(self):
@@ -272,7 +279,7 @@ class ConnDock(QtWidgets.QWidget):
         s.setValue("addr/daq", self.cbo_daq.current_address())
         s.setValue("addr/mono", self.cbo_mono.current_address())
         s.setValue("path/user", self.ed_user.text())
-        s.setValue("path/sample", self.ed_sample.text())
+        s.setValue("path/device_id", self.ed_device_id.text())
         s.setValue("path/base", self.ed_base.text())
         s.setValue("rates/amp", float(self.sp_amp.value()))
         s.setValue("rates/lkn", float(self.sp_lkn.value()))
@@ -288,7 +295,8 @@ class ConnDock(QtWidgets.QWidget):
         self.cbo_daq.setCurrentText(str(s.value("addr/daq", self.conns.daq_dev)))
         self.cbo_mono.setCurrentText(str(s.value("addr/mono", self.conns.mono)))
         self.ed_user.setText(str(s.value("path/user", self.save_root.user)))
-        self.ed_sample.setText(str(s.value("path/sample", self.save_root.sample)))
+        device_id = str(s.value("path/device_id", s.value("path/sample", "YZ315")))
+        self.ed_device_id.setText(device_id)
         self.ed_base.setText(str(s.value("path/base", self.save_root.base)))
         saved_amp = float(s.value("rates/amp", 1e7))
         saved_lkn = float(s.value("rates/lkn", 100.0))

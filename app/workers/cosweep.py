@@ -7,9 +7,10 @@ import time
 
 from PyQt6 import QtCore
 
+from app.constants import SAFE_RAMP_STEP_T, SAFE_RAMP_STEP_V
 from app.models import CoParams, Connections, SaveRoot
 from app.result_channels import KEITHLEY_CHANNEL
-from app.utils import _frange_inc, _safe, _sanitize_base
+from app.utils import _frange_inc, _safe, _sanitize_base, safe_ramp
 from app.workers.base import RunWorker
 
 
@@ -55,13 +56,14 @@ class CoSweepWorker(RunWorker):
             slow_seq = get_seq(slow_axis) if slow_axis != "None" else [0.0]
 
             ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            stem = f"{_sanitize_base(self.p.base_name)}_Megasweep_{fast_axis}_{slow_axis}_{ts}"
+            device_id = _sanitize_base(self.save.device_id)
+            stem = f"{device_id}_{_sanitize_base(self.p.base_name)}_Megasweep_{fast_axis}_{slow_axis}_{ts}"
             csv_path = os.path.join(self.save.path(), stem + ".csv")
             self.log.emit(f"Save -> {csv_path}")
 
             with open(csv_path, "a", newline="", buffering=1, encoding="utf-8") as f:
                 w = csv.writer(f)
-                w.writerow(["Vg1", "Vg2", "Vds", "raw_X", "raw_Y", "raw_DC", "Ids_X", "Ids_Y", "Ids_DC", KEITHLEY_CHANNEL, "Doping", "Efield"])
+                w.writerow(["Vtg", "Vbg", "Vbias", "raw_X", "raw_Y", "raw_DC", "Ids_X", "Ids_Y", "Ids_DC", KEITHLEY_CHANNEL, "Doping", "Efield"])
                 w.writerow(["V", "V", "V", "A", "A", "A", "A", "A", "A", "A", "V", "V"])
 
                 active_axes = [fast_axis, slow_axis]
@@ -124,6 +126,26 @@ class CoSweepWorker(RunWorker):
             self.finished.emit(csv_path)
         except Exception as ex:
             self.error.emit(str(ex))
+        finally:
+            try:
+                if self.g1 is not None:
+                    safe_ramp(self.g1.set_voltage, getattr(self.g1, "voltage", None) or 0.0, 0.0, SAFE_RAMP_STEP_V, SAFE_RAMP_STEP_T)
+                if self.g2 is not None:
+                    safe_ramp(self.g2.set_voltage, getattr(self.g2, "voltage", None) or 0.0, 0.0, SAFE_RAMP_STEP_V, SAFE_RAMP_STEP_T)
+                if self.p.vds_source.startswith("NI DAQ"):
+                    if self.daq is not None:
+                        safe_ramp(
+                            lambda v: self.daq.set_voltage(self.p.ao_channel, v),
+                            self.daq.get_ao_value(self.p.ao_channel),
+                            0.0,
+                            SAFE_RAMP_STEP_V,
+                            SAFE_RAMP_STEP_T,
+                        )
+                elif self.g3 is not None:
+                    safe_ramp(self.g3.set_voltage, getattr(self.g3, "voltage", None) or 0.0, 0.0, SAFE_RAMP_STEP_V, SAFE_RAMP_STEP_T)
+            except Exception:
+                pass
+            self.log.emit("Outputs returned to 0 V; sessions kept open.")
 
     def set_volt(self, name, val):
         if name == "Vtg":

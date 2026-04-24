@@ -6,6 +6,7 @@ from app.constants import V_LIMIT
 from app.device_manager import DeviceManager
 from app.models import Connections, LineSweepParams, SaveRoot
 from app.result_channels import compare_channel_options, plot_channel_options, plot_channel_value
+from app.utils import _sanitize_base
 from app.ui.helpers import apply_tooltip, configure_volt_spinbox, set_standard_input_height, style_form_layout
 from app.ui.tabs.base_tab import BaseMeasurementTab
 from app.ui.widgets.collapsible_section import CollapsibleSection
@@ -15,6 +16,7 @@ from app.workers.line_sweep import LineSweepWorker
 
 class GateScanTab(BaseMeasurementTab):
     def __init__(self, save: SaveRoot, conns: Connections, device_manager: DeviceManager, get_global_rates_callable=None, get_ao_items_callable=None):
+        self._filename_is_auto: bool = True
         self.save = save
         self.conns = conns
         self.device_manager = device_manager
@@ -26,9 +28,11 @@ class GateScanTab(BaseMeasurementTab):
         self.worker = None
         self._plot_records = []
         super().__init__("START SWEEP", "Sweep Axis", "Ids (A)", ["g1", "g2", "g3", "daq"])
-        self.control_scroll.setMinimumWidth(430)
+        self.control_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.control_scroll.setMinimumWidth(560)
         self.control_scroll.setMaximumWidth(620)
-        self.main_splitter.setSizes([470, 820])
+        self.control_widget.setMinimumWidth(0)
+        self.main_splitter.setSizes([500, 850])
         self._wire()
         self.btn_start.setToolTip("Connect instruments first")
         self.device_manager.status_changed.connect(self._on_device_status_changed)
@@ -36,26 +40,34 @@ class GateScanTab(BaseMeasurementTab):
         self._sync_sessions_from_manager()
         self._update_manual_buttons()
         self._update_mode_ui()
+        self._maybe_update_auto_filename()
 
     def _build_control_panel(self, ctl_layout: QtWidgets.QVBoxLayout):
         ctl_layout.addWidget(SectionHeader("Mode"))
         grp_mode = QtWidgets.QGroupBox("Gate Scan Mode")
-        lay_mode = QtWidgets.QHBoxLayout(grp_mode)
+        lay_mode = QtWidgets.QVBoxLayout(grp_mode)
         lay_mode.setContentsMargins(10, 18, 10, 10)
-        lay_mode.setSpacing(16)
+        lay_mode.setSpacing(8)
         self.rad_mode_raw = QtWidgets.QRadioButton("Raw Trajectory")
         self.rad_mode_derived = QtWidgets.QRadioButton("Derived (Doping/Efield)")
         self.rad_mode_raw.setChecked(True)
         lay_mode.addWidget(self.rad_mode_raw)
         lay_mode.addWidget(self.rad_mode_derived)
-        lay_mode.addStretch(1)
+        self.chk_sweep_bidirectional = QtWidgets.QCheckBox("Forward + backward sweep")
+        self.chk_sweep_bidirectional.setChecked(False)
+        lay_mode.addWidget(self.chk_sweep_bidirectional)
+        apply_tooltip(
+            "When checked, sweeps from start to stop then back to start. Forward trace shown in blue, backward in red.",
+            self.chk_sweep_bidirectional,
+        )
+        set_standard_input_height(self.chk_sweep_bidirectional)
         ctl_layout.addWidget(grp_mode)
 
         ctl_layout.addWidget(SectionHeader("Trajectory"))
-        self.mode_stack = QtWidgets.QStackedWidget()
-        self.mode_stack.addWidget(self._build_raw_mode_widget())
-        self.mode_stack.addWidget(self._build_derived_mode_widget())
-        ctl_layout.addWidget(self.mode_stack)
+        self.raw_trajectory_widget = self._build_raw_mode_widget()
+        self.derived_trajectory_widget = self._build_derived_mode_widget()
+        ctl_layout.addWidget(self.raw_trajectory_widget)
+        ctl_layout.addWidget(self.derived_trajectory_widget)
 
         ctl_layout.addWidget(SectionHeader("Acquisition"))
         grp_acq = QtWidgets.QGroupBox("Timing")
@@ -66,14 +78,6 @@ class GateScanTab(BaseMeasurementTab):
         self.sp_n_points.setValue(self.p.n_points)
         self.lbl_eta = QtWidgets.QLabel()
         self.lbl_eta.setProperty("role", "hint")
-        self.sp_vg_ramp = QtWidgets.QDoubleSpinBox()
-        self.sp_vg_ramp.setDecimals(3)
-        self.sp_vg_ramp.setRange(1e-3, 5.0)
-        self.sp_vg_ramp.setValue(self.p.vg_ramp)
-        self.sp_vds_ramp = QtWidgets.QDoubleSpinBox()
-        self.sp_vds_ramp.setDecimals(3)
-        self.sp_vds_ramp.setRange(1e-3, 5.0)
-        self.sp_vds_ramp.setValue(self.p.vds_ramp)
         self.sp_delay = QtWidgets.QDoubleSpinBox()
         self.sp_delay.setDecimals(3)
         self.sp_delay.setRange(0.0, 30.0)
@@ -83,14 +87,10 @@ class GateScanTab(BaseMeasurementTab):
         self.sp_nsamp.setValue(self.p.n_sample)
         lbl_points = QtWidgets.QLabel("N points:")
         lbl_eta = QtWidgets.QLabel("Estimated time:")
-        lbl_vg_ramp = QtWidgets.QLabel("Gate Ramp (V/s):")
-        lbl_vds_ramp = QtWidgets.QLabel("Vds Ramp (V/s):")
         lbl_delay = QtWidgets.QLabel("Delay (s):")
         lbl_avg = QtWidgets.QLabel("Averages:")
         form_acq.addRow(lbl_points, self.sp_n_points)
         form_acq.addRow(lbl_eta, self.lbl_eta)
-        form_acq.addRow(lbl_vg_ramp, self.sp_vg_ramp)
-        form_acq.addRow(lbl_vds_ramp, self.sp_vds_ramp)
         form_acq.addRow(lbl_delay, self.sp_delay)
         form_acq.addRow(lbl_avg, self.sp_nsamp)
         ctl_layout.addWidget(grp_acq)
@@ -102,28 +102,47 @@ class GateScanTab(BaseMeasurementTab):
         self.cbo_source = QtWidgets.QComboBox()
         self.cbo_source.addItems(["Keithley 2400"])
         self.cbo_x = QtWidgets.QComboBox()
-        self.cbo_x.addItems(["Auto", "Step Index", "Vtg", "Vbg", "Vds", "Doping", "Efield"])
+        self.cbo_x.addItems(["Auto", "Step Index", "Vtg", "Vbg", "Vbias", "Doping", "Efield"])
         self.cbo_y = QtWidgets.QComboBox()
         self.cbo_y.addItems(["Ids_DC", "Ids_X", "Ids_Y"])
         self.ed_base = QtWidgets.QLineEdit(self.p.base_name)
-        lbl_source = QtWidgets.QLabel("Vds Source:")
+        lbl_source = QtWidgets.QLabel("Vbias Source:")
         lbl_x = QtWidgets.QLabel("Plot X Axis:")
         lbl_y = QtWidgets.QLabel("Plot Y Axis:")
         lbl_base = QtWidgets.QLabel("Filename:")
         form_output.addRow(lbl_source, self.cbo_source)
         form_output.addRow(lbl_x, self.cbo_x)
         form_output.addRow(lbl_y, self.cbo_y)
-        form_output.addRow(lbl_base, self.ed_base)
+        self.btn_reset_filename = QtWidgets.QPushButton("↺")
+        self.btn_reset_filename.setFixedWidth(30)
+        self.btn_reset_filename.setToolTip(
+            "Regenerate filename from current sweep parameters. Re-enables auto-update if you have manually edited the filename."
+        )
+        fn_wrap = QtWidgets.QWidget()
+        fn_row = QtWidgets.QHBoxLayout(fn_wrap)
+        fn_row.setContentsMargins(0, 0, 0, 0)
+        fn_row.setSpacing(4)
+        fn_row.addWidget(self.ed_base, 1)
+        fn_row.addWidget(self.btn_reset_filename)
+        form_output.addRow(lbl_base, fn_wrap)
+        self.lbl_filename_preview = QtWidgets.QLabel()
+        self.lbl_filename_preview.setWordWrap(True)
+        self.lbl_filename_preview.setProperty("role", "hint")
+        form_output.addRow(QtWidgets.QLabel("Preview:"), self.lbl_filename_preview)
         self.exp_output = CollapsibleSection("Output and Plot Options", grp_output, expanded=False)
         ctl_layout.addWidget(self.exp_output)
 
         self.lbl_connection_hint = QtWidgets.QLabel()
         self.lbl_connection_hint.setWordWrap(True)
+        self.lbl_connection_hint.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Ignored,
+            QtWidgets.QSizePolicy.Policy.Preferred,
+        )
         self.lbl_connection_hint.setProperty("role", "hint")
         ctl_layout.addWidget(self.lbl_connection_hint)
 
         ctl_layout.addWidget(SectionHeader("Status"))
-        self.status_panel = StatusPanel(["g1", "g2", "g3", "daq"])
+        self.status_panel = StatusPanel(["g1", "g2", "g3", "daq"], columns=1)
         self.lbl_g1 = self.status_panel.label("g1")
         self.lbl_g2 = self.status_panel.label("g2")
         self.lbl_g3 = self.status_panel.label("g3")
@@ -131,19 +150,19 @@ class GateScanTab(BaseMeasurementTab):
         ctl_layout.addWidget(self.status_panel)
 
         widgets = [
-            self.sp_n_points, self.sp_vg_ramp, self.sp_vds_ramp, self.sp_delay, self.sp_nsamp,
-            self.cbo_source, self.cbo_x, self.cbo_y, self.ed_base,
+            self.sp_n_points, self.sp_delay, self.sp_nsamp,
+            self.cbo_source, self.cbo_x, self.cbo_y, self.ed_base, self.btn_reset_filename,
             self.sp_raw_vtg_start, self.sp_raw_vtg_stop, self.sp_raw_vbg_start, self.sp_raw_vbg_stop,
             self.sp_raw_vds_start, self.sp_raw_vds_stop, self.sp_ratio, self.sp_derived_start,
-            self.sp_derived_stop, self.sp_derived_fixed, self.cbo_derived_vds_mode,
+            self.sp_derived_stop, self.sp_derived_fixed,
             self.sp_derived_vds_fixed, self.sp_derived_vds_start, self.sp_derived_vds_stop,
+            self.btn_derived_vbias_fixed, self.btn_derived_vbias_swept,
         ]
         for widget in widgets:
             set_standard_input_height(widget)
 
         for spinbox in (
-            self.sp_raw_vtg_start, self.sp_raw_vtg_stop, self.sp_raw_vbg_start, self.sp_raw_vbg_stop,
-            self.sp_raw_vds_start, self.sp_raw_vds_stop, self.sp_derived_start, self.sp_derived_stop,
+            self.sp_derived_start, self.sp_derived_stop,
             self.sp_derived_fixed, self.sp_derived_vds_fixed, self.sp_derived_vds_start, self.sp_derived_vds_stop,
         ):
             spinbox.setMinimumWidth(88)
@@ -151,52 +170,78 @@ class GateScanTab(BaseMeasurementTab):
         apply_tooltip("Switch between direct voltage trajectories and derived Doping/Efield trajectories.", self.rad_mode_raw, self.rad_mode_derived)
         apply_tooltip("Number of measurement points in the full line scan.", lbl_points, self.sp_n_points)
         apply_tooltip("Rough estimate based on ramp distances and per-point delay.", lbl_eta, self.lbl_eta)
-        apply_tooltip("Ramp speed used for gate motion between line-scan points.", lbl_vg_ramp, self.sp_vg_ramp)
-        apply_tooltip("Ramp speed used for Vds updates when Vds changes along the line.", lbl_vds_ramp, self.sp_vds_ramp)
         apply_tooltip("Wait time after each point is set before data acquisition.", lbl_delay, self.sp_delay)
         apply_tooltip("Number of DAQ reads averaged at each line-scan point.", lbl_avg, self.sp_nsamp)
-        apply_tooltip("Choose Keithley G3 or an NI AO channel as the Vds source.", lbl_source, self.cbo_source)
+        apply_tooltip("Choose Keithley G3 or an NI AO channel as the Vbias source.", lbl_source, self.cbo_source)
         apply_tooltip("Auto uses the active sweep quantity for the live plot x-axis.", lbl_x, self.cbo_x)
         apply_tooltip("Select which current channel is shown live.", lbl_y, self.cbo_y)
         apply_tooltip("Base filename for the saved line-scan CSV.", lbl_base, self.ed_base)
+        apply_tooltip("Final CSV name preview without the automatic date/time suffix.", self.lbl_filename_preview)
 
     def _build_raw_mode_widget(self) -> QtWidgets.QWidget:
         grp = QtWidgets.QGroupBox("Raw Voltage Trajectory")
         lay = QtWidgets.QGridLayout(grp)
         lay.setContentsMargins(8, 16, 8, 8)
-        lay.setHorizontalSpacing(4)
-        lay.setVerticalSpacing(8)
-        lay.addWidget(QtWidgets.QLabel("Start"), 0, 1)
-        lay.addWidget(QtWidgets.QLabel("Stop"), 0, 2)
-        lay.addWidget(QtWidgets.QLabel("Active"), 0, 3)
+        lay.setHorizontalSpacing(3)
+        lay.setVerticalSpacing(4)
+        for col, text in ((1, "Start"), (2, "Stop"), (3, "Mode"), (4, "Step")):
+            header = QtWidgets.QLabel(text)
+            header.setFixedHeight(24)
+            header.setAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter)
+            lay.addWidget(header, 0, col)
 
-        self.sp_raw_vtg_start, self.sp_raw_vtg_stop, self.chk_raw_vtg_active, self.lbl_raw_vtg_mode = self._add_raw_row(lay, 1, "Vtg (V):", 0.0, 1.0, True)
-        self.sp_raw_vbg_start, self.sp_raw_vbg_stop, self.chk_raw_vbg_active, self.lbl_raw_vbg_mode = self._add_raw_row(lay, 2, "Vbg (V):", 0.0, 0.0, False)
-        self.sp_raw_vds_start, self.sp_raw_vds_stop, self.chk_raw_vds_active, self.lbl_raw_vds_mode = self._add_raw_row(lay, 3, "Vds (V):", 0.0, 0.0, False)
+        self.sp_raw_vtg_start, self.sp_raw_vtg_stop, self.chk_raw_vtg_active, self.lbl_raw_vtg_mode = self._add_raw_row(lay, 1, "Vtg:", 0.0, 1.0, True)
+        self.sp_raw_vbg_start, self.sp_raw_vbg_stop, self.chk_raw_vbg_active, self.lbl_raw_vbg_mode = self._add_raw_row(lay, 2, "Vbg:", 0.0, 0.0, False)
+        self.sp_raw_vds_start, self.sp_raw_vds_stop, self.chk_raw_vds_active, self.lbl_raw_vds_mode = self._add_raw_row(lay, 3, "Vbias:", 0.0, 0.0, False)
         lay.setColumnStretch(1, 1)
         lay.setColumnStretch(2, 1)
-        lay.setColumnMinimumWidth(0, 64)
-        lay.setColumnMinimumWidth(3, 92)
+        lay.setColumnMinimumWidth(0, 50)
+        lay.setColumnMinimumWidth(3, 200)
+        lay.setColumnMinimumWidth(4, 66)
         return grp
 
     def _build_derived_mode_widget(self) -> QtWidgets.QWidget:
         grp = QtWidgets.QGroupBox("Derived Trajectory")
-        form = QtWidgets.QFormLayout(grp)
-        style_form_layout(form)
+        outer = QtWidgets.QVBoxLayout(grp)
+        outer.setContentsMargins(8, 16, 8, 8)
+        outer.setSpacing(8)
+
+        grp_ratio = QtWidgets.QGroupBox("Coupling Ratio")
+        form_ratio = QtWidgets.QFormLayout(grp_ratio)
+        style_form_layout(form_ratio)
         self.sp_ratio = QtWidgets.QDoubleSpinBox()
         self.sp_ratio.setDecimals(4)
         self.sp_ratio.setRange(-1e4, 1e4)
         self.sp_ratio.setValue(self.p.derived_ratio)
+        self.lbl_ratio_formula = QtWidgets.QLabel("Doping = Vtg + r*Vbg\nE-field = Vtg - r*Vbg")
+        self.lbl_ratio_formula.setWordWrap(True)
+        self.lbl_ratio_formula.setProperty("role", "hint")
+        form_ratio.addRow("Back-gate ratio r:", self.sp_ratio)
+        form_ratio.addRow("", self.lbl_ratio_formula)
+        outer.addWidget(grp_ratio)
 
+        grp_sweep = QtWidgets.QGroupBox("Sweep Definition")
+        form_sweep = QtWidgets.QFormLayout(grp_sweep)
+        style_form_layout(form_sweep)
         sweep_wrap = QtWidgets.QWidget()
         sweep_row = QtWidgets.QHBoxLayout(sweep_wrap)
         sweep_row.setContentsMargins(0, 0, 0, 0)
-        sweep_row.setSpacing(12)
-        self.rad_sweep_doping = QtWidgets.QRadioButton("Doping")
-        self.rad_sweep_efield = QtWidgets.QRadioButton("Efield")
+        sweep_row.setSpacing(0)
+        self.rad_sweep_doping = QtWidgets.QToolButton()
+        self.rad_sweep_efield = QtWidgets.QToolButton()
+        for btn, text in ((self.rad_sweep_doping, "Doping"), (self.rad_sweep_efield, "E-field")):
+            btn.setText(text)
+            btn.setProperty("role", "segmented-compact")
+            btn.setCheckable(True)
+            btn.setAutoRaise(False)
+            btn.setMinimumWidth(82)
+            btn.setFixedHeight(26)
+            sweep_row.addWidget(btn)
+        self._derived_axis_group = QtWidgets.QButtonGroup(sweep_wrap)
+        self._derived_axis_group.setExclusive(True)
+        self._derived_axis_group.addButton(self.rad_sweep_doping)
+        self._derived_axis_group.addButton(self.rad_sweep_efield)
         self.rad_sweep_doping.setChecked(True)
-        sweep_row.addWidget(self.rad_sweep_doping)
-        sweep_row.addWidget(self.rad_sweep_efield)
         sweep_row.addStretch(1)
 
         self.sp_derived_start = QtWidgets.QDoubleSpinBox()
@@ -209,34 +254,62 @@ class GateScanTab(BaseMeasurementTab):
         ):
             configure_volt_spinbox(spinbox, value)
 
-        self.lbl_fixed_name = QtWidgets.QLabel("Efield (fixed):")
+        self.lbl_derived_start = QtWidgets.QLabel("Doping start:")
+        self.lbl_derived_stop = QtWidgets.QLabel("Doping stop:")
+        self.lbl_fixed_name = QtWidgets.QLabel("E-field held:")
         self.lbl_derived_range = QtWidgets.QLabel()
         self.lbl_derived_range.setWordWrap(True)
         self.lbl_derived_range.setProperty("role", "hint")
+        form_sweep.addRow("Sweep axis:", sweep_wrap)
+        form_sweep.addRow(self.lbl_derived_start, self.sp_derived_start)
+        form_sweep.addRow(self.lbl_derived_stop, self.sp_derived_stop)
+        form_sweep.addRow(self.lbl_fixed_name, self.sp_derived_fixed)
+        outer.addWidget(grp_sweep)
 
-        self.cbo_derived_vds_mode = QtWidgets.QComboBox()
-        self.cbo_derived_vds_mode.addItems(["Fixed", "Swept"])
+        grp_vbias = QtWidgets.QGroupBox("Vbias")
+        form_vbias = QtWidgets.QFormLayout(grp_vbias)
+        style_form_layout(form_vbias)
+        vbias_mode_wrap = QtWidgets.QWidget()
+        vbias_mode_row = QtWidgets.QHBoxLayout(vbias_mode_wrap)
+        vbias_mode_row.setContentsMargins(0, 0, 0, 0)
+        vbias_mode_row.setSpacing(0)
+        self.btn_derived_vbias_fixed = QtWidgets.QToolButton()
+        self.btn_derived_vbias_swept = QtWidgets.QToolButton()
+        for btn, text in ((self.btn_derived_vbias_fixed, "Fixed"), (self.btn_derived_vbias_swept, "Sweep")):
+            btn.setText(text)
+            btn.setProperty("role", "segmented-compact")
+            btn.setCheckable(True)
+            btn.setAutoRaise(False)
+            btn.setMinimumWidth(68)
+            btn.setFixedHeight(26)
+            vbias_mode_row.addWidget(btn)
+        self._derived_vbias_group = QtWidgets.QButtonGroup(vbias_mode_wrap)
+        self._derived_vbias_group.setExclusive(True)
+        self._derived_vbias_group.addButton(self.btn_derived_vbias_fixed)
+        self._derived_vbias_group.addButton(self.btn_derived_vbias_swept)
+        self.btn_derived_vbias_fixed.setChecked(True)
         self.derived_vds_stack = QtWidgets.QStackedWidget()
         self.derived_vds_stack.addWidget(self._build_derived_vds_fixed_widget())
         self.derived_vds_stack.addWidget(self._build_derived_vds_swept_widget())
+        form_vbias.addRow("Mode:", vbias_mode_wrap)
+        form_vbias.addRow("Value:", self.derived_vds_stack)
+        outer.addWidget(grp_vbias)
 
-        form.addRow("Ratio (r):", self.sp_ratio)
-        form.addRow("Sweep:", sweep_wrap)
-        form.addRow("Start:", self.sp_derived_start)
-        form.addRow("Stop:", self.sp_derived_stop)
-        form.addRow(self.lbl_fixed_name, self.sp_derived_fixed)
-        form.addRow("Vds:", self.cbo_derived_vds_mode)
-        form.addRow("Vds Values:", self.derived_vds_stack)
-        form.addRow("Computed Range:", self.lbl_derived_range)
-        apply_tooltip("Back-gate weighting used in the Doping and Efield definitions.", self.sp_ratio)
+        grp_preview = QtWidgets.QGroupBox("Computed Physical Voltages")
+        preview_layout = QtWidgets.QVBoxLayout(grp_preview)
+        preview_layout.setContentsMargins(10, 16, 10, 10)
+        preview_layout.addWidget(self.lbl_derived_range)
+        outer.addWidget(grp_preview)
+
+        apply_tooltip("Back-gate weighting used in the Doping and E-field definitions.", self.sp_ratio)
         apply_tooltip("Choose which derived quantity is swept along the line.", self.rad_sweep_doping, self.rad_sweep_efield)
-        apply_tooltip("Start of the selected Doping/Efield sweep.", self.sp_derived_start)
-        apply_tooltip("Stop of the selected Doping/Efield sweep.", self.sp_derived_stop)
+        apply_tooltip("Start of the selected Doping/E-field sweep.", self.sp_derived_start)
+        apply_tooltip("Stop of the selected Doping/E-field sweep.", self.sp_derived_stop)
         apply_tooltip("Fixed value of the non-swept derived quantity.", self.sp_derived_fixed)
-        apply_tooltip("Keep Vds fixed or sweep it together with the gate trajectory.", self.cbo_derived_vds_mode)
-        apply_tooltip("Single Vds bias used for the whole derived scan.", self.sp_derived_vds_fixed)
-        apply_tooltip("Start Vds for a simultaneous Vds sweep in derived mode.", self.sp_derived_vds_start)
-        apply_tooltip("Stop Vds for a simultaneous Vds sweep in derived mode.", self.sp_derived_vds_stop)
+        apply_tooltip("Keep Vbias fixed or sweep it together with the gate trajectory.", self.btn_derived_vbias_fixed, self.btn_derived_vbias_swept)
+        apply_tooltip("Single Vbias used for the whole derived scan.", self.sp_derived_vds_fixed)
+        apply_tooltip("Start Vbias for a simultaneous Vbias sweep in derived mode.", self.sp_derived_vds_start)
+        apply_tooltip("Stop Vbias for a simultaneous Vbias sweep in derived mode.", self.sp_derived_vds_stop)
         return grp
 
     def _build_derived_vds_fixed_widget(self) -> QtWidgets.QWidget:
@@ -258,6 +331,8 @@ class GateScanTab(BaseMeasurementTab):
         configure_volt_spinbox(self.sp_derived_vds_start, 0.0)
         configure_volt_spinbox(self.sp_derived_vds_stop, 0.5)
         row.addWidget(QtWidgets.QLabel("Start"))
+        self.sp_derived_vds_start.setFixedWidth(84)
+        self.sp_derived_vds_stop.setFixedWidth(84)
         row.addWidget(self.sp_derived_vds_start, 1)
         row.addWidget(QtWidgets.QLabel("Stop"))
         row.addWidget(self.sp_derived_vds_stop, 1)
@@ -268,32 +343,58 @@ class GateScanTab(BaseMeasurementTab):
         stop_box = QtWidgets.QDoubleSpinBox()
         configure_volt_spinbox(start_box, start)
         configure_volt_spinbox(stop_box, stop)
-        check = QtWidgets.QCheckBox("Sweep")
-        check.setChecked(active)
+        start_box.setFixedWidth(76)
+        stop_box.setFixedWidth(76)
+        mode_wrap = QtWidgets.QWidget()
+        mode_row = QtWidgets.QHBoxLayout(mode_wrap)
+        mode_row.setContentsMargins(0, 0, 0, 0)
+        mode_row.setSpacing(0)
+        fixed_btn = QtWidgets.QToolButton()
+        sweep_btn = QtWidgets.QToolButton()
+        for btn, text in ((fixed_btn, "Fix"), (sweep_btn, "Sweep")):
+            btn.setText(text)
+            btn.setProperty("role", "segmented-compact")
+            btn.setCheckable(True)
+            btn.setAutoRaise(False)
+            btn.setFixedWidth(98)
+            btn.setFixedHeight(24)
+            mode_row.addWidget(btn)
+        group = QtWidgets.QButtonGroup(mode_wrap)
+        group.setExclusive(True)
+        group.addButton(fixed_btn)
+        group.addButton(sweep_btn)
+        mode_wrap._button_group = group
+        fixed_btn.setChecked(not active)
+        sweep_btn.setChecked(active)
         mode_label = QtWidgets.QLabel()
+        mode_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter)
+        mode_label.setFixedHeight(24)
+        mode_label.setFixedWidth(70)
         mode_label.setProperty("role", "hint")
-        state_wrap = QtWidgets.QWidget()
-        state_row = QtWidgets.QHBoxLayout(state_wrap)
-        state_row.setContentsMargins(0, 0, 0, 0)
-        state_row.setSpacing(4)
-        state_row.addWidget(check, 0, QtCore.Qt.AlignmentFlag.AlignCenter)
-        state_row.addStretch(1)
-        layout.addWidget(QtWidgets.QLabel(label), row, 0)
+        name_label = QtWidgets.QLabel(label)
+        name_label.setFixedHeight(24)
+        layout.addWidget(name_label, row, 0)
         layout.addWidget(start_box, row, 1)
         layout.addWidget(stop_box, row, 2)
-        layout.addWidget(state_wrap, row, 3)
-        layout.addWidget(mode_label, row + 1, 1, 1, 3)
+        layout.addWidget(mode_wrap, row, 3)
+        layout.addWidget(mode_label, row, 4)
         apply_tooltip("Value used when this variable is fixed, or the start of its trajectory when Active is checked.", start_box)
         apply_tooltip("End value used when this variable is active in the trajectory.", stop_box)
-        apply_tooltip("Enable this variable to move with the shared line-scan index.", check)
-        return start_box, stop_box, check, mode_label
+        apply_tooltip(
+            "Fixed holds this voltage at Start. Sweep moves from Start to Stop across the selected N points.",
+            fixed_btn,
+            sweep_btn,
+            mode_wrap,
+        )
+        return start_box, stop_box, sweep_btn, mode_label
 
     def _wire(self):
         self.btn_start.clicked.connect(self.start_run)
         self.btn_stop.clicked.connect(self.stop_run)
         self.rad_mode_raw.toggled.connect(self._update_mode_ui)
         self.rad_sweep_doping.toggled.connect(self._update_derived_labels)
-        self.cbo_derived_vds_mode.currentIndexChanged.connect(self._update_derived_vds_mode)
+        self.btn_derived_vbias_fixed.toggled.connect(self._update_derived_vds_mode)
+        self.btn_derived_vbias_swept.toggled.connect(self._update_derived_vds_mode)
         self.cbo_source.currentIndexChanged.connect(self._update_connection_hint)
         self.cbo_source.currentIndexChanged.connect(self._update_manual_buttons)
         self.cbo_x.currentIndexChanged.connect(self._update_plot_axis_label)
@@ -309,24 +410,109 @@ class GateScanTab(BaseMeasurementTab):
             self.sp_raw_vds_start, self.sp_raw_vds_stop, self.sp_ratio, self.sp_derived_start,
             self.sp_derived_stop, self.sp_derived_fixed, self.sp_derived_vds_fixed,
             self.sp_derived_vds_start, self.sp_derived_vds_stop, self.sp_n_points,
-            self.sp_vg_ramp, self.sp_vds_ramp, self.sp_delay, self.sp_nsamp,
+            self.sp_delay, self.sp_nsamp,
         ):
             if hasattr(widget, "valueChanged"):
                 widget.valueChanged.connect(self._update_eta)
             if hasattr(widget, "valueChanged"):
                 widget.valueChanged.connect(self._update_derived_range_summary)
 
+        for widget in (
+            self.sp_raw_vtg_start, self.sp_raw_vtg_stop,
+            self.sp_raw_vbg_start, self.sp_raw_vbg_stop,
+            self.sp_raw_vds_start, self.sp_raw_vds_stop,
+            self.sp_n_points,
+        ):
+            widget.valueChanged.connect(self._update_raw_row_states)
+
         self.rad_mode_raw.toggled.connect(self._update_connection_hint)
         self.rad_mode_derived.toggled.connect(self._update_connection_hint)
         self.rad_sweep_doping.toggled.connect(self._update_derived_range_summary)
         self.rad_sweep_efield.toggled.connect(self._update_derived_range_summary)
-        self.cbo_derived_vds_mode.currentIndexChanged.connect(self._update_eta)
-        self.cbo_derived_vds_mode.currentIndexChanged.connect(self._update_connection_hint)
+        self.btn_derived_vbias_fixed.toggled.connect(self._update_eta)
+        self.btn_derived_vbias_swept.toggled.connect(self._update_eta)
+        self.btn_derived_vbias_fixed.toggled.connect(self._update_connection_hint)
+        self.btn_derived_vbias_swept.toggled.connect(self._update_connection_hint)
         self.cbo_source.currentIndexChanged.connect(self._update_plot_axis_choices)
         self.cbo_y.currentTextChanged.connect(self.set_plot_axis_source)
         self._update_plot_axis_choices()
         self.plot.y_axis_changed.connect(self.set_plot_axis_source)
         self.plot.plot_mode_changed.connect(lambda _mode: self._redraw_plot())
+        self.chk_sweep_bidirectional.toggled.connect(self._update_eta)
+        self.ed_base.textEdited.connect(self._on_filename_manually_edited)
+        self.ed_base.textChanged.connect(self._update_filename_preview)
+        self.btn_reset_filename.clicked.connect(self._on_reset_filename)
+
+        auto_fn_widgets = [
+            self.sp_raw_vtg_start, self.sp_raw_vtg_stop,
+            self.sp_raw_vbg_start, self.sp_raw_vbg_stop,
+            self.sp_raw_vds_start, self.sp_raw_vds_stop,
+            self.sp_derived_start, self.sp_derived_stop, self.sp_derived_fixed,
+            self.sp_derived_vds_fixed, self.sp_derived_vds_start, self.sp_derived_vds_stop,
+        ]
+        for widget in auto_fn_widgets:
+            widget.valueChanged.connect(self._maybe_update_auto_filename)
+        for chk in (self.chk_raw_vtg_active, self.chk_raw_vbg_active, self.chk_raw_vds_active):
+            chk.toggled.connect(self._maybe_update_auto_filename)
+        self.rad_mode_raw.toggled.connect(self._maybe_update_auto_filename)
+        self.rad_sweep_doping.toggled.connect(self._maybe_update_auto_filename)
+        self.rad_sweep_efield.toggled.connect(self._maybe_update_auto_filename)
+        self.btn_derived_vbias_fixed.toggled.connect(self._maybe_update_auto_filename)
+        self.btn_derived_vbias_swept.toggled.connect(self._maybe_update_auto_filename)
+
+    def _build_auto_filename(self) -> str:
+        if self.rad_mode_raw.isChecked():
+            parts = ["gate_scan"]
+            if self.chk_raw_vtg_active.isChecked():
+                parts.append(f"Vtg_{self.sp_raw_vtg_start.value():g}to{self.sp_raw_vtg_stop.value():g}V")
+            else:
+                parts.append(f"fixedVtg_{self.sp_raw_vtg_start.value():g}V")
+            if self.chk_raw_vbg_active.isChecked():
+                parts.append(f"Vbg_{self.sp_raw_vbg_start.value():g}to{self.sp_raw_vbg_stop.value():g}V")
+            else:
+                parts.append(f"fixedVbg_{self.sp_raw_vbg_start.value():g}V")
+            if self.chk_raw_vds_active.isChecked():
+                parts.append(f"Vbias_{self.sp_raw_vds_start.value():g}to{self.sp_raw_vds_stop.value():g}V")
+            else:
+                parts.append(f"fixedVbias_{self.sp_raw_vds_start.value():g}V")
+            return "_".join(parts)
+        axis = "Doping" if self.rad_sweep_doping.isChecked() else "Efield"
+        fixed_axis = "Efield" if self.rad_sweep_doping.isChecked() else "Doping"
+        start = self.sp_derived_start.value()
+        stop = self.sp_derived_stop.value()
+        fixed = self.sp_derived_fixed.value()
+        parts = [
+            "gate_scan",
+            f"{axis}_{start:g}to{stop:g}V",
+            f"fixed{fixed_axis}_{fixed:g}V",
+        ]
+        if self._derived_vbias_is_swept():
+            parts.append(f"Vbias_{self.sp_derived_vds_start.value():g}to{self.sp_derived_vds_stop.value():g}V")
+        else:
+            parts.append(f"fixedVbias_{self.sp_derived_vds_fixed.value():g}V")
+        return "_".join(parts)
+
+    def _maybe_update_auto_filename(self, *_args) -> None:
+        if not self._filename_is_auto:
+            return
+        self.ed_base.blockSignals(True)
+        self.ed_base.setText(self._build_auto_filename())
+        self.ed_base.blockSignals(False)
+        self._update_filename_preview()
+
+    def _on_filename_manually_edited(self, *_args) -> None:
+        self._filename_is_auto = False
+        self._update_filename_preview()
+
+    def _on_reset_filename(self) -> None:
+        self._filename_is_auto = True
+        self._maybe_update_auto_filename()
+
+    def _update_filename_preview(self, *_args) -> None:
+        device_id = _sanitize_base(self.save.device_id) or "device"
+        base_name = _sanitize_base(self.ed_base.text()) or "gate_scan"
+        stem = f"{device_id}_{base_name}"
+        self.lbl_filename_preview.setText(f"{stem}.csv")
 
     def _sync_sessions_from_manager(self):
         self.s_g1 = self.device_manager.get_session("g1")
@@ -420,7 +606,8 @@ class GateScanTab(BaseMeasurementTab):
 
     def _update_mode_ui(self):
         raw_mode = self.rad_mode_raw.isChecked()
-        self.mode_stack.setCurrentIndex(0 if raw_mode else 1)
+        self.raw_trajectory_widget.setVisible(raw_mode)
+        self.derived_trajectory_widget.setVisible(not raw_mode)
         self._update_raw_row_states()
         self._update_derived_vds_mode()
         self._update_derived_labels()
@@ -436,21 +623,70 @@ class GateScanTab(BaseMeasurementTab):
         ):
             active = check.isChecked()
             stop_box.setEnabled(active and self.rad_mode_raw.isChecked())
-            check.setText("Sweep" if active else "Fixed")
-            label.setText("Active trajectory range" if active else "Row is fixed at the Start value")
+            label.setText(self._raw_step_summary(start_box, stop_box, active))
+
+    def _points_step(self, start: float, stop: float, active: bool) -> float:
+        if not active:
+            return 0.0
+        count = max(1, self.sp_n_points.value())
+        if count <= 1:
+            return 0.0
+        return abs(stop - start) / float(count - 1)
+
+    def _raw_step_summary(self, start_box: QtWidgets.QDoubleSpinBox, stop_box: QtWidgets.QDoubleSpinBox, active: bool) -> str:
+        if not active:
+            return "Fixed"
+        step = self._points_step(start_box.value(), stop_box.value(), True)
+        return f"{step:g} V/pt"
+
+    def _derived_gate_steps(self) -> tuple[float, float, float]:
+        count = max(1, self.sp_n_points.value())
+        if count <= 1:
+            return 0.0, 0.0, 0.0
+        try:
+            ratio = self.sp_ratio.value()
+            start = self.sp_derived_start.value()
+            stop = self.sp_derived_stop.value()
+            fixed = self.sp_derived_fixed.value()
+            if self.rad_sweep_doping.isChecked():
+                endpoints = [(start, fixed), (stop, fixed)]
+            else:
+                endpoints = [(fixed, start), (fixed, stop)]
+            vtg_values = [(d + e) / 2.0 for d, e in endpoints]
+            vbg_values = [(d - e) / (2.0 * ratio) for d, e in endpoints]
+            vds_step = 0.0
+            if self._derived_vbias_is_swept():
+                vds_step = abs(self.sp_derived_vds_stop.value() - self.sp_derived_vds_start.value()) / float(count - 1)
+            return (
+                abs(vtg_values[1] - vtg_values[0]) / float(count - 1),
+                abs(vbg_values[1] - vbg_values[0]) / float(count - 1),
+                vds_step,
+            )
+        except Exception:
+            return 0.0, 0.0, 0.0
 
     def _update_derived_labels(self):
         if self.rad_sweep_doping.isChecked():
-            self.lbl_fixed_name.setText("Efield (fixed):")
+            self.lbl_derived_start.setText("Doping start:")
+            self.lbl_derived_stop.setText("Doping stop:")
+            self.lbl_fixed_name.setText("E-field held:")
         else:
-            self.lbl_fixed_name.setText("Doping (fixed):")
+            self.lbl_derived_start.setText("E-field start:")
+            self.lbl_derived_stop.setText("E-field stop:")
+            self.lbl_fixed_name.setText("Doping held:")
         self._update_derived_range_summary()
         self._update_plot_axis_label()
 
     def _update_derived_vds_mode(self):
-        self.derived_vds_stack.setCurrentIndex(self.cbo_derived_vds_mode.currentIndex())
+        self.derived_vds_stack.setCurrentIndex(1 if self._derived_vbias_is_swept() else 0)
         self._update_eta()
         self._update_derived_range_summary()
+
+    def _derived_vbias_is_swept(self) -> bool:
+        return self.btn_derived_vbias_swept.isChecked()
+
+    def _derived_vbias_mode_text(self) -> str:
+        return "Swept" if self._derived_vbias_is_swept() else "Fixed"
 
     def _update_derived_range_summary(self):
         if self.rad_mode_raw.isChecked():
@@ -472,11 +708,18 @@ class GateScanTab(BaseMeasurementTab):
             vbg_values = [(d - e) / (2.0 * ratio) for d, e in zip(doping_values, efield_values)]
             vtg_min, vtg_max = min(vtg_values), max(vtg_values)
             vbg_min, vbg_max = min(vbg_values), max(vbg_values)
-            text = f"Vtg: {vtg_min:.3f} to {vtg_max:.3f} V   |   Vbg: {vbg_min:.3f} to {vbg_max:.3f} V"
+            text = f"Vtg: {vtg_min:.3f} to {vtg_max:.3f} V\nVbg: {vbg_min:.3f} to {vbg_max:.3f} V"
             warn = any(abs(v) > V_LIMIT for v in (*vtg_values, *vbg_values))
             self.lbl_derived_range.setProperty("role", "warning-hint" if warn else "hint")
             if warn:
                 text += f"   exceeds {V_LIMIT:.1f} V limit"
+            vtg_step, vbg_step, vds_step = self._derived_gate_steps()
+            text += f"\nSteps: Vtg {vtg_step:g} V/point, Vbg {vbg_step:g} V/point"
+            if self._derived_vbias_is_swept():
+                text += f", Vbias {vds_step:g} V/point"
+                text += f"\nVbias: {self.sp_derived_vds_start.value():.3f} to {self.sp_derived_vds_stop.value():.3f} V"
+            else:
+                text += f"\nVbias: fixed {self.sp_derived_vds_fixed.value():.3f} V"
             self.lbl_derived_range.setText(text)
         except Exception as ex:
             self.lbl_derived_range.setProperty("role", "warning-hint")
@@ -493,7 +736,7 @@ class GateScanTab(BaseMeasurementTab):
             if self.rad_mode_derived.isChecked():
                 label = "Doping" if self.rad_sweep_doping.isChecked() else "Efield"
             elif self.chk_raw_vds_active.isChecked():
-                label = "Vds"
+                label = "Vbias"
             elif self.chk_raw_vtg_active.isChecked():
                 label = "Vtg"
             elif self.chk_raw_vbg_active.isChecked():
@@ -534,17 +777,28 @@ class GateScanTab(BaseMeasurementTab):
         self.lbl_connection_hint.style().polish(self.lbl_connection_hint)
 
     def _estimate_seconds(self) -> float:
+        import math
+        from app.constants import SAFE_RAMP_STEP_T, SAFE_RAMP_STEP_V
+
+        def ramp_time(v: float) -> float:
+            if abs(v) < 1e-9:
+                return 0.0
+            return math.ceil(abs(v) / SAFE_RAMP_STEP_V) * SAFE_RAMP_STEP_T
+
         count = max(1, self.sp_n_points.value())
         if self.rad_mode_raw.isChecked():
+            start_vtg = self.sp_raw_vtg_start.value() if self.chk_raw_vtg_active.isChecked() else 0.0
+            stop_vtg = self.sp_raw_vtg_stop.value() if self.chk_raw_vtg_active.isChecked() else 0.0
+            start_vbg = self.sp_raw_vbg_start.value() if self.chk_raw_vbg_active.isChecked() else 0.0
+            stop_vbg = self.sp_raw_vbg_stop.value() if self.chk_raw_vbg_active.isChecked() else 0.0
+            start_vds = self.sp_raw_vds_start.value() if self.chk_raw_vds_active.isChecked() else 0.0
+            stop_vds = self.sp_raw_vds_stop.value() if self.chk_raw_vds_active.isChecked() else 0.0
             vg_distance = 0.0
             if self.chk_raw_vtg_active.isChecked():
-                vg_distance += abs(self.sp_raw_vtg_stop.value() - self.sp_raw_vtg_start.value())
+                vg_distance += abs(stop_vtg - start_vtg)
             if self.chk_raw_vbg_active.isChecked():
-                vg_distance += abs(self.sp_raw_vbg_stop.value() - self.sp_raw_vbg_start.value())
-            if self.chk_raw_vds_active.isChecked():
-                vds_distance = abs(self.sp_raw_vds_stop.value() - self.sp_raw_vds_start.value())
-            else:
-                vds_distance = 0.0
+                vg_distance += abs(stop_vbg - start_vbg)
+            vds_distance = abs(stop_vds - start_vds) if self.chk_raw_vds_active.isChecked() else 0.0
         else:
             try:
                 ratio = self.sp_ratio.value()
@@ -557,17 +811,26 @@ class GateScanTab(BaseMeasurementTab):
                     endpoints = [(fixed, start), (fixed, stop)]
                 vtg_values = [(d + e) / 2.0 for d, e in endpoints]
                 vbg_values = [(d - e) / (2.0 * ratio) for d, e in endpoints]
+                start_vtg, stop_vtg = vtg_values[0], vtg_values[1]
+                start_vbg, stop_vbg = vbg_values[0], vbg_values[1]
                 vg_distance = abs(vtg_values[1] - vtg_values[0]) + abs(vbg_values[1] - vbg_values[0])
             except Exception:
+                start_vtg = stop_vtg = start_vbg = stop_vbg = 0.0
                 vg_distance = 0.0
-            if self.cbo_derived_vds_mode.currentText() == "Swept":
-                vds_distance = abs(self.sp_derived_vds_stop.value() - self.sp_derived_vds_start.value())
+            if self._derived_vbias_is_swept():
+                start_vds = self.sp_derived_vds_start.value()
+                stop_vds = self.sp_derived_vds_stop.value()
+                vds_distance = abs(stop_vds - start_vds)
             else:
+                start_vds = stop_vds = 0.0
                 vds_distance = 0.0
-        gate_time = vg_distance / max(self.sp_vg_ramp.value(), 1e-6)
-        vds_time = vds_distance / max(self.sp_vds_ramp.value(), 1e-6)
+        ramp_to_start = ramp_time(start_vtg) + ramp_time(start_vbg) + ramp_time(start_vds)
+        ramp_to_zero = ramp_time(stop_vtg) + ramp_time(stop_vbg) + ramp_time(stop_vds)
         sample_time = count * max(0.0, self.sp_delay.value())
-        return gate_time + vds_time + sample_time
+        sweep_time = sample_time
+        if self.chk_sweep_bidirectional.isChecked():
+            sweep_time *= 2.0
+        return ramp_to_start + sweep_time + ramp_to_zero
 
     def _update_eta(self):
         seconds = self._estimate_seconds()
@@ -602,17 +865,24 @@ class GateScanTab(BaseMeasurementTab):
         self.p.derived_start = self.sp_derived_start.value()
         self.p.derived_stop = self.sp_derived_stop.value()
         self.p.derived_fixed = self.sp_derived_fixed.value()
-        self.p.derived_vds_mode = self.cbo_derived_vds_mode.currentText()
+        self.p.derived_vds_mode = self._derived_vbias_mode_text()
         self.p.derived_vds_fixed = self.sp_derived_vds_fixed.value()
         self.p.derived_vds_start = self.sp_derived_vds_start.value()
         self.p.derived_vds_stop = self.sp_derived_vds_stop.value()
         self.p.n_points = self.sp_n_points.value()
-        self.p.vg_ramp = self.sp_vg_ramp.value()
-        self.p.vds_ramp = self.sp_vds_ramp.value()
+        if self.p.mode == "Raw":
+            vtg_step = self._points_step(self.p.raw_vtg_start, self.p.raw_vtg_stop, self.p.raw_vtg_active)
+            vbg_step = self._points_step(self.p.raw_vbg_start, self.p.raw_vbg_stop, self.p.raw_vbg_active)
+            vds_step = self._points_step(self.p.raw_vds_start, self.p.raw_vds_stop, self.p.raw_vds_active)
+        else:
+            vtg_step, vbg_step, vds_step = self._derived_gate_steps()
+        self.p.vg_ramp = max(vtg_step, vbg_step, 1e-6)
+        self.p.vds_ramp = max(vds_step, 1e-6)
         self.p.delay = self.sp_delay.value()
         self.p.n_sample = self.sp_nsamp.value()
         self.p.plot_choice = self.cbo_y.currentText()
         self.p.plot_x_axis = self.cbo_x.currentText()
+        self.p.sweep_both_ways = self.chk_sweep_bidirectional.isChecked()
 
     def _validate_params(self) -> bool:
         if self.rad_mode_raw.isChecked() and not any((self.chk_raw_vtg_active.isChecked(), self.chk_raw_vbg_active.isChecked(), self.chk_raw_vds_active.isChecked())):
@@ -702,17 +972,20 @@ class GateScanTab(BaseMeasurementTab):
         self._redraw_plot()
 
     def _redraw_plot(self):
-        xs = [record["x"] for record in self._plot_records]
+        fwd = [r for r in self._plot_records if r.get("direction", "forward") == "forward"]
+        bwd = [r for r in self._plot_records if r.get("direction") == "backward"]
         if self.plot.current_plot_mode() == "4-Channel Compare":
             axes = self.plot.get_axes()
             channels = self.plot.compare_channels()
             for axis, channel in zip(axes, channels):
                 axis.clear()
-                ys = [plot_channel_value(record, channel) for record in self._plot_records]
-                if xs:
-                    axis.plot(xs, ys, "o-")
-                    axis.relim()
-                    axis.autoscale_view()
+                if fwd:
+                    axis.plot([r["x"] for r in fwd], [plot_channel_value(r, channel) for r in fwd], "b-o", markersize=3, label="Forward")
+                if bwd:
+                    axis.plot([r["x"] for r in bwd], [plot_channel_value(r, channel) for r in bwd], "r-o", markersize=3, label="Backward")
+                    axis.legend(loc="best", fontsize=7)
+                axis.relim()
+                axis.autoscale_view()
                 axis.set_ylabel(f"{channel} (A)")
                 axis.grid(True)
             if axes:
@@ -721,7 +994,7 @@ class GateScanTab(BaseMeasurementTab):
                     if self.rad_mode_derived.isChecked():
                         label = "Doping" if self.rad_sweep_doping.isChecked() else "Efield"
                     elif self.chk_raw_vds_active.isChecked():
-                        label = "Vds"
+                        label = "Vbias"
                     elif self.chk_raw_vtg_active.isChecked():
                         label = "Vtg"
                     elif self.chk_raw_vbg_active.isChecked():
@@ -734,11 +1007,13 @@ class GateScanTab(BaseMeasurementTab):
             source = self.cbo_y.currentText()
             ax = self.plot.ax
             ax.clear()
-            ys = [plot_channel_value(record, source) for record in self._plot_records]
-            if xs:
-                ax.plot(xs, ys, "o-")
-                ax.relim()
-                ax.autoscale_view()
+            if fwd:
+                ax.plot([r["x"] for r in fwd], [plot_channel_value(r, source) for r in fwd], "b-o", markersize=3, label="Forward")
+            if bwd:
+                ax.plot([r["x"] for r in bwd], [plot_channel_value(r, source) for r in bwd], "r-o", markersize=3, label="Backward")
+                ax.legend(loc="best", fontsize=7)
+            ax.relim()
+            ax.autoscale_view()
             self._update_plot_axis_label()
             ax.grid(True)
             self.plot.canvas.draw_idle()

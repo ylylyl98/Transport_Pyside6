@@ -100,7 +100,7 @@ class StatusPanel(QtWidgets.QGroupBox):
         "mono": "Mono",
     }
 
-    def __init__(self, names: List[str], parent=None):
+    def __init__(self, names: List[str], parent=None, columns: int | None = None):
         super().__init__("Device Status", parent)
         self._items: dict[str, DeviceStatusItem] = {}
         layout = QtWidgets.QGridLayout(self)
@@ -108,7 +108,7 @@ class StatusPanel(QtWidgets.QGroupBox):
         layout.setHorizontalSpacing(8)
         layout.setVerticalSpacing(6)
 
-        columns = 2 if len(names) > 3 else len(names)
+        columns = columns if columns is not None else (2 if len(names) > 3 else len(names))
         columns = max(1, columns)
 
         for idx, name in enumerate(names):

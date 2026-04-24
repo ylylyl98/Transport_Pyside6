@@ -234,6 +234,64 @@ QToolButton[role="status-detail"]:hover {
     background: #EFF6FF;
     border-radius: 5px;
 }
+QToolButton[role="segmented"] {
+    background: #EEF2F7;
+    color: #111827;
+    border: 1px solid #CBD5E1;
+    border-radius: 0px;
+    padding: 3px 10px;
+    font-weight: 500;
+}
+QToolButton[role="segmented"]:first {
+    border-top-left-radius: 6px;
+    border-bottom-left-radius: 6px;
+}
+QToolButton[role="segmented"]:last {
+    border-top-right-radius: 6px;
+    border-bottom-right-radius: 6px;
+}
+QToolButton[role="segmented"]:hover:!checked {
+    background: #E2E8F0;
+    border-color: #94A3B8;
+}
+QToolButton[role="segmented"]:checked {
+    background: #1D4ED8;
+    color: #FFFFFF;
+    border-color: #1D4ED8;
+    font-weight: 700;
+}
+QToolButton[role="segmented"]:checked:hover {
+    background: #2563EB;
+    border-color: #2563EB;
+}
+QToolButton[role="segmented"]:disabled {
+    background: #F3F4F6;
+    color: #9CA3AF;
+    border-color: #E5E7EB;
+}
+QToolButton[role="segmented-compact"] {
+    background: #EEF2F7;
+    color: #111827;
+    border: 1px solid #CBD5E1;
+    border-radius: 0px;
+    padding: 2px 4px;
+    font-size: 9pt;
+    font-weight: 500;
+}
+QToolButton[role="segmented-compact"]:hover:!checked {
+    background: #E2E8F0;
+    border-color: #94A3B8;
+}
+QToolButton[role="segmented-compact"]:checked {
+    background: #1D4ED8;
+    color: #FFFFFF;
+    border-color: #1D4ED8;
+    font-weight: 700;
+}
+QToolButton[role="segmented-compact"]:checked:hover {
+    background: #2563EB;
+    border-color: #2563EB;
+}
 QProgressBar {
     border: 1px solid #DADADA;
     border-radius: 5px;

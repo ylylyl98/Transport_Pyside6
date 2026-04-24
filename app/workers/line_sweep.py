@@ -7,10 +7,10 @@ import time
 
 from PyQt6 import QtCore
 
-from app.constants import V_LIMIT
+from app.constants import SAFE_RAMP_STEP_T, SAFE_RAMP_STEP_V, V_LIMIT
 from app.models import Connections, LineSweepParams, SaveRoot
 from app.result_channels import KEITHLEY_CHANNEL
-from app.utils import _safe, _sanitize_base
+from app.utils import _safe, _sanitize_base, safe_ramp
 from app.workers.base import RunWorker
 
 
@@ -51,88 +51,136 @@ class LineSweepWorker(RunWorker):
             self._validate_trajectory_limits(trajectory)
 
             ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            stem = f"{_sanitize_base(self.p.base_name)}_line_sweep_{self.p.mode.lower()}_{ts}"
+            device_id = _sanitize_base(self.save.device_id)
+            stem = f"{device_id}_{_sanitize_base(self.p.base_name)}_{ts}"
             csv_path = os.path.join(self.save.path(), stem + ".csv")
             self.log.emit(f"Save -> {csv_path}")
+
+            first = trajectory[0]
+            self.status.emit("Ramping to sweep start position...")
+            safe_ramp(
+                self.g1.set_voltage,
+                getattr(self.g1, "voltage", None) or 0.0,
+                first["vtg"],
+                SAFE_RAMP_STEP_V,
+                SAFE_RAMP_STEP_T,
+                self.check_abort_pause,
+            )
+            safe_ramp(
+                self.g2.set_voltage,
+                getattr(self.g2, "voltage", None) or 0.0,
+                first["vbg"],
+                SAFE_RAMP_STEP_V,
+                SAFE_RAMP_STEP_T,
+                self.check_abort_pause,
+            )
+            self._safe_ramp_vds(first["vds"])
+            self.check_abort_pause()
+
+            forward_traj = trajectory
+            backward_traj = list(reversed(trajectory)) if self.p.sweep_both_ways else []
+            grand_total = len(forward_traj) + len(backward_traj)
 
             self.clear_plot.emit()
             self.status.emit("Preparing trajectory...")
 
             with open(csv_path, "a", newline="", buffering=1, encoding="utf-8") as f:
                 w = csv.writer(f)
-                w.writerow(["Index", "Vg1", "Vg2", "Vds", "raw_X", "raw_Y", "raw_DC", "Ids_X", "Ids_Y", "Ids_DC", KEITHLEY_CHANNEL, "Doping", "Efield"])
-                w.writerow(["#", "V", "V", "V", "A", "A", "A", "A", "A", "A", "A", "V", "V"])
-
-                total = len(trajectory)
-                for idx, point in enumerate(trajectory, start=1):
+                w.writerow(["Index", "Vtg", "Vbg", "Vbias", "raw_X", "raw_Y", "raw_DC", "Ids_X", "Ids_Y", "Ids_DC", KEITHLEY_CHANNEL, "Doping", "Efield", "Direction"])
+                w.writerow(["#", "V", "V", "V", "A", "A", "A", "A", "A", "A", "A", "V", "V", ""])
+                self._run_trajectory_pass(f, w, forward_traj, "forward", 0, grand_total)
+                if backward_traj:
                     self.check_abort_pause()
-                    self.status.emit(f"Point {idx}/{total}")
-                    self._apply_point(point)
-                    time.sleep(max(0.0, self.p.delay))
-
-                    raw_x = raw_y = raw_dc = 0.0
-                    for _ in range(int(self.p.n_sample)):
-                        self.check_abort_pause()
-                        self.daq.acquire()
-                        raw_x += self.daq.get_ai_value(0)
-                        raw_y += self.daq.get_ai_value(1)
-                        raw_dc += self.daq.get_ai_value(2)
-                    raw_x /= self.p.n_sample
-                    raw_y /= self.p.n_sample
-                    raw_dc /= self.p.n_sample
-
-                    ids_x = raw_x / (self.amp_rate * self.lkn_rate)
-                    ids_y = raw_y / (self.amp_rate * self.lkn_rate)
-                    ids_dc = raw_dc / self.amp_rate
-                    ids_keithley = self._read_keithley_current()
-
-                    w.writerow([
-                        idx - 1,
-                        point["vtg"],
-                        point["vbg"],
-                        point["vds"],
-                        raw_x,
-                        raw_y,
-                        raw_dc,
-                        ids_x,
-                        ids_y,
-                        ids_dc,
-                        ids_keithley,
-                        point["doping"],
-                        point["efield"],
-                    ])
-                    try:
-                        f.flush()
-                        os.fsync(f.fileno())
-                    except Exception:
-                        pass
-
-                    y_val = self._plot_value(ids_dc, ids_x, ids_y, ids_keithley)
-                    x_plot = self._plot_x(point, idx - 1)
-                    self.point.emit(x_plot, y_val)
-                    self.point_data.emit({
-                        "x": x_plot,
-                        "Ids_DC": ids_dc,
-                        "Ids_X": ids_x,
-                        "Ids_Y": ids_y,
-                        KEITHLEY_CHANNEL: ids_keithley,
-                    })
-                    self.progress.emit(idx / total)
+                    self._run_trajectory_pass(f, w, backward_traj, "backward", len(forward_traj), grand_total)
 
             self.finished.emit(csv_path)
         except Exception as ex:
             self.error.emit(str(ex))
         finally:
             try:
-                _safe(self.g1, "ramp_voltage", 0.0, self.p.vg_ramp)
-                _safe(self.g2, "ramp_voltage", 0.0, self.p.vg_ramp)
-                if self.p.vds_source == "Keithley 2400" and self.g3 is not None:
-                    _safe(self.g3, "ramp_voltage", 0.0, self.p.vds_ramp)
-                else:
-                    _safe(self.daq, "ramp_voltage", self.p.ao_channel, 0.0, self.p.vds_ramp)
+                safe_ramp(self.g1.set_voltage, getattr(self.g1, "voltage", None) or 0.0, 0.0, SAFE_RAMP_STEP_V, SAFE_RAMP_STEP_T)
+                safe_ramp(self.g2.set_voltage, getattr(self.g2, "voltage", None) or 0.0, 0.0, SAFE_RAMP_STEP_V, SAFE_RAMP_STEP_T)
+                self._safe_ramp_vds(0.0)
             except Exception:
                 pass
             self.log.emit("Outputs returned to 0 V; sessions kept open.")
+
+    def _safe_ramp_vds(self, target: float) -> None:
+        if self.p.vds_source == "Keithley 2400":
+            if self.g3 is not None:
+                safe_ramp(
+                    self.g3.set_voltage,
+                    getattr(self.g3, "voltage", None) or 0.0,
+                    target,
+                    SAFE_RAMP_STEP_V,
+                    SAFE_RAMP_STEP_T,
+                )
+        else:
+            safe_ramp(
+                lambda v: self.daq.set_voltage(self.p.ao_channel, v),
+                self.daq.get_ao_value(self.p.ao_channel),
+                target,
+                SAFE_RAMP_STEP_V,
+                SAFE_RAMP_STEP_T,
+            )
+
+    def _run_trajectory_pass(self, f, w, trajectory: list, direction: str, idx_offset: int, grand_total: int) -> None:
+        for idx, point in enumerate(trajectory, start=1):
+            self.check_abort_pause()
+            self.status.emit(f"Point {idx_offset + idx}/{grand_total}  [{direction}]")
+            self._apply_point(point)
+            time.sleep(max(0.0, self.p.delay))
+
+            raw_x = raw_y = raw_dc = 0.0
+            for _ in range(int(self.p.n_sample)):
+                self.check_abort_pause()
+                self.daq.acquire()
+                raw_x += self.daq.get_ai_value(0)
+                raw_y += self.daq.get_ai_value(1)
+                raw_dc += self.daq.get_ai_value(2)
+            raw_x /= self.p.n_sample
+            raw_y /= self.p.n_sample
+            raw_dc /= self.p.n_sample
+
+            ids_x = raw_x / (self.amp_rate * self.lkn_rate)
+            ids_y = raw_y / (self.amp_rate * self.lkn_rate)
+            ids_dc = raw_dc / self.amp_rate
+            ids_keithley = self._read_keithley_current()
+
+            w.writerow([
+                idx_offset + idx - 1,
+                point["vtg"],
+                point["vbg"],
+                point["vds"],
+                raw_x,
+                raw_y,
+                raw_dc,
+                ids_x,
+                ids_y,
+                ids_dc,
+                ids_keithley,
+                point["doping"],
+                point["efield"],
+                direction,
+            ])
+            try:
+                f.flush()
+                os.fsync(f.fileno())
+            except Exception:
+                pass
+
+            y_val = self._plot_value(ids_dc, ids_x, ids_y, ids_keithley)
+            x_plot = self._plot_x(point, idx_offset + idx - 1)
+            self.point.emit(x_plot, y_val)
+            self.point_data.emit({
+                "x": x_plot,
+                "Ids_DC": ids_dc,
+                "Ids_X": ids_x,
+                "Ids_Y": ids_y,
+                KEITHLEY_CHANNEL: ids_keithley,
+                "direction": direction,
+            })
+            self.progress.emit((idx_offset + idx) / grand_total)
 
     def _validate_sessions(self):
         if self.g1 is None:
@@ -235,7 +283,7 @@ class LineSweepWorker(RunWorker):
             return point["vtg"]
         if axis == "Vbg":
             return point["vbg"]
-        if axis == "Vds":
+        if axis in {"Vds", "Vbias"}:
             return point["vds"]
         if axis == "Doping":
             return point["doping"]

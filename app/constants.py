@@ -1,4 +1,6 @@
 V_LIMIT = 20.0
+SAFE_RAMP_STEP_V: float = 0.05
+SAFE_RAMP_STEP_T: float = 0.05
 SETTINGS_ORG = "MyLab"
 SETTINGS_APP = "TransportUI"
 

@@ -5,6 +5,7 @@ import sys
 from PyQt6 import QtWidgets
 from PyQt6.QtCore import Qt
 
+from app.app_identity import APP_NAME, configure_qapp, set_windows_app_id
 from app.device_manager import DeviceManager
 from app.settings import get_app_settings
 from app.ui.dock import ConnDock
@@ -22,7 +23,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if app is not None:
             app.setStyleSheet(APP_STYLE)
 
-        self.setWindowTitle("Transport Measurement")
+        self.setWindowTitle(APP_NAME)
+        app = QtWidgets.QApplication.instance()
+        if app is not None and not app.windowIcon().isNull():
+            self.setWindowIcon(app.windowIcon())
         self.resize(1400, 860)
 
         self.conn_dock = ConnDock()
@@ -30,8 +34,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self.conn_dock.stop_requested.connect(self.on_emergency_stop)
 
         self.instrument_dock = QtWidgets.QDockWidget("Instrument Setup", self)
-        self.instrument_dock.setWidget(self.conn_dock)
+        self.instrument_scroll = QtWidgets.QScrollArea()
+        self.instrument_scroll.setWidgetResizable(True)
+        self.instrument_scroll.setSizeAdjustPolicy(QtWidgets.QAbstractScrollArea.SizeAdjustPolicy.AdjustIgnored)
+        self.instrument_scroll.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Preferred,
+            QtWidgets.QSizePolicy.Policy.Ignored,
+        )
+        self.instrument_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.instrument_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.instrument_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        self.instrument_scroll.setMinimumHeight(0)
+        self.conn_dock.setMinimumHeight(0)
+        self.instrument_scroll.setWidget(self.conn_dock)
+        self.instrument_dock.setWidget(self.instrument_scroll)
         self.instrument_dock.setMinimumWidth(240)
+        self.instrument_dock.setMinimumHeight(0)
         self.instrument_dock.setFeatures(
             QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetClosable
             | QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetMovable
@@ -60,7 +78,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def refresh_models_from_ui(self):
         c, s, _ = self.conn_dock.to_models()
         self.save_root.user = s.user
-        self.save_root.sample = s.sample
+        self.save_root.device_id = s.device_id
         self.save_root.base = s.base
         self.connections.gate1 = c.gate1
         self.connections.gate2 = c.gate2
@@ -152,9 +170,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
 
 def launch_in_notebook(show: bool = True) -> MainWindow:
+    set_windows_app_id()
     app = QtWidgets.QApplication.instance()
     if app is None:
         app = QtWidgets.QApplication(sys.argv)
+    configure_qapp(app)
     w = MainWindow()
     if show:
         w.show()

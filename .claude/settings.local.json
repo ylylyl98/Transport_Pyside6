@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cd d:\\\\\\\\instrument_control_v3_1\\\\\\\\Transport_Pyside6)"
+    ]
+  }
+}
