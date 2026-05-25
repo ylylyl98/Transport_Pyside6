@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from PyQt6 import QtCore, QtWidgets
 
+from app.constants import GATE_BIAS_RAMP_STEP_T, GATE_BIAS_RAMP_STEP_V
 from app.device_manager import DeviceManager
 from app.models import Connections, PhotocurrentParams, SaveRoot
 from app.result_channels import compare_channel_options, plot_channel_options, plot_channel_value
@@ -9,6 +10,7 @@ from app.ui.helpers import apply_tooltip, configure_volt_spinbox, flash_button_s
 from app.ui.tabs.base_tab import BaseMeasurementTab
 from app.ui.widgets.collapsible_section import CollapsibleSection
 from app.ui.widgets.status_panel import SectionHeader, StatusPanel
+from app.utils import safe_ramp
 from app.workers.photocurrent import PhotocurrentWorker
 
 SET_BUTTON_WIDTH = 48
@@ -98,15 +100,10 @@ class PhotocurrentTab(BaseMeasurementTab):
         self.btn_set_vbg = QtWidgets.QPushButton("Set")
         self.btn_set_vtg.setFixedWidth(SET_BUTTON_WIDTH)
         self.btn_set_vbg.setFixedWidth(SET_BUTTON_WIDTH)
-        self.sp_vg_ramp = QtWidgets.QDoubleSpinBox()
-        self.sp_vg_ramp.setDecimals(3)
-        self.sp_vg_ramp.setValue(0.2)
         lbl_vtg = QtWidgets.QLabel("Vtg (V):")
         lbl_vbg = QtWidgets.QLabel("Vbg (V):")
-        lbl_vg_ramp = QtWidgets.QLabel("Gate Step (V):")
         form_gate.addRow(lbl_vtg, self._make_set_row(self.sp_vtg, self.btn_set_vtg))
         form_gate.addRow(lbl_vbg, self._make_set_row(self.sp_vbg, self.btn_set_vbg))
-        form_gate.addRow(lbl_vg_ramp, self.sp_vg_ramp)
         ctl_layout.addWidget(grp_gate)
 
         ctl_layout.addWidget(SectionHeader("Acquisition"))
@@ -157,7 +154,7 @@ class PhotocurrentTab(BaseMeasurementTab):
 
         for widget in [
             self.ed_base, self.cbo_source, self.cbo_y, self.sp_wls, self.sp_wle, self.sp_wld,
-            self.sp_vds, self.sp_vds_ramp, self.sp_vtg, self.sp_vbg, self.sp_vg_ramp,
+            self.sp_vds, self.sp_vds_ramp, self.sp_vtg, self.sp_vbg,
             self.sp_delay, self.sp_nsamp,
         ]:
             set_standard_input_height(widget)
@@ -168,9 +165,24 @@ class PhotocurrentTab(BaseMeasurementTab):
         apply_tooltip("Enable and hold a Vds bias during the wavelength scan.", self.chk_use_vds)
         apply_tooltip("Manual Vds setpoint used when Vds bias is enabled.", lbl_vds, self.sp_vds, self.btn_set_vds)
         apply_tooltip("Voltage step size used when changing the Vds bias.", lbl_vds_ramp, self.sp_vds_ramp)
-        apply_tooltip("Fixed top-gate bias during the scan.", lbl_vtg, self.sp_vtg, self.btn_set_vtg)
-        apply_tooltip("Fixed back-gate bias during the scan.", lbl_vbg, self.sp_vbg, self.btn_set_vbg)
-        apply_tooltip("Voltage step size for manual gate changes.", lbl_vg_ramp, self.sp_vg_ramp)
+        apply_tooltip(
+            (
+                "Fixed top-gate bias during the scan. "
+                f"Set ramps at {GATE_BIAS_RAMP_STEP_V:g} V/step, {GATE_BIAS_RAMP_STEP_T:g} s/step."
+            ),
+            lbl_vtg,
+            self.sp_vtg,
+            self.btn_set_vtg,
+        )
+        apply_tooltip(
+            (
+                "Fixed back-gate bias during the scan. "
+                f"Set ramps at {GATE_BIAS_RAMP_STEP_V:g} V/step, {GATE_BIAS_RAMP_STEP_T:g} s/step."
+            ),
+            lbl_vbg,
+            self.sp_vbg,
+            self.btn_set_vbg,
+        )
         apply_tooltip("Wait time after each wavelength move before measuring.", lbl_delay, self.sp_delay)
         apply_tooltip("Number of DAQ reads averaged per wavelength point.", lbl_avg, self.sp_nsamp)
         apply_tooltip("Base filename for the saved spectrum.", lbl_base, self.ed_base)
@@ -336,13 +348,41 @@ class PhotocurrentTab(BaseMeasurementTab):
 
     def on_set_vtg(self):
         if self.s_g1:
-            self.s_g1.ramp_voltage(self.sp_vtg.value(), 0.5)
-            flash_button_success(self.btn_set_vtg)
+            try:
+                val = self.sp_vtg.value()
+                self.log.appendPlainText(
+                    f"[Manual] Ramping Gate1/Vtg to {val} V ({GATE_BIAS_RAMP_STEP_V:g} V/step)"
+                )
+                safe_ramp(
+                    self.s_g1.set_voltage,
+                    getattr(self.s_g1, "voltage", None) or 0.0,
+                    val,
+                    GATE_BIAS_RAMP_STEP_V,
+                    GATE_BIAS_RAMP_STEP_T,
+                )
+                self.log.appendPlainText(f"[Manual] Gate1 set to {val} V ({GATE_BIAS_RAMP_STEP_V:g} V/step)")
+                flash_button_success(self.btn_set_vtg)
+            except Exception as ex:
+                self.log.appendPlainText(f"Error setting G1: {ex}")
 
     def on_set_vbg(self):
         if self.s_g2:
-            self.s_g2.ramp_voltage(self.sp_vbg.value(), 0.5)
-            flash_button_success(self.btn_set_vbg)
+            try:
+                val = self.sp_vbg.value()
+                self.log.appendPlainText(
+                    f"[Manual] Ramping Gate2/Vbg to {val} V ({GATE_BIAS_RAMP_STEP_V:g} V/step)"
+                )
+                safe_ramp(
+                    self.s_g2.set_voltage,
+                    getattr(self.s_g2, "voltage", None) or 0.0,
+                    val,
+                    GATE_BIAS_RAMP_STEP_V,
+                    GATE_BIAS_RAMP_STEP_T,
+                )
+                self.log.appendPlainText(f"[Manual] Gate2 set to {val} V ({GATE_BIAS_RAMP_STEP_V:g} V/step)")
+                flash_button_success(self.btn_set_vbg)
+            except Exception as ex:
+                self.log.appendPlainText(f"Error setting G2: {ex}")
 
     def on_set_vds(self):
         src = self.cbo_source.currentText()
@@ -371,7 +411,6 @@ class PhotocurrentTab(BaseMeasurementTab):
         self.p.vds_set = self.sp_vds.value()
         self.p.vtg_set = self.sp_vtg.value()
         self.p.vbg_set = self.sp_vbg.value()
-        self.p.vg_ramp = self.sp_vg_ramp.value()
         self.p.wl_start = self.sp_wls.value()
         self.p.wl_stop = self.sp_wle.value()
         self.p.wl_step = self.sp_wld.value()

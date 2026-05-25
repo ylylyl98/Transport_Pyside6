@@ -46,6 +46,9 @@ def safe_ramp(
     check_fn=None,
 ) -> None:
     """Step a voltage from current_v to target_v in controlled increments."""
+    owner = getattr(set_fn, "__self__", None)
+    if getattr(set_fn, "__name__", "") == "set_voltage" and hasattr(owner, "set_voltage_fast"):
+        set_fn = owner.set_voltage_fast
     if abs(target_v - current_v) < 1e-9:
         return
     sign = 1.0 if target_v > current_v else -1.0

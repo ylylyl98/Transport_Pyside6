@@ -7,10 +7,16 @@ import time
 
 from PyQt6 import QtCore
 
-from app.constants import V_LIMIT
+from app.constants import (
+    GATE_BIAS_RAMP_STEP_T,
+    GATE_BIAS_RAMP_STEP_V,
+    SAFE_RAMP_STEP_T,
+    SAFE_RAMP_STEP_V,
+    V_LIMIT,
+)
 from app.models import Connections, PhotocurrentParams, SaveRoot
 from app.result_channels import KEITHLEY_CHANNEL
-from app.utils import _safe, _sanitize_base, clamp
+from app.utils import _safe, _sanitize_base, clamp, safe_ramp
 from app.workers.base import RunWorker
 
 
@@ -61,8 +67,32 @@ class PhotocurrentWorker(RunWorker):
                     w.writerow(["nm", "V", "V", "V", "A", "A", "A", "A", "A", "A", "A"])
                     self.log.emit("[csv] header written")
 
-                _safe(self.g1, "ramp_voltage", self.p.vtg_set, self.p.vg_ramp)
-                _safe(self.g2, "ramp_voltage", self.p.vbg_set, self.p.vg_ramp)
+                if self.g1 is not None:
+                    self.log.emit(
+                        f"Ramping G1/Vtg to {self.p.vtg_set:.3f} V "
+                        f"({GATE_BIAS_RAMP_STEP_V:g} V/step, {GATE_BIAS_RAMP_STEP_T:g} s/step)"
+                    )
+                    safe_ramp(
+                        self.g1.set_voltage,
+                        getattr(self.g1, "voltage", None) or 0.0,
+                        self.p.vtg_set,
+                        GATE_BIAS_RAMP_STEP_V,
+                        GATE_BIAS_RAMP_STEP_T,
+                        self.check_abort_pause,
+                    )
+                if self.g2 is not None:
+                    self.log.emit(
+                        f"Ramping G2/Vbg to {self.p.vbg_set:.3f} V "
+                        f"({GATE_BIAS_RAMP_STEP_V:g} V/step, {GATE_BIAS_RAMP_STEP_T:g} s/step)"
+                    )
+                    safe_ramp(
+                        self.g2.set_voltage,
+                        getattr(self.g2, "voltage", None) or 0.0,
+                        self.p.vbg_set,
+                        GATE_BIAS_RAMP_STEP_V,
+                        GATE_BIAS_RAMP_STEP_T,
+                        self.check_abort_pause,
+                    )
 
                 vds_now = 0.0
                 if self.p.use_vds:
@@ -127,13 +157,22 @@ class PhotocurrentWorker(RunWorker):
             self.error.emit(str(ex))
         finally:
             try:
-                _safe(self.g1, "ramp_voltage", 0.0, self.p.vg_ramp)
-                _safe(self.g2, "ramp_voltage", 0.0, self.p.vg_ramp)
+                if self.g1 is not None:
+                    safe_ramp(self.g1.set_voltage, getattr(self.g1, "voltage", None) or 0.0, 0.0, SAFE_RAMP_STEP_V, SAFE_RAMP_STEP_T)
+                if self.g2 is not None:
+                    safe_ramp(self.g2.set_voltage, getattr(self.g2, "voltage", None) or 0.0, 0.0, SAFE_RAMP_STEP_V, SAFE_RAMP_STEP_T)
                 if self.p.use_vds:
                     if self.p.vds_source == "Keithley 2400":
-                        _safe(self.g3, "ramp_voltage", 0.0, self.p.vds_ramp)
+                        if self.g3 is not None:
+                            safe_ramp(self.g3.set_voltage, getattr(self.g3, "voltage", None) or 0.0, 0.0, SAFE_RAMP_STEP_V, SAFE_RAMP_STEP_T)
                     elif self.p.vds_source.startswith("NI DAQ"):
-                        _safe(self.daq, "ramp_voltage", self.p.ao_channel, 0.0, self.p.vds_ramp)
+                        safe_ramp(
+                            lambda v: self.daq.set_voltage(self.p.ao_channel, v),
+                            self.daq.get_ao_value(self.p.ao_channel),
+                            0.0,
+                            SAFE_RAMP_STEP_V,
+                            SAFE_RAMP_STEP_T,
+                        )
             except Exception:
                 pass
             self.log.emit("Outputs returned to 0 V; sessions kept open.")

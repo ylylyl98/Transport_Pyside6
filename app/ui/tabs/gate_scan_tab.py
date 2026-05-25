@@ -778,12 +778,12 @@ class GateScanTab(BaseMeasurementTab):
 
     def _estimate_seconds(self) -> float:
         import math
-        from app.constants import SAFE_RAMP_STEP_T, SAFE_RAMP_STEP_V
+        from app.constants import GATE_BIAS_RAMP_STEP_T, GATE_BIAS_RAMP_STEP_V, SAFE_RAMP_STEP_T, SAFE_RAMP_STEP_V
 
-        def ramp_time(v: float) -> float:
+        def ramp_time(v: float, step_v: float, step_t: float) -> float:
             if abs(v) < 1e-9:
                 return 0.0
-            return math.ceil(abs(v) / SAFE_RAMP_STEP_V) * SAFE_RAMP_STEP_T
+            return math.ceil(abs(v) / step_v) * step_t
 
         count = max(1, self.sp_n_points.value())
         if self.rad_mode_raw.isChecked():
@@ -824,8 +824,16 @@ class GateScanTab(BaseMeasurementTab):
             else:
                 start_vds = stop_vds = 0.0
                 vds_distance = 0.0
-        ramp_to_start = ramp_time(start_vtg) + ramp_time(start_vbg) + ramp_time(start_vds)
-        ramp_to_zero = ramp_time(stop_vtg) + ramp_time(stop_vbg) + ramp_time(stop_vds)
+        ramp_to_start = (
+            ramp_time(start_vtg, GATE_BIAS_RAMP_STEP_V, GATE_BIAS_RAMP_STEP_T)
+            + ramp_time(start_vbg, GATE_BIAS_RAMP_STEP_V, GATE_BIAS_RAMP_STEP_T)
+            + ramp_time(start_vds, SAFE_RAMP_STEP_V, SAFE_RAMP_STEP_T)
+        )
+        ramp_to_zero = (
+            ramp_time(stop_vtg, SAFE_RAMP_STEP_V, SAFE_RAMP_STEP_T)
+            + ramp_time(stop_vbg, SAFE_RAMP_STEP_V, SAFE_RAMP_STEP_T)
+            + ramp_time(stop_vds, SAFE_RAMP_STEP_V, SAFE_RAMP_STEP_T)
+        )
         sample_time = count * max(0.0, self.sp_delay.value())
         sweep_time = sample_time
         if self.chk_sweep_bidirectional.isChecked():

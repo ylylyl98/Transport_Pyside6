@@ -7,7 +7,13 @@ import time
 
 from PyQt6 import QtCore
 
-from app.constants import SAFE_RAMP_STEP_T, SAFE_RAMP_STEP_V, V_LIMIT
+from app.constants import (
+    GATE_BIAS_RAMP_STEP_T,
+    GATE_BIAS_RAMP_STEP_V,
+    SAFE_RAMP_STEP_T,
+    SAFE_RAMP_STEP_V,
+    V_LIMIT,
+)
 from app.models import Connections, LineSweepParams, SaveRoot
 from app.result_channels import KEITHLEY_CHANNEL
 from app.utils import _safe, _sanitize_base, safe_ramp
@@ -58,20 +64,28 @@ class LineSweepWorker(RunWorker):
 
             first = trajectory[0]
             self.status.emit("Ramping to sweep start position...")
+            self.log.emit(
+                f"Ramping G1/Vtg to {first['vtg']:.3f} V "
+                f"({GATE_BIAS_RAMP_STEP_V:g} V/step, {GATE_BIAS_RAMP_STEP_T:g} s/step)"
+            )
             safe_ramp(
                 self.g1.set_voltage,
                 getattr(self.g1, "voltage", None) or 0.0,
                 first["vtg"],
-                SAFE_RAMP_STEP_V,
-                SAFE_RAMP_STEP_T,
+                GATE_BIAS_RAMP_STEP_V,
+                GATE_BIAS_RAMP_STEP_T,
                 self.check_abort_pause,
+            )
+            self.log.emit(
+                f"Ramping G2/Vbg to {first['vbg']:.3f} V "
+                f"({GATE_BIAS_RAMP_STEP_V:g} V/step, {GATE_BIAS_RAMP_STEP_T:g} s/step)"
             )
             safe_ramp(
                 self.g2.set_voltage,
                 getattr(self.g2, "voltage", None) or 0.0,
                 first["vbg"],
-                SAFE_RAMP_STEP_V,
-                SAFE_RAMP_STEP_T,
+                GATE_BIAS_RAMP_STEP_V,
+                GATE_BIAS_RAMP_STEP_T,
                 self.check_abort_pause,
             )
             self._safe_ramp_vds(first["vds"])

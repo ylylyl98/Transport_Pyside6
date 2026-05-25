@@ -7,7 +7,12 @@ import time
 
 from PyQt6 import QtCore
 
-from app.constants import SAFE_RAMP_STEP_T, SAFE_RAMP_STEP_V
+from app.constants import (
+    GATE_BIAS_RAMP_STEP_T,
+    GATE_BIAS_RAMP_STEP_V,
+    SAFE_RAMP_STEP_T,
+    SAFE_RAMP_STEP_V,
+)
 from app.models import CoParams, Connections, SaveRoot
 from app.result_channels import KEITHLEY_CHANNEL
 from app.utils import _frange_inc, _safe, _sanitize_base, safe_ramp
@@ -63,14 +68,38 @@ class CoSweepWorker(RunWorker):
 
             with open(csv_path, "a", newline="", buffering=1, encoding="utf-8") as f:
                 w = csv.writer(f)
-                w.writerow(["Vtg", "Vbg", "Vbias", "raw_X", "raw_Y", "raw_DC", "Ids_X", "Ids_Y", "Ids_DC", KEITHLEY_CHANNEL, "Doping", "Efield"])
-                w.writerow(["V", "V", "V", "A", "A", "A", "A", "A", "A", "A", "V", "V"])
+                w.writerow(["Vtg", "Vbg", "Vbias", "raw_X", "raw_Y", "raw_DC", "Ids_X", "Ids_Y", "Ids_DC", KEITHLEY_CHANNEL, "Doping", "Efield", "PassIndex", "FastDirection"])
+                w.writerow(["V", "V", "V", "A", "A", "A", "A", "A", "A", "A", "V", "V", "#", ""])
 
                 active_axes = [fast_axis, slow_axis]
                 if "Vtg" not in active_axes:
-                    _safe(self.g1, "ramp_voltage", self.p.vtg_start, self.p.vg_ramp)
+                    if self.g1 is not None:
+                        self.log.emit(
+                            f"Ramping G1/Vtg to {self.p.vtg_start:.3f} V "
+                            f"({GATE_BIAS_RAMP_STEP_V:g} V/step, {GATE_BIAS_RAMP_STEP_T:g} s/step)"
+                        )
+                        safe_ramp(
+                            self.g1.set_voltage,
+                            getattr(self.g1, "voltage", None) or 0.0,
+                            self.p.vtg_start,
+                            GATE_BIAS_RAMP_STEP_V,
+                            GATE_BIAS_RAMP_STEP_T,
+                            self.check_abort_pause,
+                        )
                 if "Vbg" not in active_axes:
-                    _safe(self.g2, "ramp_voltage", self.p.vbg_start, self.p.vg_ramp)
+                    if self.g2 is not None:
+                        self.log.emit(
+                            f"Ramping G2/Vbg to {self.p.vbg_start:.3f} V "
+                            f"({GATE_BIAS_RAMP_STEP_V:g} V/step, {GATE_BIAS_RAMP_STEP_T:g} s/step)"
+                        )
+                        safe_ramp(
+                            self.g2.set_voltage,
+                            getattr(self.g2, "voltage", None) or 0.0,
+                            self.p.vbg_start,
+                            GATE_BIAS_RAMP_STEP_V,
+                            GATE_BIAS_RAMP_STEP_T,
+                            self.check_abort_pause,
+                        )
                 if "Vds" not in active_axes:
                     if self.p.vds_source.startswith("NI DAQ"):
                         _safe(self.daq, "ramp_voltage", self.p.ao_channel, self.p.vds_start, self.p.vds_ramp)
@@ -81,9 +110,15 @@ class CoSweepWorker(RunWorker):
                 cnt = 0
                 self.clear_plot.emit()
 
-                for s_val in slow_seq:
+                for pass_idx, s_val in enumerate(slow_seq):
                     self.set_volt(slow_axis, s_val)
-                    for f_val in fast_seq:
+                    if slow_axis != "None" and pass_idx % 2 == 1:
+                        row_fast_seq = list(reversed(fast_seq))
+                        fast_direction = "reverse"
+                    else:
+                        row_fast_seq = fast_seq
+                        fast_direction = "forward"
+                    for f_val in row_fast_seq:
                         self.check_abort_pause()
                         self.set_volt(fast_axis, f_val)
                         time.sleep(self.p.delay)
@@ -109,7 +144,7 @@ class CoSweepWorker(RunWorker):
                         doping = (self.p.ratio * curr_vtg) + curr_vbg
                         efield = (self.p.ratio * curr_vtg) - curr_vbg
 
-                        w.writerow([curr_vtg, curr_vbg, curr_vds, raw_x, raw_y, raw_dc, ids_x, ids_y, ids_dc, ids_keithley, doping, efield])
+                        w.writerow([curr_vtg, curr_vbg, curr_vds, raw_x, raw_y, raw_dc, ids_x, ids_y, ids_dc, ids_keithley, doping, efield, pass_idx, fast_direction])
                         y_val = self._plot_value(ids_dc, ids_x, ids_y, ids_keithley)
                         x_plot = doping if self.p.mode == "Linked" else f_val
                         self.point.emit(x_plot, y_val)
@@ -119,6 +154,8 @@ class CoSweepWorker(RunWorker):
                             "Ids_X": ids_x,
                             "Ids_Y": ids_y,
                             KEITHLEY_CHANNEL: ids_keithley,
+                            "pass_index": pass_idx,
+                            "fast_direction": fast_direction,
                         })
                         cnt += 1
                         self.progress.emit(cnt / total)

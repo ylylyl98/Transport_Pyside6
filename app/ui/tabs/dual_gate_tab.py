@@ -5,6 +5,7 @@ from typing import List
 
 from PyQt6 import QtCore, QtWidgets
 
+from app.constants import GATE_BIAS_RAMP_STEP_T, GATE_BIAS_RAMP_STEP_V
 from app.device_manager import DeviceManager
 from app.models import Connections, DualGateParams, SaveRoot
 from app.result_channels import compare_channel_options, plot_channel_options, plot_channel_value
@@ -12,6 +13,7 @@ from app.ui.helpers import apply_tooltip, configure_volt_spinbox, flash_button_s
 from app.ui.tabs.base_tab import BaseMeasurementTab
 from app.ui.widgets.collapsible_section import CollapsibleSection
 from app.ui.widgets.status_panel import SectionHeader, StatusPanel
+from app.utils import _safe, safe_ramp
 from app.workers.dual_gate import DualGateWorker
 
 SET_BUTTON_WIDTH = 48
@@ -95,16 +97,10 @@ class DualGateTab(BaseMeasurementTab):
         self.btn_set_vbg = QtWidgets.QPushButton("Set")
         self.btn_set_vtg.setFixedWidth(SET_BUTTON_WIDTH)
         self.btn_set_vbg.setFixedWidth(SET_BUTTON_WIDTH)
-        self.sp_vg_ramp = QtWidgets.QDoubleSpinBox()
-        self.sp_vg_ramp.setDecimals(3)
-        self.sp_vg_ramp.setRange(1e-3, 5.0)
-        self.sp_vg_ramp.setValue(0.2)
         lbl_vtg = QtWidgets.QLabel("Vtg (V):")
         lbl_vbg = QtWidgets.QLabel("Vbg (V):")
-        lbl_vg_ramp = QtWidgets.QLabel("Gate Step (V):")
         form_gate.addRow(lbl_vtg, self._make_set_row(self.sp_vtg, self.btn_set_vtg))
         form_gate.addRow(lbl_vbg, self._make_set_row(self.sp_vbg, self.btn_set_vbg))
-        form_gate.addRow(lbl_vg_ramp, self.sp_vg_ramp)
         ctl_layout.addWidget(grp_gate)
 
         ctl_layout.addWidget(SectionHeader("Acquisition"))
@@ -167,7 +163,7 @@ class DualGateTab(BaseMeasurementTab):
         for widget in [
             self.ed_base, self.cbo_source, self.cbo_y,
             self.sp_vds_start, self.sp_vds_stop, self.sp_vds_step, self.sp_vds_ramp,
-            self.sp_vtg, self.sp_vbg, self.sp_vg_ramp, self.sp_delay, self.sp_nsamp,
+            self.sp_vtg, self.sp_vbg, self.sp_delay, self.sp_nsamp,
             self.chk_sweep_bidirectional,
         ]:
             set_standard_input_height(widget)
@@ -180,12 +176,23 @@ class DualGateTab(BaseMeasurementTab):
             lbl_vds_ramp,
             self.sp_vds_ramp,
         )
-        apply_tooltip("Top-gate bias held fixed during the run. The Set button applies it immediately.", lbl_vtg, self.sp_vtg, self.btn_set_vtg)
-        apply_tooltip("Back-gate bias held fixed during the run. The Set button applies it immediately.", lbl_vbg, self.sp_vbg, self.btn_set_vbg)
         apply_tooltip(
-            "Voltage step size for gate moves to the set bias before the sweep. Transition ramps always use the built-in safe rate.",
-            lbl_vg_ramp,
-            self.sp_vg_ramp,
+            (
+                "Top-gate bias held fixed during the run. "
+                f"Set ramps at {GATE_BIAS_RAMP_STEP_V:g} V/step, {GATE_BIAS_RAMP_STEP_T:g} s/step."
+            ),
+            lbl_vtg,
+            self.sp_vtg,
+            self.btn_set_vtg,
+        )
+        apply_tooltip(
+            (
+                "Back-gate bias held fixed during the run. "
+                f"Set ramps at {GATE_BIAS_RAMP_STEP_V:g} V/step, {GATE_BIAS_RAMP_STEP_T:g} s/step."
+            ),
+            lbl_vbg,
+            self.sp_vbg,
+            self.btn_set_vbg,
         )
         apply_tooltip("Wait time after each Vds step before acquiring data.", lbl_delay, self.sp_delay)
         apply_tooltip("Number of DAQ reads averaged at each Vds point.", lbl_nsamp, self.sp_nsamp)
@@ -315,8 +322,17 @@ class DualGateTab(BaseMeasurementTab):
         if self.s_g1:
             try:
                 val = self.sp_vtg.value()
-                self.s_g1.ramp_voltage(val, 0.5)
-                self.log.appendPlainText(f"[Manual] Gate1 set to {val} V")
+                self.log.appendPlainText(
+                    f"[Manual] Ramping Gate1/Vtg to {val} V ({GATE_BIAS_RAMP_STEP_V:g} V/step)"
+                )
+                safe_ramp(
+                    self.s_g1.set_voltage,
+                    getattr(self.s_g1, "voltage", None) or 0.0,
+                    val,
+                    GATE_BIAS_RAMP_STEP_V,
+                    GATE_BIAS_RAMP_STEP_T,
+                )
+                self.log.appendPlainText(f"[Manual] Gate1 set to {val} V ({GATE_BIAS_RAMP_STEP_V:g} V/step)")
                 flash_button_success(self.btn_set_vtg)
             except Exception as ex:
                 self.log.appendPlainText(f"Error setting G1: {ex}")
@@ -327,8 +343,17 @@ class DualGateTab(BaseMeasurementTab):
         if self.s_g2:
             try:
                 val = self.sp_vbg.value()
-                self.s_g2.ramp_voltage(val, 0.5)
-                self.log.appendPlainText(f"[Manual] Gate2 set to {val} V")
+                self.log.appendPlainText(
+                    f"[Manual] Ramping Gate2/Vbg to {val} V ({GATE_BIAS_RAMP_STEP_V:g} V/step)"
+                )
+                safe_ramp(
+                    self.s_g2.set_voltage,
+                    getattr(self.s_g2, "voltage", None) or 0.0,
+                    val,
+                    GATE_BIAS_RAMP_STEP_V,
+                    GATE_BIAS_RAMP_STEP_T,
+                )
+                self.log.appendPlainText(f"[Manual] Gate2 set to {val} V ({GATE_BIAS_RAMP_STEP_V:g} V/step)")
                 flash_button_success(self.btn_set_vbg)
             except Exception as ex:
                 self.log.appendPlainText(f"Error setting G2: {ex}")
@@ -352,7 +377,6 @@ class DualGateTab(BaseMeasurementTab):
         self.p.vds_ramp = float(self.sp_vds_ramp.value())
         self.p.vtg_set = float(self.sp_vtg.value())
         self.p.vbg_set = float(self.sp_vbg.value())
-        self.p.vg_ramp = float(self.sp_vg_ramp.value())
         self.p.delay = float(self.sp_delay.value())
         self.p.n_sample = int(self.sp_nsamp.value())
         self.p.plot_choice = self.cbo_y.currentText()

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from PyQt6 import QtCore, QtWidgets
 
+from app.constants import GATE_BIAS_RAMP_STEP_T, GATE_BIAS_RAMP_STEP_V, SAFE_RAMP_STEP_T, SAFE_RAMP_STEP_V
 from app.device_manager import DeviceManager
 from app.models import CoParams, Connections, SaveRoot
 from app.result_channels import compare_channel_options, plot_channel_options, plot_channel_value
@@ -9,7 +10,7 @@ from app.ui.helpers import apply_tooltip, configure_volt_spinbox, flash_button_s
 from app.ui.tabs.base_tab import BaseMeasurementTab
 from app.ui.widgets.collapsible_section import CollapsibleSection
 from app.ui.widgets.status_panel import SectionHeader, StatusPanel
-from app.utils import _frange_inc
+from app.utils import _frange_inc, safe_ramp
 from app.workers.cosweep import CoSweepWorker
 
 SET_BUTTON_WIDTH = 48
@@ -198,7 +199,16 @@ class CoSweepTab(BaseMeasurementTab):
         apply_tooltip("First value used for this axis. Also used as the fixed value if the axis is not selected.", self.sp_vtg_start, self.sp_vbg_start, self.sp_vds_start)
         apply_tooltip("Last value included when this axis is part of the sweep.", self.sp_vtg_stop, self.sp_vbg_stop, self.sp_vds_stop)
         apply_tooltip("Point spacing for the selected sweep axis.", self.sp_vtg_step, self.sp_vbg_step, self.sp_vds_step)
-        apply_tooltip("Apply the current Start value to hardware immediately.", self.btn_set_vtg, self.btn_set_vbg, self.btn_set_vds)
+        apply_tooltip(
+            (
+                "Apply the current Start value to hardware immediately. "
+                f"Gate Set ramps at {GATE_BIAS_RAMP_STEP_V:g} V/step; "
+                f"Vds Set ramps at {SAFE_RAMP_STEP_V:g} V/step."
+            ),
+            self.btn_set_vtg,
+            self.btn_set_vbg,
+            self.btn_set_vds,
+        )
         apply_tooltip("Axis that moves for every point in the inner loop.", lbl_fast, self.cbo_fast)
         apply_tooltip("Axis that steps between fast-axis passes. Choose None for a 1D sweep.", lbl_slow, self.cbo_slow)
         apply_tooltip("BG weighting used only when plotting the map as Doping/Efield.", lbl_ratio, self.sp_ratio)
@@ -418,8 +428,12 @@ class CoSweepTab(BaseMeasurementTab):
             s_seq = [s_start] if abs(s_step) < 1e-9 else _frange_inc(s_start, s_stop, s_step)
 
         xs, ys = [], []
-        for s_val in s_seq:
-            for f_val in f_seq:
+        for pass_idx, s_val in enumerate(s_seq):
+            if slow_axis != "None" and pass_idx % 2 == 1:
+                row_f_seq = list(reversed(f_seq))
+            else:
+                row_f_seq = f_seq
+            for f_val in row_f_seq:
                 curr_vtg = f_val if fast_axis == "Vtg" else (s_val if slow_axis == "Vtg" else self.sp_vtg_start.value())
                 curr_vbg = f_val if fast_axis == "Vbg" else (s_val if slow_axis == "Vbg" else self.sp_vbg_start.value())
                 if use_ratio:
@@ -430,7 +444,7 @@ class CoSweepTab(BaseMeasurementTab):
                     xs.append(f_val)
                     ys.append(s_val)
 
-        self.plot.ax.scatter(xs, ys, s=15, c="blue", alpha=0.6 if use_ratio else 1.0)
+        self.plot.ax.plot(xs, ys, "o-", markersize=4, linewidth=1.0, color="blue", alpha=0.6 if use_ratio else 1.0)
         if use_ratio:
             self.plot.ax.set_xlabel("Doping (Ratio*Vtg + Vbg)")
             self.plot.ax.set_ylabel("Efield (Ratio*Vtg - Vbg)")
@@ -452,8 +466,38 @@ class CoSweepTab(BaseMeasurementTab):
             sess = self.s_daq if "NI DAQ" in self.cbo_source.currentText() else self.s_g3
         if sess:
             try:
-                sess.ramp_voltage(val, 0.5)
-                self.log.appendPlainText(f"Set {name} -> {val}")
+                if name in {"Vtg", "Vbg"}:
+                    self.log.appendPlainText(
+                        f"Ramping {name} -> {val} ({GATE_BIAS_RAMP_STEP_V:g} V/step)"
+                    )
+                    safe_ramp(
+                        sess.set_voltage,
+                        getattr(sess, "voltage", None) or 0.0,
+                        val,
+                        GATE_BIAS_RAMP_STEP_V,
+                        GATE_BIAS_RAMP_STEP_T,
+                    )
+                    self.log.appendPlainText(f"Set {name} -> {val} ({GATE_BIAS_RAMP_STEP_V:g} V/step)")
+                else:
+                    self.log.appendPlainText(f"Ramping {name} -> {val} ({SAFE_RAMP_STEP_V:g} V/step)")
+                    if "NI DAQ" in self.cbo_source.currentText():
+                        idx = int(self.cbo_source.currentText().split()[-1].replace("ao", ""))
+                        safe_ramp(
+                            lambda v: sess.set_voltage(idx, v),
+                            sess.get_ao_value(idx),
+                            val,
+                            SAFE_RAMP_STEP_V,
+                            SAFE_RAMP_STEP_T,
+                        )
+                    else:
+                        safe_ramp(
+                            sess.set_voltage,
+                            getattr(sess, "voltage", None) or 0.0,
+                            val,
+                            SAFE_RAMP_STEP_V,
+                            SAFE_RAMP_STEP_T,
+                        )
+                    self.log.appendPlainText(f"Set {name} -> {val} ({SAFE_RAMP_STEP_V:g} V/step)")
                 flash_button_success(button)
             except Exception as ex:
                 self.log.appendPlainText(str(ex))

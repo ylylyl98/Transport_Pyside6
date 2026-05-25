@@ -170,8 +170,15 @@ class Keithley2400Base(PyvisaInstrument):
         super().set_outputs(values)
         self._write_voltage(self._output_values[self.VOLT_OUTPUT])
 
+    def set_voltage_fast(self, value: float):
+        if self._operating_mode != KEITHLEY_MODE_VOLTAGE_2W:
+            raise InstrumentError(self.name, "Keithley is not configured for 2-wire voltage source mode.")
+        super().set_outputs({self.VOLT_OUTPUT: value})
+        self._write_voltage(self._output_values[self.VOLT_OUTPUT])
+        return self.output_values
+
     def set_voltage(self, value: float):
-        self.set_outputs({self.VOLT_OUTPUT: value})
+        self.set_voltage_fast(value)
         return self.acquire()
 
     def _write_voltage(self, volt: float):
@@ -183,7 +190,6 @@ class Keithley2400Base(PyvisaInstrument):
             raise InstrumentError(self.name, "Keithley is not configured for 2-wire voltage source mode.")
         if np.isclose(step, 0.0):
             raise InstrumentError(self.name, "step cannot be 0.")
-        self.refresh()
         start = self.voltage
         if start is None:
             try:
@@ -192,8 +198,8 @@ class Keithley2400Base(PyvisaInstrument):
                 start = 0.0
         step = abs(step) if target > start else -abs(step)
         for v in np.arange(start, target, step):
-            self.set_voltage(v)
-        return self.set_voltage(target)
+            self.set_voltage_fast(v)
+        return self.set_voltage_fast(target)
 
 
 class Keithley2400VoltMode(Keithley2400Base):

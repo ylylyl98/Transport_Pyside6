@@ -7,7 +7,13 @@ import time
 
 from PyQt6 import QtCore
 
-from app.constants import SAFE_RAMP_STEP_T, SAFE_RAMP_STEP_V, V_LIMIT
+from app.constants import (
+    GATE_BIAS_RAMP_STEP_T,
+    GATE_BIAS_RAMP_STEP_V,
+    SAFE_RAMP_STEP_T,
+    SAFE_RAMP_STEP_V,
+    V_LIMIT,
+)
 from app.models import Connections, DualGateParams, SaveRoot
 from app.result_channels import KEITHLEY_CHANNEL
 from app.utils import _frange_inc, _safe, _sanitize_base, clamp, safe_ramp
@@ -53,21 +59,29 @@ class DualGateWorker(RunWorker):
 
             self.status.emit("Ramping gates to set voltage...")
             if self.g1 is not None:
+                self.log.emit(
+                    f"Ramping G1/Vtg to {self.p.vtg_set:.3f} V "
+                    f"({GATE_BIAS_RAMP_STEP_V:g} V/step, {GATE_BIAS_RAMP_STEP_T:g} s/step)"
+                )
                 safe_ramp(
                     self.g1.set_voltage,
                     getattr(self.g1, "voltage", None) or 0.0,
                     self.p.vtg_set,
-                    SAFE_RAMP_STEP_V,
-                    SAFE_RAMP_STEP_T,
+                    GATE_BIAS_RAMP_STEP_V,
+                    GATE_BIAS_RAMP_STEP_T,
                     self.check_abort_pause,
                 )
             if self.g2 is not None:
+                self.log.emit(
+                    f"Ramping G2/Vbg to {self.p.vbg_set:.3f} V "
+                    f"({GATE_BIAS_RAMP_STEP_V:g} V/step, {GATE_BIAS_RAMP_STEP_T:g} s/step)"
+                )
                 safe_ramp(
                     self.g2.set_voltage,
                     getattr(self.g2, "voltage", None) or 0.0,
                     self.p.vbg_set,
-                    SAFE_RAMP_STEP_V,
-                    SAFE_RAMP_STEP_T,
+                    GATE_BIAS_RAMP_STEP_V,
+                    GATE_BIAS_RAMP_STEP_T,
                     self.check_abort_pause,
                 )
 
