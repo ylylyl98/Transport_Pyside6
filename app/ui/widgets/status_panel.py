@@ -95,7 +95,7 @@ class StatusPanel(QtWidgets.QGroupBox):
     STATUS_TEXT = {
         "g1": "G1",
         "g2": "G2",
-        "g3": "G3/Vds",
+        "g3": "G3 / Vds",
         "daq": "DAQ",
         "mono": "Mono",
     }

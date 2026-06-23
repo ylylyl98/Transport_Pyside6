@@ -56,13 +56,14 @@ class EmergencyRampWorker(QtCore.QThread):
         from app.constants import SAFE_RAMP_STEP_T, SAFE_RAMP_STEP_V
         from app.utils import safe_ramp
 
+        failures: list[str] = []
         for name in ("g1", "g2", "g3"):
             session = self._sessions.get(name)
             if session is not None:
                 try:
                     safe_ramp(session.set_voltage, getattr(session, "voltage", None) or 0.0, 0.0, SAFE_RAMP_STEP_V, SAFE_RAMP_STEP_T)
-                except Exception:
-                    pass
+                except Exception as ex:
+                    failures.append(f"{name.upper()} zero failed: {ex}")
         daq = self._sessions.get("daq")
         if daq is not None:
             for chan in self._daq_channels:
@@ -74,9 +75,12 @@ class EmergencyRampWorker(QtCore.QThread):
                         SAFE_RAMP_STEP_V,
                         SAFE_RAMP_STEP_T,
                     )
-                except Exception:
-                    pass
-        self.ramp_finished.emit("Emergency safe ramp complete: all outputs at 0 V.")
+                except Exception as ex:
+                    failures.append(f"DAQ ao{chan} zero failed: {ex}")
+        if failures:
+            self.ramp_finished.emit("Emergency ramp completed with warnings: " + "; ".join(failures))
+        else:
+            self.ramp_finished.emit("Emergency safe ramp complete: all requested outputs at 0 V.")
 
 
 class DeviceManager(QtCore.QObject):

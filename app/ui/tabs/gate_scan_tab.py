@@ -6,7 +6,7 @@ from app.constants import V_LIMIT
 from app.device_manager import DeviceManager
 from app.models import Connections, LineSweepParams, SaveRoot
 from app.result_channels import compare_channel_options, plot_channel_options, plot_channel_value
-from app.utils import _sanitize_base
+from app.run_output import build_planned_output, planned_output_warning
 from app.ui.helpers import apply_tooltip, configure_volt_spinbox, set_standard_input_height, style_form_layout
 from app.ui.tabs.base_tab import BaseMeasurementTab
 from app.ui.widgets.collapsible_section import CollapsibleSection
@@ -27,6 +27,8 @@ class GateScanTab(BaseMeasurementTab):
         self.worker_thread = None
         self.worker = None
         self._plot_records = []
+        self._output_run_id = None
+        self._planned_output = None
         super().__init__("START SWEEP", "Sweep Axis", "Ids (A)", ["g1", "g2", "g3", "daq"])
         self.control_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.control_scroll.setMinimumWidth(560)
@@ -49,7 +51,7 @@ class GateScanTab(BaseMeasurementTab):
         lay_mode.setContentsMargins(10, 18, 10, 10)
         lay_mode.setSpacing(8)
         self.rad_mode_raw = QtWidgets.QRadioButton("Raw Trajectory")
-        self.rad_mode_derived = QtWidgets.QRadioButton("Derived (Doping/Efield)")
+        self.rad_mode_derived = QtWidgets.QRadioButton("Derived (Doping/E-field)")
         self.rad_mode_raw.setChecked(True)
         lay_mode.addWidget(self.rad_mode_raw)
         lay_mode.addWidget(self.rad_mode_derived)
@@ -95,26 +97,26 @@ class GateScanTab(BaseMeasurementTab):
         form_acq.addRow(lbl_avg, self.sp_nsamp)
         ctl_layout.addWidget(grp_acq)
 
-        ctl_layout.addWidget(SectionHeader("Advanced"))
+        ctl_layout.addWidget(SectionHeader("Output"))
         grp_output = QtWidgets.QGroupBox("Output and Plot")
         form_output = QtWidgets.QFormLayout(grp_output)
         style_form_layout(form_output)
         self.cbo_source = QtWidgets.QComboBox()
         self.cbo_source.addItems(["Keithley 2400"])
         self.cbo_x = QtWidgets.QComboBox()
-        self.cbo_x.addItems(["Auto", "Step Index", "Vtg", "Vbg", "Vbias", "Doping", "Efield"])
+        self.cbo_x.addItems(["Auto", "Step Index", "Vtg", "Vbg", "Vds", "Doping", "E-field"])
         self.cbo_y = QtWidgets.QComboBox()
         self.cbo_y.addItems(["Ids_DC", "Ids_X", "Ids_Y"])
         self.ed_base = QtWidgets.QLineEdit(self.p.base_name)
-        lbl_source = QtWidgets.QLabel("Vbias Source:")
+        lbl_source = QtWidgets.QLabel("Vds Source:")
         lbl_x = QtWidgets.QLabel("Plot X Axis:")
         lbl_y = QtWidgets.QLabel("Plot Y Axis:")
-        lbl_base = QtWidgets.QLabel("Filename:")
+        lbl_base = QtWidgets.QLabel("Filename Stem:")
         form_output.addRow(lbl_source, self.cbo_source)
         form_output.addRow(lbl_x, self.cbo_x)
         form_output.addRow(lbl_y, self.cbo_y)
-        self.btn_reset_filename = QtWidgets.QPushButton("↺")
-        self.btn_reset_filename.setFixedWidth(30)
+        self.btn_reset_filename = QtWidgets.QPushButton("Reset")
+        self.btn_reset_filename.setFixedWidth(54)
         self.btn_reset_filename.setToolTip(
             "Regenerate filename from current sweep parameters. Re-enables auto-update if you have manually edited the filename."
         )
@@ -125,12 +127,9 @@ class GateScanTab(BaseMeasurementTab):
         fn_row.addWidget(self.ed_base, 1)
         fn_row.addWidget(self.btn_reset_filename)
         form_output.addRow(lbl_base, fn_wrap)
-        self.lbl_filename_preview = QtWidgets.QLabel()
-        self.lbl_filename_preview.setWordWrap(True)
-        self.lbl_filename_preview.setProperty("role", "hint")
-        form_output.addRow(QtWidgets.QLabel("Preview:"), self.lbl_filename_preview)
-        self.exp_output = CollapsibleSection("Output and Plot Options", grp_output, expanded=False)
+        self.exp_output = CollapsibleSection("Output and Plot Options", grp_output, expanded=True)
         ctl_layout.addWidget(self.exp_output)
+        self._add_output_preview_section(ctl_layout)
 
         self.lbl_connection_hint = QtWidgets.QLabel()
         self.lbl_connection_hint.setWordWrap(True)
@@ -167,16 +166,16 @@ class GateScanTab(BaseMeasurementTab):
         ):
             spinbox.setMinimumWidth(88)
 
-        apply_tooltip("Switch between direct voltage trajectories and derived Doping/Efield trajectories.", self.rad_mode_raw, self.rad_mode_derived)
+        apply_tooltip("Switch between direct voltage trajectories and derived Doping/E-field trajectories.", self.rad_mode_raw, self.rad_mode_derived)
         apply_tooltip("Number of measurement points in the full line scan.", lbl_points, self.sp_n_points)
         apply_tooltip("Rough estimate based on ramp distances and per-point delay.", lbl_eta, self.lbl_eta)
         apply_tooltip("Wait time after each point is set before data acquisition.", lbl_delay, self.sp_delay)
         apply_tooltip("Number of DAQ reads averaged at each line-scan point.", lbl_avg, self.sp_nsamp)
-        apply_tooltip("Choose Keithley G3 or an NI AO channel as the Vbias source.", lbl_source, self.cbo_source)
+        apply_tooltip("Choose Keithley G3 or an NI AO channel as the Vds source.", lbl_source, self.cbo_source)
         apply_tooltip("Auto uses the active sweep quantity for the live plot x-axis.", lbl_x, self.cbo_x)
         apply_tooltip("Select which current channel is shown live.", lbl_y, self.cbo_y)
         apply_tooltip("Base filename for the saved line-scan CSV.", lbl_base, self.ed_base)
-        apply_tooltip("Final CSV name preview without the automatic date/time suffix.", self.lbl_filename_preview)
+        apply_tooltip("Exact CSV filename and folder that will be used for the next run.", self.lbl_filename_preview, self.lbl_path_preview)
 
     def _build_raw_mode_widget(self) -> QtWidgets.QWidget:
         grp = QtWidgets.QGroupBox("Raw Voltage Trajectory")
@@ -192,7 +191,7 @@ class GateScanTab(BaseMeasurementTab):
 
         self.sp_raw_vtg_start, self.sp_raw_vtg_stop, self.chk_raw_vtg_active, self.lbl_raw_vtg_mode = self._add_raw_row(lay, 1, "Vtg:", 0.0, 1.0, True)
         self.sp_raw_vbg_start, self.sp_raw_vbg_stop, self.chk_raw_vbg_active, self.lbl_raw_vbg_mode = self._add_raw_row(lay, 2, "Vbg:", 0.0, 0.0, False)
-        self.sp_raw_vds_start, self.sp_raw_vds_stop, self.chk_raw_vds_active, self.lbl_raw_vds_mode = self._add_raw_row(lay, 3, "Vbias:", 0.0, 0.0, False)
+        self.sp_raw_vds_start, self.sp_raw_vds_stop, self.chk_raw_vds_active, self.lbl_raw_vds_mode = self._add_raw_row(lay, 3, "Vds:", 0.0, 0.0, False)
         lay.setColumnStretch(1, 1)
         lay.setColumnStretch(2, 1)
         lay.setColumnMinimumWidth(0, 50)
@@ -266,7 +265,7 @@ class GateScanTab(BaseMeasurementTab):
         form_sweep.addRow(self.lbl_fixed_name, self.sp_derived_fixed)
         outer.addWidget(grp_sweep)
 
-        grp_vbias = QtWidgets.QGroupBox("Vbias")
+        grp_vbias = QtWidgets.QGroupBox("Vds")
         form_vbias = QtWidgets.QFormLayout(grp_vbias)
         style_form_layout(form_vbias)
         vbias_mode_wrap = QtWidgets.QWidget()
@@ -306,10 +305,10 @@ class GateScanTab(BaseMeasurementTab):
         apply_tooltip("Start of the selected Doping/E-field sweep.", self.sp_derived_start)
         apply_tooltip("Stop of the selected Doping/E-field sweep.", self.sp_derived_stop)
         apply_tooltip("Fixed value of the non-swept derived quantity.", self.sp_derived_fixed)
-        apply_tooltip("Keep Vbias fixed or sweep it together with the gate trajectory.", self.btn_derived_vbias_fixed, self.btn_derived_vbias_swept)
-        apply_tooltip("Single Vbias used for the whole derived scan.", self.sp_derived_vds_fixed)
-        apply_tooltip("Start Vbias for a simultaneous Vbias sweep in derived mode.", self.sp_derived_vds_start)
-        apply_tooltip("Stop Vbias for a simultaneous Vbias sweep in derived mode.", self.sp_derived_vds_stop)
+        apply_tooltip("Keep Vds fixed or sweep it together with the gate trajectory.", self.btn_derived_vbias_fixed, self.btn_derived_vbias_swept)
+        apply_tooltip("Single Vds used for the whole derived scan.", self.sp_derived_vds_fixed)
+        apply_tooltip("Start Vds for a simultaneous Vds sweep in derived mode.", self.sp_derived_vds_start)
+        apply_tooltip("Stop Vds for a simultaneous Vds sweep in derived mode.", self.sp_derived_vds_stop)
         return grp
 
     def _build_derived_vds_fixed_widget(self) -> QtWidgets.QWidget:
@@ -397,6 +396,7 @@ class GateScanTab(BaseMeasurementTab):
         self.btn_derived_vbias_swept.toggled.connect(self._update_derived_vds_mode)
         self.cbo_source.currentIndexChanged.connect(self._update_connection_hint)
         self.cbo_source.currentIndexChanged.connect(self._update_manual_buttons)
+        self.cbo_source.currentIndexChanged.connect(self.refresh_output_preview)
         self.cbo_x.currentIndexChanged.connect(self._update_plot_axis_label)
 
         for chk in (self.chk_raw_vtg_active, self.chk_raw_vbg_active, self.chk_raw_vds_active):
@@ -439,8 +439,9 @@ class GateScanTab(BaseMeasurementTab):
         self.plot.y_axis_changed.connect(self.set_plot_axis_source)
         self.plot.plot_mode_changed.connect(lambda _mode: self._redraw_plot())
         self.chk_sweep_bidirectional.toggled.connect(self._update_eta)
+        self.chk_sweep_bidirectional.toggled.connect(self.refresh_output_preview)
         self.ed_base.textEdited.connect(self._on_filename_manually_edited)
-        self.ed_base.textChanged.connect(self._update_filename_preview)
+        self.ed_base.textChanged.connect(self.refresh_output_preview)
         self.btn_reset_filename.clicked.connect(self._on_reset_filename)
 
         auto_fn_widgets = [
@@ -472,12 +473,12 @@ class GateScanTab(BaseMeasurementTab):
             else:
                 parts.append(f"fixedVbg_{self.sp_raw_vbg_start.value():g}V")
             if self.chk_raw_vds_active.isChecked():
-                parts.append(f"Vbias_{self.sp_raw_vds_start.value():g}to{self.sp_raw_vds_stop.value():g}V")
+                parts.append(f"Vds_{self.sp_raw_vds_start.value():g}to{self.sp_raw_vds_stop.value():g}V")
             else:
-                parts.append(f"fixedVbias_{self.sp_raw_vds_start.value():g}V")
+                parts.append(f"fixedVds_{self.sp_raw_vds_start.value():g}V")
             return "_".join(parts)
-        axis = "Doping" if self.rad_sweep_doping.isChecked() else "Efield"
-        fixed_axis = "Efield" if self.rad_sweep_doping.isChecked() else "Doping"
+        axis = "Doping" if self.rad_sweep_doping.isChecked() else "E-field"
+        fixed_axis = "E-field" if self.rad_sweep_doping.isChecked() else "Doping"
         start = self.sp_derived_start.value()
         stop = self.sp_derived_stop.value()
         fixed = self.sp_derived_fixed.value()
@@ -487,9 +488,9 @@ class GateScanTab(BaseMeasurementTab):
             f"fixed{fixed_axis}_{fixed:g}V",
         ]
         if self._derived_vbias_is_swept():
-            parts.append(f"Vbias_{self.sp_derived_vds_start.value():g}to{self.sp_derived_vds_stop.value():g}V")
+            parts.append(f"Vds_{self.sp_derived_vds_start.value():g}to{self.sp_derived_vds_stop.value():g}V")
         else:
-            parts.append(f"fixedVbias_{self.sp_derived_vds_fixed.value():g}V")
+            parts.append(f"fixedVds_{self.sp_derived_vds_fixed.value():g}V")
         return "_".join(parts)
 
     def _maybe_update_auto_filename(self, *_args) -> None:
@@ -498,21 +499,33 @@ class GateScanTab(BaseMeasurementTab):
         self.ed_base.blockSignals(True)
         self.ed_base.setText(self._build_auto_filename())
         self.ed_base.blockSignals(False)
-        self._update_filename_preview()
+        self.refresh_output_preview()
 
     def _on_filename_manually_edited(self, *_args) -> None:
         self._filename_is_auto = False
-        self._update_filename_preview()
+        self.refresh_output_preview()
 
     def _on_reset_filename(self) -> None:
         self._filename_is_auto = True
         self._maybe_update_auto_filename()
 
-    def _update_filename_preview(self, *_args) -> None:
-        device_id = _sanitize_base(self.save.device_id) or "device"
-        base_name = _sanitize_base(self.ed_base.text()) or "gate_scan"
-        stem = f"{device_id}_{base_name}"
-        self.lbl_filename_preview.setText(f"{stem}.csv")
+    def _output_summary_parts(self) -> list[str]:
+        source = "keithley_g3" if self.cbo_source.currentText() == "Keithley 2400" else self.cbo_source.currentText()
+        mode = "raw" if self.rad_mode_raw.isChecked() else "derived"
+        direction = "forward_backward" if self.chk_sweep_bidirectional.isChecked() else "forward"
+        return [mode, source, direction]
+
+    def refresh_output_preview(self, *_args) -> None:
+        planned = build_planned_output(
+            self.save,
+            "gate_scan",
+            self.ed_base.text(),
+            self._output_summary_parts(),
+            run_id=self._output_run_id,
+        )
+        self._output_run_id = planned.run_id
+        self._planned_output = planned
+        self.set_output_preview_text(planned, planned_output_warning(planned, self.save))
 
     def _sync_sessions_from_manager(self):
         self.s_g1 = self.device_manager.get_session("g1")
@@ -716,10 +729,10 @@ class GateScanTab(BaseMeasurementTab):
             vtg_step, vbg_step, vds_step = self._derived_gate_steps()
             text += f"\nSteps: Vtg {vtg_step:g} V/point, Vbg {vbg_step:g} V/point"
             if self._derived_vbias_is_swept():
-                text += f", Vbias {vds_step:g} V/point"
-                text += f"\nVbias: {self.sp_derived_vds_start.value():.3f} to {self.sp_derived_vds_stop.value():.3f} V"
+                text += f", Vds {vds_step:g} V/point"
+                text += f"\nVds: {self.sp_derived_vds_start.value():.3f} to {self.sp_derived_vds_stop.value():.3f} V"
             else:
-                text += f"\nVbias: fixed {self.sp_derived_vds_fixed.value():.3f} V"
+                text += f"\nVds: fixed {self.sp_derived_vds_fixed.value():.3f} V"
             self.lbl_derived_range.setText(text)
         except Exception as ex:
             self.lbl_derived_range.setProperty("role", "warning-hint")
@@ -734,9 +747,9 @@ class GateScanTab(BaseMeasurementTab):
         label = self.cbo_x.currentText()
         if label == "Auto":
             if self.rad_mode_derived.isChecked():
-                label = "Doping" if self.rad_sweep_doping.isChecked() else "Efield"
+                label = "Doping" if self.rad_sweep_doping.isChecked() else "E-field"
             elif self.chk_raw_vds_active.isChecked():
-                label = "Vbias"
+                label = "Vds"
             elif self.chk_raw_vtg_active.isChecked():
                 label = "Vtg"
             elif self.chk_raw_vbg_active.isChecked():
@@ -851,7 +864,11 @@ class GateScanTab(BaseMeasurementTab):
         self.lbl_eta.setText(text)
 
     def collect_params(self):
+        self.refresh_output_preview()
         self.p.base_name = self.ed_base.text()
+        self.p.output_csv_path = self._planned_output.csv_path if self._planned_output else ""
+        self.p.output_metadata_path = self._planned_output.metadata_path if self._planned_output else ""
+        self.p.output_log_path = self._planned_output.log_path if self._planned_output else ""
         self.p.mode = "Raw" if self.rad_mode_raw.isChecked() else "Derived"
         src = self.cbo_source.currentText()
         if src.startswith("NI DAQ "):
@@ -869,7 +886,7 @@ class GateScanTab(BaseMeasurementTab):
         self.p.raw_vds_start = self.sp_raw_vds_start.value()
         self.p.raw_vds_stop = self.sp_raw_vds_stop.value()
         self.p.derived_ratio = self.sp_ratio.value()
-        self.p.derived_axis = "Doping" if self.rad_sweep_doping.isChecked() else "Efield"
+        self.p.derived_axis = "Doping" if self.rad_sweep_doping.isChecked() else "E-field"
         self.p.derived_start = self.sp_derived_start.value()
         self.p.derived_stop = self.sp_derived_stop.value()
         self.p.derived_fixed = self.sp_derived_fixed.value()
@@ -889,7 +906,7 @@ class GateScanTab(BaseMeasurementTab):
         self.p.delay = self.sp_delay.value()
         self.p.n_sample = self.sp_nsamp.value()
         self.p.plot_choice = self.cbo_y.currentText()
-        self.p.plot_x_axis = self.cbo_x.currentText()
+        self.p.plot_x_axis = "Efield" if self.cbo_x.currentText() == "E-field" else self.cbo_x.currentText()
         self.p.sweep_both_ways = self.chk_sweep_bidirectional.isChecked()
 
     def _validate_params(self) -> bool:
@@ -907,6 +924,9 @@ class GateScanTab(BaseMeasurementTab):
         mw = self.window()
         if hasattr(mw, "refresh_models_from_ui"):
             mw.refresh_models_from_ui()
+        self.refresh_output_preview()
+        if not self.validate_output_ready(self.save):
+            return
         if not self._validate_required_sessions() or not self._validate_params():
             return
         claimed, blocked = self.device_manager.mark_in_use(self._required_devices())
@@ -918,6 +938,7 @@ class GateScanTab(BaseMeasurementTab):
         self.plot.clear()
         self.set_plot_axis_source(self.p.plot_choice)
         try:
+            self.begin_run_logging(self._planned_output, "Gate Scan")
             amp, lkn = self.get_global_rates()
             self.worker = LineSweepWorker(
                 self.p,
@@ -937,9 +958,11 @@ class GateScanTab(BaseMeasurementTab):
             self.worker.point_data.connect(self.on_point_data)
             self.worker.progress.connect(self.set_progress)
             self.worker.status.connect(lambda m: self.set_status(m, "running"))
-            self.worker.log.connect(self.log.appendPlainText)
+            self.worker.log.connect(self.append_log)
             self.worker.finished.connect(self.on_finished)
+            self.worker.stopped.connect(self.on_stopped)
             self.worker.finished.connect(self.worker_thread.quit)
+            self.worker.stopped.connect(self.worker_thread.quit)
             self.worker.error.connect(self.on_error)
             self.worker.error.connect(self.worker_thread.quit)
             self.worker_thread.finished.connect(self._cleanup_thread)
@@ -948,11 +971,13 @@ class GateScanTab(BaseMeasurementTab):
             self.progress.setValue(0)
             self.worker_thread.start()
         except Exception as ex:
-            self.log.appendPlainText(str(ex))
+            self.append_log(str(ex))
+            self.end_run_logging("error", str(ex))
             self.device_manager.release(self._required_devices())
 
     def stop_run(self):
         if self.worker:
+            self.set_status("Stopping safely...", "running", "Stop requested. Waiting for the worker to reach a safe checkpoint and ramp outputs to 0 V.")
             self.worker.request_stop()
 
     def _cleanup_thread(self):
@@ -1000,9 +1025,9 @@ class GateScanTab(BaseMeasurementTab):
                 label = self.cbo_x.currentText()
                 if label == "Auto":
                     if self.rad_mode_derived.isChecked():
-                        label = "Doping" if self.rad_sweep_doping.isChecked() else "Efield"
+                        label = "Doping" if self.rad_sweep_doping.isChecked() else "E-field"
                     elif self.chk_raw_vds_active.isChecked():
-                        label = "Vbias"
+                        label = "Vds"
                     elif self.chk_raw_vtg_active.isChecked():
                         label = "Vtg"
                     elif self.chk_raw_vbg_active.isChecked():
@@ -1027,9 +1052,22 @@ class GateScanTab(BaseMeasurementTab):
             self.plot.canvas.draw_idle()
 
     def on_finished(self, path: str):
-        self.set_status("Finished", "done")
-        self.log.appendPlainText(f"Saved: {path}")
+        self.set_status("Finished", "done", path)
+        self.append_log(f"Saved: {path}")
+        self.end_run_logging("finished", path)
+        self._output_run_id = None
+        self.refresh_output_preview()
 
     def on_error(self, msg: str):
         self.set_status("Run error", "error", msg)
-        self.log.appendPlainText(msg)
+        self.append_log("ERROR: " + msg)
+        self.end_run_logging("error", msg)
+        self._output_run_id = None
+        self.refresh_output_preview()
+
+    def on_stopped(self, message: str):
+        self.set_status("Stopped by user", "done", message)
+        self.append_log(message)
+        self.end_run_logging("stopped", message)
+        self._output_run_id = None
+        self.refresh_output_preview()

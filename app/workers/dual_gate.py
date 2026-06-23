@@ -16,8 +16,9 @@ from app.constants import (
 )
 from app.models import Connections, DualGateParams, SaveRoot
 from app.result_channels import KEITHLEY_CHANNEL
-from app.utils import _frange_inc, _safe, _sanitize_base, clamp, safe_ramp
-from app.workers.base import RunWorker
+from app.run_output import update_run_metadata_status, write_run_metadata
+from app.utils import _frange_inc, _sanitize_base, safe_ramp
+from app.workers.base import RunStopped, RunWorker
 
 
 class DualGateWorker(RunWorker):
@@ -36,26 +37,51 @@ class DualGateWorker(RunWorker):
 
     @QtCore.pyqtSlot()
     def run(self):
+        csv_path = self.p.output_csv_path
+        run_status = "error"
+        run_detail = "Run ended before completion."
         try:
             if self.daq is None:
-                self.error.emit("Required session missing: DAQ")
-                return
+                raise RuntimeError("Required session missing: DAQ")
+            if int(self.p.n_sample) < 1:
+                raise RuntimeError("Averages must be at least 1.")
+            if self.p.vds_step <= 0 or self.p.vds_ramp <= 0:
+                raise RuntimeError("Vds point step and Vds ramp step must be greater than zero.")
+            if abs(self.p.vtg_set) > 1e-12 and self.g1 is None:
+                raise RuntimeError("G1 / Vtg is required because the fixed Vtg bias is nonzero.")
+            if abs(self.p.vbg_set) > 1e-12 and self.g2 is None:
+                raise RuntimeError("G2 / Vbg is required because the fixed Vbg bias is nonzero.")
 
             for field in ("vds_start", "vds_stop", "vtg_set", "vbg_set"):
-                setattr(self.p, field, clamp(getattr(self.p, field), -V_LIMIT, V_LIMIT))
+                value = float(getattr(self.p, field))
+                if abs(value) > V_LIMIT:
+                    raise RuntimeError(f"{field} is {value:.3f} V, above the {V_LIMIT:.1f} V limit.")
 
-            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            tag_src = "Vdsketh" if self.p.vds_source == "Keithley 2400" else f"Vdsdaq_ao{self.p.ao_channel}"
-            g1_tag = "Tg" if self.g1 else "NoTg"
-            g2_tag = "Bg" if self.g2 else "NoBg"
-            device_id = _sanitize_base(self.save.device_id)
-            stem = (
-                f"{device_id}_{_sanitize_base(self.p.base_name)}"
-                f"_{g1_tag}_{g2_tag}_{tag_src}"
-                f"_Vtg{self.p.vtg_set:+.3f}V_Vbg{self.p.vbg_set:+.3f}V_{ts}"
-            )
-            csv_path = os.path.join(self.save.path(), stem + ".csv")
+            if not csv_path:
+                ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                tag_src = "VdsKeithley" if self.p.vds_source == "Keithley 2400" else f"VdsDAQ_ao{self.p.ao_channel}"
+                g1_tag = "Tg" if self.g1 else "NoTg"
+                g2_tag = "Bg" if self.g2 else "NoBg"
+                device_id = _sanitize_base(self.save.device_id)
+                stem = (
+                    f"{device_id}_{_sanitize_base(self.p.base_name)}"
+                    f"_{g1_tag}_{g2_tag}_{tag_src}"
+                    f"_Vtg{self.p.vtg_set:+.3f}V_Vbg{self.p.vbg_set:+.3f}V_{ts}"
+                )
+                csv_path = os.path.join(self.save.path(), stem + ".csv")
+            os.makedirs(os.path.dirname(csv_path), exist_ok=True)
             self.log.emit(f"Save -> {csv_path}")
+            if self.p.output_metadata_path:
+                write_run_metadata(
+                    self.p.output_metadata_path,
+                    {
+                        "measurement": "vds_sweep",
+                        "csv_path": csv_path,
+                        "save_root": self.save,
+                        "connections": self.conns,
+                        "params": self.p,
+                    },
+                )
 
             self.status.emit("Ramping gates to set voltage...")
             if self.g1 is not None:
@@ -86,7 +112,7 @@ class DualGateWorker(RunWorker):
                 )
 
             self.status.emit("Ramping Vds to sweep start...")
-            self._safe_ramp_vds(self.p.vds_start)
+            self._safe_ramp_vds(self.p.vds_start, allow_stop=True)
             self.check_abort_pause()
 
             step = self.p.vds_step if self.p.vds_stop >= self.p.vds_start else -abs(self.p.vds_step)
@@ -95,39 +121,56 @@ class DualGateWorker(RunWorker):
             grand_total = len(forward_seq) + len(backward_seq)
             self.clear_plot.emit()
 
-            with open(csv_path, "a", newline="", buffering=1, encoding="utf-8") as f:
+            with open(csv_path, "x", newline="", buffering=1, encoding="utf-8") as f:
                 w = csv.writer(f)
-                w.writerow(["Vtg", "Vbg", "Vbias", "raw_X", "raw_Y", "raw_DC", "Ids_X", "Ids_Y", "Ids_DC", KEITHLEY_CHANNEL, "Direction"])
+                w.writerow(["Vtg", "Vbg", "Vds", "raw_X", "raw_Y", "raw_DC", "Ids_X", "Ids_Y", "Ids_DC", KEITHLEY_CHANNEL, "Direction"])
                 w.writerow(["V", "V", "V", "A", "A", "A", "A", "A", "A", "A", ""])
                 self._run_vds_pass(f, w, forward_seq, "forward", 0, grand_total)
                 if backward_seq:
                     self.check_abort_pause()
                     self._run_vds_pass(f, w, backward_seq, "backward", len(forward_seq), grand_total)
-
+            run_status = "finished"
+            run_detail = csv_path
             self.finished.emit(csv_path)
+        except RunStopped as ex:
+            run_status = "stopped"
+            run_detail = f"{ex}. Partial data saved to: {csv_path}" if csv_path else str(ex)
+            self.stopped.emit(run_detail)
         except Exception as ex:
-            self.error.emit(str(ex))
+            run_status = "error"
+            run_detail = str(ex)
+            self.error.emit(run_detail)
         finally:
+            failures = []
             try:
                 if self.g1 is not None:
                     safe_ramp(self.g1.set_voltage, getattr(self.g1, "voltage", None) or 0.0, 0.0, SAFE_RAMP_STEP_V, SAFE_RAMP_STEP_T)
+            except Exception as ex:
+                failures.append(f"G1/Vtg zero failed: {ex}")
+            try:
                 if self.g2 is not None:
                     safe_ramp(self.g2.set_voltage, getattr(self.g2, "voltage", None) or 0.0, 0.0, SAFE_RAMP_STEP_V, SAFE_RAMP_STEP_T)
-                self._safe_ramp_vds(0.0)
-            except Exception:
-                pass
-            self.log.emit("Outputs returned to 0 V; sessions kept open.")
+            except Exception as ex:
+                failures.append(f"G2/Vbg zero failed: {ex}")
+            try:
+                self._safe_ramp_vds(0.0, allow_stop=False)
+            except Exception as ex:
+                failures.append(f"Vds zero failed: {ex}")
+            self.emit_safe_state_report(failures)
+            update_run_metadata_status(self.p.output_metadata_path, run_status, run_detail, failures)
 
-    def _safe_ramp_vds(self, target: float) -> None:
+    def _safe_ramp_vds(self, target: float, allow_stop: bool = False) -> None:
         if self.p.vds_source == "Keithley 2400":
-            if self.g3 is not None:
-                safe_ramp(
-                    self.g3.set_voltage,
-                    getattr(self.g3, "voltage", None) or 0.0,
-                    target,
-                    SAFE_RAMP_STEP_V,
-                    SAFE_RAMP_STEP_T,
-                )
+            if self.g3 is None:
+                raise RuntimeError("Required session missing: G3 / Vds")
+            safe_ramp(
+                self.g3.set_voltage,
+                getattr(self.g3, "voltage", None) or 0.0,
+                target,
+                SAFE_RAMP_STEP_V,
+                SAFE_RAMP_STEP_T,
+                self.check_abort_pause if allow_stop else None,
+            )
         else:
             safe_ramp(
                 lambda v: self.daq.set_voltage(self.p.ao_channel, v),
@@ -135,6 +178,7 @@ class DualGateWorker(RunWorker):
                 target,
                 SAFE_RAMP_STEP_V,
                 SAFE_RAMP_STEP_T,
+                self.check_abort_pause if allow_stop else None,
             )
 
     def _run_vds_pass(self, f, w, vseq: list, direction: str, idx_offset: int, grand_total: int) -> None:
@@ -143,11 +187,10 @@ class DualGateWorker(RunWorker):
             self.status.emit(f"Point {idx_offset + i}/{grand_total}  [{direction}]")
             if self.p.vds_source == "Keithley 2400":
                 if self.g3 is None:
-                    self.error.emit("Gate3 (Keithley Vds) not connected")
-                    return
-                _safe(self.g3, "ramp_voltage", vds, self.p.vds_ramp)
+                    raise RuntimeError("G3 / Vds source is not connected.")
+                self.g3.ramp_voltage(vds, self.p.vds_ramp)
             else:
-                _safe(self.daq, "ramp_voltage", self.p.ao_channel, vds, self.p.vds_ramp)
+                self.daq.ramp_voltage(self.p.ao_channel, vds, self.p.vds_ramp)
 
             time.sleep(max(0.0, self.p.delay))
 

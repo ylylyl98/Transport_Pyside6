@@ -16,8 +16,9 @@ from app.constants import (
 )
 from app.models import Connections, LineSweepParams, SaveRoot
 from app.result_channels import KEITHLEY_CHANNEL
-from app.utils import _safe, _sanitize_base, safe_ramp
-from app.workers.base import RunWorker
+from app.run_output import update_run_metadata_status, write_run_metadata
+from app.utils import _sanitize_base, safe_ramp
+from app.workers.base import RunStopped, RunWorker
 
 
 def _interp(start: float, stop: float, index: int, total: int) -> float:
@@ -43,24 +44,42 @@ class LineSweepWorker(RunWorker):
 
     @QtCore.pyqtSlot()
     def run(self):
+        csv_path = self.p.output_csv_path
+        run_status = "error"
+        run_detail = "Run ended before completion."
         try:
             if self.daq is None:
-                self.error.emit("Required session missing: DAQ")
-                return
+                raise RuntimeError("Required session missing: DAQ")
+            if int(self.p.n_sample) < 1:
+                raise RuntimeError("Averages must be at least 1.")
+            if self.p.vg_ramp <= 0 or self.p.vds_ramp <= 0:
+                raise RuntimeError("Gate and Vds ramp steps must be greater than zero.")
 
             trajectory = self._build_trajectory()
             if not trajectory:
-                self.error.emit("No trajectory points generated.")
-                return
+                raise RuntimeError("No trajectory points generated.")
 
             self._validate_sessions()
             self._validate_trajectory_limits(trajectory)
 
-            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            device_id = _sanitize_base(self.save.device_id)
-            stem = f"{device_id}_{_sanitize_base(self.p.base_name)}_{ts}"
-            csv_path = os.path.join(self.save.path(), stem + ".csv")
+            if not csv_path:
+                ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                device_id = _sanitize_base(self.save.device_id)
+                stem = f"{device_id}_{_sanitize_base(self.p.base_name)}_{ts}"
+                csv_path = os.path.join(self.save.path(), stem + ".csv")
+            os.makedirs(os.path.dirname(csv_path), exist_ok=True)
             self.log.emit(f"Save -> {csv_path}")
+            if self.p.output_metadata_path:
+                write_run_metadata(
+                    self.p.output_metadata_path,
+                    {
+                        "measurement": "gate_scan",
+                        "csv_path": csv_path,
+                        "save_root": self.save,
+                        "connections": self.conns,
+                        "params": self.p,
+                    },
+                )
 
             first = trajectory[0]
             self.status.emit("Ramping to sweep start position...")
@@ -88,7 +107,7 @@ class LineSweepWorker(RunWorker):
                 GATE_BIAS_RAMP_STEP_T,
                 self.check_abort_pause,
             )
-            self._safe_ramp_vds(first["vds"])
+            self._safe_ramp_vds(first["vds"], allow_stop=True)
             self.check_abort_pause()
 
             forward_traj = trajectory
@@ -98,37 +117,56 @@ class LineSweepWorker(RunWorker):
             self.clear_plot.emit()
             self.status.emit("Preparing trajectory...")
 
-            with open(csv_path, "a", newline="", buffering=1, encoding="utf-8") as f:
+            with open(csv_path, "x", newline="", buffering=1, encoding="utf-8") as f:
                 w = csv.writer(f)
-                w.writerow(["Index", "Vtg", "Vbg", "Vbias", "raw_X", "raw_Y", "raw_DC", "Ids_X", "Ids_Y", "Ids_DC", KEITHLEY_CHANNEL, "Doping", "Efield", "Direction"])
+                w.writerow(["Index", "Vtg", "Vbg", "Vds", "raw_X", "raw_Y", "raw_DC", "Ids_X", "Ids_Y", "Ids_DC", KEITHLEY_CHANNEL, "Doping", "E-field", "Direction"])
                 w.writerow(["#", "V", "V", "V", "A", "A", "A", "A", "A", "A", "A", "V", "V", ""])
                 self._run_trajectory_pass(f, w, forward_traj, "forward", 0, grand_total)
                 if backward_traj:
                     self.check_abort_pause()
                     self._run_trajectory_pass(f, w, backward_traj, "backward", len(forward_traj), grand_total)
-
+            run_status = "finished"
+            run_detail = csv_path
             self.finished.emit(csv_path)
+        except RunStopped as ex:
+            run_status = "stopped"
+            run_detail = f"{ex}. Partial data saved to: {csv_path}" if csv_path else str(ex)
+            self.stopped.emit(run_detail)
         except Exception as ex:
-            self.error.emit(str(ex))
+            run_status = "error"
+            run_detail = str(ex)
+            self.error.emit(run_detail)
         finally:
+            failures = []
             try:
-                safe_ramp(self.g1.set_voltage, getattr(self.g1, "voltage", None) or 0.0, 0.0, SAFE_RAMP_STEP_V, SAFE_RAMP_STEP_T)
-                safe_ramp(self.g2.set_voltage, getattr(self.g2, "voltage", None) or 0.0, 0.0, SAFE_RAMP_STEP_V, SAFE_RAMP_STEP_T)
-                self._safe_ramp_vds(0.0)
-            except Exception:
-                pass
-            self.log.emit("Outputs returned to 0 V; sessions kept open.")
+                if self.g1 is not None:
+                    safe_ramp(self.g1.set_voltage, getattr(self.g1, "voltage", None) or 0.0, 0.0, SAFE_RAMP_STEP_V, SAFE_RAMP_STEP_T)
+            except Exception as ex:
+                failures.append(f"G1/Vtg zero failed: {ex}")
+            try:
+                if self.g2 is not None:
+                    safe_ramp(self.g2.set_voltage, getattr(self.g2, "voltage", None) or 0.0, 0.0, SAFE_RAMP_STEP_V, SAFE_RAMP_STEP_T)
+            except Exception as ex:
+                failures.append(f"G2/Vbg zero failed: {ex}")
+            try:
+                self._safe_ramp_vds(0.0, allow_stop=False)
+            except Exception as ex:
+                failures.append(f"Vds zero failed: {ex}")
+            self.emit_safe_state_report(failures)
+            update_run_metadata_status(self.p.output_metadata_path, run_status, run_detail, failures)
 
-    def _safe_ramp_vds(self, target: float) -> None:
+    def _safe_ramp_vds(self, target: float, allow_stop: bool = False) -> None:
         if self.p.vds_source == "Keithley 2400":
-            if self.g3 is not None:
-                safe_ramp(
-                    self.g3.set_voltage,
-                    getattr(self.g3, "voltage", None) or 0.0,
-                    target,
-                    SAFE_RAMP_STEP_V,
-                    SAFE_RAMP_STEP_T,
-                )
+            if self.g3 is None:
+                raise RuntimeError("Required session missing: G3 / Vds")
+            safe_ramp(
+                self.g3.set_voltage,
+                getattr(self.g3, "voltage", None) or 0.0,
+                target,
+                SAFE_RAMP_STEP_V,
+                SAFE_RAMP_STEP_T,
+                self.check_abort_pause if allow_stop else None,
+            )
         else:
             safe_ramp(
                 lambda v: self.daq.set_voltage(self.p.ao_channel, v),
@@ -136,6 +174,7 @@ class LineSweepWorker(RunWorker):
                 target,
                 SAFE_RAMP_STEP_V,
                 SAFE_RAMP_STEP_T,
+                self.check_abort_pause if allow_stop else None,
             )
 
     def _run_trajectory_pass(self, f, w, trajectory: list, direction: str, idx_offset: int, grand_total: int) -> None:
@@ -198,11 +237,11 @@ class LineSweepWorker(RunWorker):
 
     def _validate_sessions(self):
         if self.g1 is None:
-            raise RuntimeError("Required session missing: G1")
+            raise RuntimeError("Required session missing: G1 / Vtg")
         if self.g2 is None:
-            raise RuntimeError("Required session missing: G2")
+            raise RuntimeError("Required session missing: G2 / Vbg")
         if self.p.vds_source == "Keithley 2400" and self.g3 is None:
-            raise RuntimeError("Required session missing: G3")
+            raise RuntimeError("Required session missing: G3 / Vds")
 
     def _validate_trajectory_limits(self, trajectory: list[dict[str, float]]):
         for point in trajectory:
@@ -264,12 +303,12 @@ class LineSweepWorker(RunWorker):
         return points
 
     def _apply_point(self, point: dict[str, float]):
-        _safe(self.g1, "ramp_voltage", point["vtg"], self.p.vg_ramp)
-        _safe(self.g2, "ramp_voltage", point["vbg"], self.p.vg_ramp)
+        self.g1.ramp_voltage(point["vtg"], self.p.vg_ramp)
+        self.g2.ramp_voltage(point["vbg"], self.p.vg_ramp)
         if self.p.vds_source == "Keithley 2400":
-            _safe(self.g3, "ramp_voltage", point["vds"], self.p.vds_ramp)
+            self.g3.ramp_voltage(point["vds"], self.p.vds_ramp)
         else:
-            _safe(self.daq, "ramp_voltage", self.p.ao_channel, point["vds"], self.p.vds_ramp)
+            self.daq.ramp_voltage(self.p.ao_channel, point["vds"], self.p.vds_ramp)
 
     def _read_keithley_current(self):
         if self.p.vds_source != "Keithley 2400" or self.g3 is None:
@@ -297,11 +336,11 @@ class LineSweepWorker(RunWorker):
             return point["vtg"]
         if axis == "Vbg":
             return point["vbg"]
-        if axis in {"Vds", "Vbias"}:
+        if axis == "Vds":
             return point["vds"]
         if axis == "Doping":
             return point["doping"]
-        if axis == "Efield":
+        if axis in {"Efield", "E-field"}:
             return point["efield"]
         if self.p.mode == "Derived":
             return point["doping"] if self.p.derived_axis == "Doping" else point["efield"]

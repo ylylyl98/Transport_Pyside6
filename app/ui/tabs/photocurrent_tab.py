@@ -6,6 +6,7 @@ from app.constants import GATE_BIAS_RAMP_STEP_T, GATE_BIAS_RAMP_STEP_V
 from app.device_manager import DeviceManager
 from app.models import Connections, PhotocurrentParams, SaveRoot
 from app.result_channels import compare_channel_options, plot_channel_options, plot_channel_value
+from app.run_output import build_planned_output, planned_output_warning
 from app.ui.helpers import apply_tooltip, configure_volt_spinbox, flash_button_success, set_standard_input_height, style_form_layout
 from app.ui.tabs.base_tab import BaseMeasurementTab
 from app.ui.widgets.collapsible_section import CollapsibleSection
@@ -28,6 +29,8 @@ class PhotocurrentTab(BaseMeasurementTab):
         self.worker_thread = None
         self.worker = None
         self._plot_records = []
+        self._output_run_id = None
+        self._planned_output = None
         super().__init__("START PHOTOCURRENT", "Wavelength (nm)", "Ids (A)", ["g1", "g2", "g3", "daq", "mono"])
         self._wire()
         self.btn_start.setToolTip("Connect instruments first")
@@ -80,6 +83,7 @@ class PhotocurrentTab(BaseMeasurementTab):
         self.btn_set_vds.setFixedWidth(SET_BUTTON_WIDTH)
         self.sp_vds_ramp = QtWidgets.QDoubleSpinBox()
         self.sp_vds_ramp.setDecimals(3)
+        self.sp_vds_ramp.setRange(1e-3, 5.0)
         self.sp_vds_ramp.setValue(0.01)
         form_vds.addRow(self.chk_use_vds)
         lbl_vds = QtWidgets.QLabel("Set (V):")
@@ -111,8 +115,11 @@ class PhotocurrentTab(BaseMeasurementTab):
         form_time = QtWidgets.QFormLayout(grp_time)
         style_form_layout(form_time)
         self.sp_delay = QtWidgets.QDoubleSpinBox()
+        self.sp_delay.setDecimals(3)
+        self.sp_delay.setRange(0.0, 30.0)
         self.sp_delay.setValue(0.01)
         self.sp_nsamp = QtWidgets.QSpinBox()
+        self.sp_nsamp.setRange(1, 1000)
         self.sp_nsamp.setValue(1)
         lbl_delay = QtWidgets.QLabel("Delay (s):")
         lbl_avg = QtWidgets.QLabel("Averages:")
@@ -120,7 +127,7 @@ class PhotocurrentTab(BaseMeasurementTab):
         form_time.addRow(lbl_avg, self.sp_nsamp)
         ctl_layout.addWidget(grp_time)
 
-        ctl_layout.addWidget(SectionHeader("Advanced"))
+        ctl_layout.addWidget(SectionHeader("Output"))
         grp_output = QtWidgets.QGroupBox("Output Settings")
         form_output = QtWidgets.QFormLayout(grp_output)
         style_form_layout(form_output)
@@ -129,14 +136,15 @@ class PhotocurrentTab(BaseMeasurementTab):
         self.cbo_source.addItems(["None", "Keithley 2400"])
         self.cbo_y = QtWidgets.QComboBox()
         self.cbo_y.addItems(["Ids_DC", "Ids_X", "Ids_Y"])
-        lbl_base = QtWidgets.QLabel("Filename:")
+        lbl_base = QtWidgets.QLabel("Filename Stem:")
         lbl_source = QtWidgets.QLabel("Vds Source:")
         lbl_y = QtWidgets.QLabel("Plot Axis:")
         form_output.addRow(lbl_base, self.ed_base)
         form_output.addRow(lbl_source, self.cbo_source)
         form_output.addRow(lbl_y, self.cbo_y)
-        self.exp_output = CollapsibleSection("Output and Plot Options", grp_output, expanded=False)
+        self.exp_output = CollapsibleSection("Output and Plot Options", grp_output, expanded=True)
         ctl_layout.addWidget(self.exp_output)
+        self._add_output_preview_section(ctl_layout)
 
         self.lbl_connection_hint = QtWidgets.QLabel()
         self.lbl_connection_hint.setWordWrap(True)
@@ -208,6 +216,41 @@ class PhotocurrentTab(BaseMeasurementTab):
         self.plot.y_axis_changed.connect(self.set_plot_axis_source)
         self.plot.plot_mode_changed.connect(lambda _mode: self._redraw_plot())
         self._update_vds_bias_state()
+        self.ed_base.textChanged.connect(self.refresh_output_preview)
+        self.cbo_source.currentIndexChanged.connect(self.refresh_output_preview)
+        self.chk_use_vds.toggled.connect(self.refresh_output_preview)
+        for widget in (
+            self.sp_wls,
+            self.sp_wle,
+            self.sp_vds,
+            self.sp_vtg,
+            self.sp_vbg,
+        ):
+            widget.valueChanged.connect(self.refresh_output_preview)
+        self.refresh_output_preview()
+
+    def _output_summary_parts(self) -> list[str]:
+        source = "no_vds"
+        if self.chk_use_vds.isChecked():
+            source = "keithley_g3" if self.cbo_source.currentText() == "Keithley 2400" else self.cbo_source.currentText()
+        return [
+            f"wl_{self.sp_wls.value():g}to{self.sp_wle.value():g}nm",
+            f"Vtg_{self.sp_vtg.value():g}V",
+            f"Vbg_{self.sp_vbg.value():g}V",
+            source,
+        ]
+
+    def refresh_output_preview(self, *_args):
+        planned = build_planned_output(
+            self.save,
+            "photocurrent",
+            self.ed_base.text(),
+            self._output_summary_parts(),
+            run_id=self._output_run_id,
+        )
+        self._output_run_id = planned.run_id
+        self._planned_output = planned
+        self.set_output_preview_text(planned, planned_output_warning(planned, self.save))
 
     def _update_manual_buttons(self):
         self._sync_sessions_from_manager()
@@ -280,9 +323,13 @@ class PhotocurrentTab(BaseMeasurementTab):
 
     def _required_devices(self) -> list[str]:
         required = ["daq", "mono"]
+        if abs(self.sp_vtg.value()) > 1e-12:
+            required.append("g1")
+        if abs(self.sp_vbg.value()) > 1e-12:
+            required.append("g2")
         if self.chk_use_vds.isChecked() and self.cbo_source.currentText() == "Keithley 2400":
             required.append("g3")
-        return required
+        return list(dict.fromkeys(required))
 
     def _validate_required_sessions(self) -> bool:
         self._sync_sessions_from_manager()
@@ -290,22 +337,29 @@ class PhotocurrentTab(BaseMeasurementTab):
         if missing:
             QtWidgets.QMessageBox.warning(self, "Missing Device", f"Connect required devices first: {', '.join(missing).upper()}")
             return False
+        if self.chk_use_vds.isChecked() and self.cbo_source.currentText() == "None":
+            QtWidgets.QMessageBox.warning(self, "Vds Source", "Choose a Vds Source or turn off Enable Vds Bias before starting.")
+            return False
         if self.chk_use_vds.isChecked() and self.cbo_source.currentText() == "Keithley 2400" and not self.device_manager.is_voltage_source_mode("g3"):
             QtWidgets.QMessageBox.warning(self, "Keithley Mode", "G3 must be in 2-wire voltage source mode when photocurrent uses Keithley Vds bias.")
             return False
+        for gate, label in (("g1", "G1 / Vtg"), ("g2", "G2 / Vbg")):
+            if gate in self._required_devices() and not self.device_manager.is_voltage_source_mode(gate):
+                QtWidgets.QMessageBox.warning(self, "Gate Mode", f"{label} must be in 2-wire voltage source mode because its fixed bias is nonzero.")
+                return False
         return True
 
     def _update_connection_hint(self):
         required = self._required_devices()
-        optional = ["g1", "g2"]
+        optional = [name for name in ("g1", "g2") if name not in required]
         if not self.chk_use_vds.isChecked():
             optional.append("g3")
         missing_required = [name.upper() for name in required if not self.device_manager.is_connected(name)]
         missing_optional = [name.upper() for name in optional if not self.device_manager.is_connected(name)]
         if self.device_manager.is_connected("g1") and not self.device_manager.is_voltage_source_mode("g1"):
-            missing_optional.append("G1 mode")
+            (missing_required if "g1" in required else missing_optional).append("G1 mode")
         if self.device_manager.is_connected("g2") and not self.device_manager.is_voltage_source_mode("g2"):
-            missing_optional.append("G2 mode")
+            (missing_required if "g2" in required else missing_optional).append("G2 mode")
         if (
             self.chk_use_vds.isChecked()
             and self.cbo_source.currentText() == "Keithley 2400"
@@ -351,7 +405,7 @@ class PhotocurrentTab(BaseMeasurementTab):
             try:
                 val = self.sp_vtg.value()
                 self.log.appendPlainText(
-                    f"[Manual] Ramping Gate1/Vtg to {val} V ({GATE_BIAS_RAMP_STEP_V:g} V/step)"
+                    f"[Manual] Ramping G1 / Vtg to {val} V ({GATE_BIAS_RAMP_STEP_V:g} V/step)"
                 )
                 safe_ramp(
                     self.s_g1.set_voltage,
@@ -360,7 +414,7 @@ class PhotocurrentTab(BaseMeasurementTab):
                     GATE_BIAS_RAMP_STEP_V,
                     GATE_BIAS_RAMP_STEP_T,
                 )
-                self.log.appendPlainText(f"[Manual] Gate1 set to {val} V ({GATE_BIAS_RAMP_STEP_V:g} V/step)")
+                self.log.appendPlainText(f"[Manual] G1 / Vtg set to {val} V ({GATE_BIAS_RAMP_STEP_V:g} V/step)")
                 flash_button_success(self.btn_set_vtg)
             except Exception as ex:
                 self.log.appendPlainText(f"Error setting G1: {ex}")
@@ -370,7 +424,7 @@ class PhotocurrentTab(BaseMeasurementTab):
             try:
                 val = self.sp_vbg.value()
                 self.log.appendPlainText(
-                    f"[Manual] Ramping Gate2/Vbg to {val} V ({GATE_BIAS_RAMP_STEP_V:g} V/step)"
+                    f"[Manual] Ramping G2 / Vbg to {val} V ({GATE_BIAS_RAMP_STEP_V:g} V/step)"
                 )
                 safe_ramp(
                     self.s_g2.set_voltage,
@@ -379,7 +433,7 @@ class PhotocurrentTab(BaseMeasurementTab):
                     GATE_BIAS_RAMP_STEP_V,
                     GATE_BIAS_RAMP_STEP_T,
                 )
-                self.log.appendPlainText(f"[Manual] Gate2 set to {val} V ({GATE_BIAS_RAMP_STEP_V:g} V/step)")
+                self.log.appendPlainText(f"[Manual] G2 / Vbg set to {val} V ({GATE_BIAS_RAMP_STEP_V:g} V/step)")
                 flash_button_success(self.btn_set_vbg)
             except Exception as ex:
                 self.log.appendPlainText(f"Error setting G2: {ex}")
@@ -388,10 +442,10 @@ class PhotocurrentTab(BaseMeasurementTab):
         src = self.cbo_source.currentText()
         val = self.sp_vds.value()
         if src == "Keithley 2400" and self.s_g3:
-            self.s_g3.ramp_voltage(val, 0.5)
+            self.s_g3.ramp_voltage(val, self.sp_vds_ramp.value())
             flash_button_success(self.btn_set_vds)
         elif "NI DAQ" in src and self.s_daq:
-            self.s_daq.ramp_voltage(int(src.split()[-1].replace("ao", "")), val, 0.5)
+            self.s_daq.ramp_voltage(int(src.split()[-1].replace("ao", "")), val, self.sp_vds_ramp.value())
             flash_button_success(self.btn_set_vds)
 
     def on_go_wl(self):
@@ -400,7 +454,11 @@ class PhotocurrentTab(BaseMeasurementTab):
             flash_button_success(self.btn_go_wl)
 
     def collect_params(self):
+        self.refresh_output_preview()
         self.p.base_name = self.ed_base.text()
+        self.p.output_csv_path = self._planned_output.csv_path if self._planned_output else ""
+        self.p.output_metadata_path = self._planned_output.metadata_path if self._planned_output else ""
+        self.p.output_log_path = self._planned_output.log_path if self._planned_output else ""
         self.p.use_vds = self.chk_use_vds.isChecked()
         src = self.cbo_source.currentText()
         if "NI DAQ" in src:
@@ -409,6 +467,7 @@ class PhotocurrentTab(BaseMeasurementTab):
         else:
             self.p.vds_source = src
         self.p.vds_set = self.sp_vds.value()
+        self.p.vds_ramp = self.sp_vds_ramp.value()
         self.p.vtg_set = self.sp_vtg.value()
         self.p.vbg_set = self.sp_vbg.value()
         self.p.wl_start = self.sp_wls.value()
@@ -424,6 +483,9 @@ class PhotocurrentTab(BaseMeasurementTab):
         mw = self.window()
         if hasattr(mw, "refresh_models_from_ui"):
             mw.refresh_models_from_ui()
+        self.refresh_output_preview()
+        if not self.validate_output_ready(self.save):
+            return
         if not self._validate_required_sessions():
             return
         claimed, blocked = self.device_manager.mark_in_use(self._required_devices())
@@ -436,6 +498,7 @@ class PhotocurrentTab(BaseMeasurementTab):
         self.plot.ax.set_xlabel("Wavelength (nm)")
         self.set_plot_axis_source(self.p.plot_choice)
         try:
+            self.begin_run_logging(self._planned_output, "Photocurrent")
             amp, lkn = self.get_global_rates()
             self.worker = PhotocurrentWorker(self.p, self.save, self.conns, g1=self.s_g1, g2=self.s_g2, g3=self.s_g3, daq=self.s_daq, mono=self.s_mono, plot_choice=self.p.plot_choice, amp_rate=amp, lkn_rate=lkn)
             self.worker_thread = QtCore.QThread()
@@ -444,9 +507,11 @@ class PhotocurrentTab(BaseMeasurementTab):
             self.worker.point_data.connect(self.on_point_data)
             self.worker.progress.connect(self.set_progress)
             self.worker.status.connect(lambda m: self.set_status(m, "running"))
-            self.worker.log.connect(self.log.appendPlainText)
+            self.worker.log.connect(self.append_log)
             self.worker.finished.connect(self.on_finished)
+            self.worker.stopped.connect(self.on_stopped)
             self.worker.finished.connect(self.worker_thread.quit)
+            self.worker.stopped.connect(self.worker_thread.quit)
             self.worker.error.connect(self.on_error)
             self.worker.error.connect(self.worker_thread.quit)
             self.worker_thread.finished.connect(self._cleanup_thread)
@@ -454,11 +519,13 @@ class PhotocurrentTab(BaseMeasurementTab):
             self.set_status("Running...", "running")
             self.worker_thread.start()
         except Exception as ex:
-            self.log.appendPlainText(str(ex))
+            self.append_log(str(ex))
+            self.end_run_logging("error", str(ex))
             self.device_manager.release(self._required_devices())
 
     def stop_run(self):
         if self.worker:
+            self.set_status("Stopping safely...", "running", "Stop requested. Waiting for the worker to reach a safe checkpoint and ramp outputs to 0 V.")
             self.worker.request_stop()
 
     def _cleanup_thread(self):
@@ -516,8 +583,22 @@ class PhotocurrentTab(BaseMeasurementTab):
         self.plot.canvas.draw_idle()
 
     def on_finished(self, path):
-        self.set_status("Finished", "done")
-        self.log.appendPlainText(f"Saved: {path}")
+        self.set_status("Finished", "done", path)
+        self.append_log(f"Saved: {path}")
+        self.end_run_logging("finished", path)
+        self._output_run_id = None
+        self.refresh_output_preview()
 
     def on_error(self, msg):
         self.set_status("Run error", "error", msg)
+        self.append_log("ERROR: " + msg)
+        self.end_run_logging("error", msg)
+        self._output_run_id = None
+        self.refresh_output_preview()
+
+    def on_stopped(self, message: str):
+        self.set_status("Stopped by user", "done", message)
+        self.append_log(message)
+        self.end_run_logging("stopped", message)
+        self._output_run_id = None
+        self.refresh_output_preview()

@@ -1,7 +1,12 @@
 {
   "permissions": {
     "allow": [
-      "Bash(cd d:\\\\\\\\instrument_control_v3_1\\\\\\\\Transport_Pyside6)"
+      "Bash(cd d:\\\\\\\\instrument_control_v3_1\\\\\\\\Transport_Pyside6)",
+      "Bash(python -c \"import app.ui.tabs.base_tab; print\\('OK'\\)\")",
+      "Bash(python -c \"import app.ui.tabs.base_tab; import app.run_output; print\\('OK'\\)\")",
+      "Bash(python -c \"import app.run_output; import app.ui.tabs.base_tab; print\\('OK'\\)\")",
+      "Bash(python -c \"import app.run_output; import app.ui.tabs.cosweep_tab; print\\('OK'\\)\")",
+      "Bash(python -c \"import app.ui.main_window; print\\('OK'\\)\")"
     ]
   }
 }

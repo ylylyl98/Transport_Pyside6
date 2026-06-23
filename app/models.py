@@ -24,8 +24,9 @@ class SaveRoot:
     base: str = r"D:\\photocurrent\\data"
 
     def path(self) -> str:
+        safe_user = re.sub(r"[^-_.A-Za-z0-9]+", "_", self.user).strip("_") or "User"
         safe_id = re.sub(r"[^-_.A-Za-z0-9]+", "_", self.device_id).strip("_") or "device"
-        out = os.path.join(self.base, self.user, safe_id)
+        out = os.path.join(self.base, safe_user, safe_id)
         os.makedirs(out, exist_ok=True)
         return out
 
@@ -33,6 +34,9 @@ class SaveRoot:
 @dataclass
 class DualGateParams:
     base_name: str = "dual_gate"
+    output_csv_path: str = ""
+    output_metadata_path: str = ""
+    output_log_path: str = ""
     vds_source: str = "Keithley 2400"
     vds_start: float = 0.0
     vds_stop: float = 0.5
@@ -51,6 +55,9 @@ class DualGateParams:
 @dataclass
 class CoParams:
     base_name: str = "dual_gate_cosweep"
+    output_csv_path: str = ""
+    output_metadata_path: str = ""
+    output_log_path: str = ""
     vds_source: str = "Keithley 2400"
     ao_channel: int = 0
     vds_set: float = 0.0
@@ -78,6 +85,9 @@ class CoParams:
 @dataclass
 class LineSweepParams:
     base_name: str = "gate_scan"
+    output_csv_path: str = ""
+    output_metadata_path: str = ""
+    output_log_path: str = ""
     mode: str = "Raw"
     vds_source: str = "Keithley 2400"
     ao_channel: int = 0
@@ -115,6 +125,9 @@ class LineSweepParams:
 @dataclass
 class PhotocurrentParams:
     base_name: str = "pcspec"
+    output_csv_path: str = ""
+    output_metadata_path: str = ""
+    output_log_path: str = ""
     use_vds: bool = False
     vds_source: str = "None"
     ao_channel: int = 0

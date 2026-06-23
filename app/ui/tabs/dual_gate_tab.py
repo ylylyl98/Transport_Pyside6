@@ -9,6 +9,7 @@ from app.constants import GATE_BIAS_RAMP_STEP_T, GATE_BIAS_RAMP_STEP_V
 from app.device_manager import DeviceManager
 from app.models import Connections, DualGateParams, SaveRoot
 from app.result_channels import compare_channel_options, plot_channel_options, plot_channel_value
+from app.run_output import build_planned_output, planned_output_warning
 from app.ui.helpers import apply_tooltip, configure_volt_spinbox, flash_button_success, set_standard_input_height, style_form_layout
 from app.ui.tabs.base_tab import BaseMeasurementTab
 from app.ui.widgets.collapsible_section import CollapsibleSection
@@ -30,6 +31,8 @@ class DualGateTab(BaseMeasurementTab):
         self.worker_thread = None
         self.worker = None
         self._plot_records = []
+        self._output_run_id = None
+        self._planned_output = None
         super().__init__("START SWEEP", "Vds (V)", "Ids (A)", ["g1", "g2", "g3", "daq"])
         self._wire()
         self.btn_start.setToolTip("Connect instruments first")
@@ -85,8 +88,8 @@ class DualGateTab(BaseMeasurementTab):
         form_vds.addRow("", self.chk_sweep_bidirectional)
         ctl_layout.addWidget(grp_vds)
 
-        ctl_layout.addWidget(SectionHeader("Bias"))
-        grp_gate = QtWidgets.QGroupBox("Gate Bias")
+        ctl_layout.addWidget(SectionHeader("Fixed Gate Voltages"))
+        grp_gate = QtWidgets.QGroupBox("Fixed Gate Voltages")
         form_gate = QtWidgets.QFormLayout(grp_gate)
         style_form_layout(form_gate)
         self.sp_vtg = QtWidgets.QDoubleSpinBox()
@@ -120,7 +123,7 @@ class DualGateTab(BaseMeasurementTab):
         form_time.addRow(lbl_nsamp, self.sp_nsamp)
         ctl_layout.addWidget(grp_time)
 
-        ctl_layout.addWidget(SectionHeader("Advanced"))
+        ctl_layout.addWidget(SectionHeader("Output"))
         grp_output = QtWidgets.QGroupBox("Output Settings")
         form_output = QtWidgets.QFormLayout(grp_output)
         style_form_layout(form_output)
@@ -129,14 +132,15 @@ class DualGateTab(BaseMeasurementTab):
         self.cbo_source.addItems(["Keithley 2400"])
         self.cbo_y = QtWidgets.QComboBox()
         self.cbo_y.addItems(["Ids_DC", "Ids_X", "Ids_Y"])
-        lbl_base = QtWidgets.QLabel("Filename:")
+        lbl_base = QtWidgets.QLabel("Filename Stem:")
         lbl_source = QtWidgets.QLabel("Vds Source:")
         lbl_y = QtWidgets.QLabel("Plot Axis:")
         form_output.addRow(lbl_base, self.ed_base)
         form_output.addRow(lbl_source, self.cbo_source)
         form_output.addRow(lbl_y, self.cbo_y)
-        self.exp_output = CollapsibleSection("Output and Plot Options", grp_output, expanded=False)
+        self.exp_output = CollapsibleSection("Output and Plot Options", grp_output, expanded=True)
         ctl_layout.addWidget(self.exp_output)
+        self._add_output_preview_section(ctl_layout)
 
         self.lbl_connection_hint = QtWidgets.QLabel()
         self.lbl_connection_hint.setWordWrap(True)
@@ -214,6 +218,43 @@ class DualGateTab(BaseMeasurementTab):
         self._update_plot_axis_choices()
         self.plot.y_axis_changed.connect(self.set_plot_axis_source)
         self.plot.plot_mode_changed.connect(lambda _mode: self._redraw_plot())
+        self.ed_base.textChanged.connect(self.refresh_output_preview)
+        self.cbo_source.currentIndexChanged.connect(self.refresh_output_preview)
+        for widget in (
+            self.sp_vds_start,
+            self.sp_vds_stop,
+            self.sp_vtg,
+            self.sp_vbg,
+            self.chk_sweep_bidirectional,
+        ):
+            if hasattr(widget, "valueChanged"):
+                widget.valueChanged.connect(self.refresh_output_preview)
+            else:
+                widget.toggled.connect(self.refresh_output_preview)
+        self.refresh_output_preview()
+
+    def _output_summary_parts(self) -> list[str]:
+        direction = "forward_backward" if self.chk_sweep_bidirectional.isChecked() else "forward"
+        source = "keithley_g3" if self.cbo_source.currentText() == "Keithley 2400" else self.cbo_source.currentText()
+        return [
+            f"Vds_{self.sp_vds_start.value():g}to{self.sp_vds_stop.value():g}V",
+            f"Vtg_{self.sp_vtg.value():g}V",
+            f"Vbg_{self.sp_vbg.value():g}V",
+            source,
+            direction,
+        ]
+
+    def refresh_output_preview(self, *_args):
+        planned = build_planned_output(
+            self.save,
+            "vds_sweep",
+            self.ed_base.text(),
+            self._output_summary_parts(),
+            run_id=self._output_run_id,
+        )
+        self._output_run_id = planned.run_id
+        self._planned_output = planned
+        self.set_output_preview_text(planned, planned_output_warning(planned, self.save))
 
     def _update_manual_buttons(self):
         self._sync_sessions_from_manager()
@@ -272,9 +313,13 @@ class DualGateTab(BaseMeasurementTab):
 
     def _required_devices(self) -> List[str]:
         required = ["daq"]
+        if abs(self.sp_vtg.value()) > 1e-12:
+            required.append("g1")
+        if abs(self.sp_vbg.value()) > 1e-12:
+            required.append("g2")
         if self.cbo_source.currentText() == "Keithley 2400":
             required.append("g3")
-        return required
+        return list(dict.fromkeys(required))
 
     def _validate_required_sessions(self) -> bool:
         self._sync_sessions_from_manager()
@@ -285,17 +330,21 @@ class DualGateTab(BaseMeasurementTab):
         if self.cbo_source.currentText() == "Keithley 2400" and not self.device_manager.is_voltage_source_mode("g3"):
             QtWidgets.QMessageBox.warning(self, "Keithley Mode", "G3 must be in 2-wire voltage source mode for a Keithley-driven Vds sweep.")
             return False
+        for gate, label in (("g1", "G1 / Vtg"), ("g2", "G2 / Vbg")):
+            if gate in self._required_devices() and not self.device_manager.is_voltage_source_mode(gate):
+                QtWidgets.QMessageBox.warning(self, "Gate Mode", f"{label} must be in 2-wire voltage source mode because its fixed bias is nonzero.")
+                return False
         return True
 
     def _update_connection_hint(self):
         required = self._required_devices()
-        optional = ["g1", "g2"]
+        optional = [name for name in ("g1", "g2") if name not in required]
         missing_required = [name.upper() for name in required if not self.device_manager.is_connected(name)]
         missing_optional = [name.upper() for name in optional if not self.device_manager.is_connected(name)]
         if self.device_manager.is_connected("g1") and not self.device_manager.is_voltage_source_mode("g1"):
-            missing_optional.append("G1 mode")
+            (missing_required if "g1" in required else missing_optional).append("G1 mode")
         if self.device_manager.is_connected("g2") and not self.device_manager.is_voltage_source_mode("g2"):
-            missing_optional.append("G2 mode")
+            (missing_required if "g2" in required else missing_optional).append("G2 mode")
         if self.cbo_source.currentText() == "Keithley 2400" and self.device_manager.is_connected("g3") and not self.device_manager.is_voltage_source_mode("g3"):
             missing_required.append("G3 mode")
         if self.device_manager.is_busy():
@@ -323,7 +372,7 @@ class DualGateTab(BaseMeasurementTab):
             try:
                 val = self.sp_vtg.value()
                 self.log.appendPlainText(
-                    f"[Manual] Ramping Gate1/Vtg to {val} V ({GATE_BIAS_RAMP_STEP_V:g} V/step)"
+                    f"[Manual] Ramping G1 / Vtg to {val} V ({GATE_BIAS_RAMP_STEP_V:g} V/step)"
                 )
                 safe_ramp(
                     self.s_g1.set_voltage,
@@ -332,19 +381,19 @@ class DualGateTab(BaseMeasurementTab):
                     GATE_BIAS_RAMP_STEP_V,
                     GATE_BIAS_RAMP_STEP_T,
                 )
-                self.log.appendPlainText(f"[Manual] Gate1 set to {val} V ({GATE_BIAS_RAMP_STEP_V:g} V/step)")
+                self.log.appendPlainText(f"[Manual] G1 / Vtg set to {val} V ({GATE_BIAS_RAMP_STEP_V:g} V/step)")
                 flash_button_success(self.btn_set_vtg)
             except Exception as ex:
                 self.log.appendPlainText(f"Error setting G1: {ex}")
         else:
-            self.log.appendPlainText("Gate1 not connected.")
+            self.log.appendPlainText("G1 / Vtg not connected.")
 
     def on_set_vbg(self):
         if self.s_g2:
             try:
                 val = self.sp_vbg.value()
                 self.log.appendPlainText(
-                    f"[Manual] Ramping Gate2/Vbg to {val} V ({GATE_BIAS_RAMP_STEP_V:g} V/step)"
+                    f"[Manual] Ramping G2 / Vbg to {val} V ({GATE_BIAS_RAMP_STEP_V:g} V/step)"
                 )
                 safe_ramp(
                     self.s_g2.set_voltage,
@@ -353,15 +402,19 @@ class DualGateTab(BaseMeasurementTab):
                     GATE_BIAS_RAMP_STEP_V,
                     GATE_BIAS_RAMP_STEP_T,
                 )
-                self.log.appendPlainText(f"[Manual] Gate2 set to {val} V ({GATE_BIAS_RAMP_STEP_V:g} V/step)")
+                self.log.appendPlainText(f"[Manual] G2 / Vbg set to {val} V ({GATE_BIAS_RAMP_STEP_V:g} V/step)")
                 flash_button_success(self.btn_set_vbg)
             except Exception as ex:
                 self.log.appendPlainText(f"Error setting G2: {ex}")
         else:
-            self.log.appendPlainText("Gate2 not connected.")
+            self.log.appendPlainText("G2 / Vbg not connected.")
 
     def collect_params(self):
+        self.refresh_output_preview()
         self.p.base_name = self.ed_base.text()
+        self.p.output_csv_path = self._planned_output.csv_path if self._planned_output else ""
+        self.p.output_metadata_path = self._planned_output.metadata_path if self._planned_output else ""
+        self.p.output_log_path = self._planned_output.log_path if self._planned_output else ""
         src_text = self.cbo_source.currentText()
         if src_text.startswith("NI DAQ "):
             self.p.vds_source = "NI DAQ AO"
@@ -389,6 +442,9 @@ class DualGateTab(BaseMeasurementTab):
         mw = self.window()
         if hasattr(mw, "refresh_models_from_ui"):
             mw.refresh_models_from_ui()
+        self.refresh_output_preview()
+        if not self.validate_output_ready(self.save):
+            return
         if not self._validate_required_sessions():
             return
         claimed, blocked = self.device_manager.mark_in_use(self._required_devices())
@@ -401,6 +457,7 @@ class DualGateTab(BaseMeasurementTab):
         self.plot.ax.set_xlabel("Vds (V)")
         self.set_plot_axis_source(self.p.plot_choice)
         try:
+            self.begin_run_logging(self._planned_output, "Vds Sweep")
             amp_rate, lkn_rate = self.get_global_rates()
             self.worker = DualGateWorker(self.p, self.save, self.conns, g1=self.s_g1, g2=self.s_g2, g3=self.s_g3, daq=self.s_daq, plot_choice=self.p.plot_choice, amp_rate=amp_rate, lkn_rate=lkn_rate)
             self.worker_thread = QtCore.QThread()
@@ -409,24 +466,28 @@ class DualGateTab(BaseMeasurementTab):
             self.worker.point_data.connect(self.on_point_data)
             self.worker.progress.connect(self.set_progress)
             self.worker.status.connect(lambda m: self.set_status(m, "running"))
-            self.worker.log.connect(self.log.appendPlainText)
+            self.worker.log.connect(self.append_log)
             self.worker.finished.connect(self.on_finished)
+            self.worker.stopped.connect(self.on_stopped)
             self.worker.error.connect(self.on_error)
             self.worker.finished.connect(self.worker_thread.quit)
+            self.worker.stopped.connect(self.worker_thread.quit)
             self.worker.error.connect(self.worker_thread.quit)
             self.worker_thread.finished.connect(self._cleanup_thread)
             self.run_panel.set_running(True)
             self.set_status("Running...", "running")
             self.progress.setValue(0)
             self.worker_thread.start()
-            self.log.appendPlainText("[start] Worker thread started.")
+            self.append_log("[start] Worker thread started.")
         except Exception as ex:
-            self.log.appendPlainText(f"[start] ERROR while creating/starting worker: {ex}")
+            self.append_log(f"[start] ERROR while creating/starting worker: {ex}")
+            self.end_run_logging("error", str(ex))
             self.device_manager.release(self._required_devices())
 
     def stop_run(self):
         if self.worker:
-            self.log.appendPlainText("Stop requested by user.")
+            self.set_status("Stopping safely...", "running", "Stop requested. Waiting for the worker to reach a safe checkpoint and ramp outputs to 0 V.")
+            self.append_log("Stop requested by user.")
             self.worker.request_stop()
 
     def _cleanup_thread(self):
@@ -490,11 +551,24 @@ class DualGateTab(BaseMeasurementTab):
 
     def on_error(self, msg):
         self.set_status("Run error", "error", msg)
-        self.log.appendPlainText("ERROR: " + msg)
+        self.append_log("ERROR: " + msg)
+        self.end_run_logging("error", msg)
+        self._output_run_id = None
+        self.refresh_output_preview()
 
     def on_finished(self, csv_path: str):
-        self.set_status("Finished", "done")
-        self.log.appendPlainText(f"Saved: {csv_path}")
+        self.set_status("Finished", "done", csv_path)
+        self.append_log(f"Saved: {csv_path}")
+        self.end_run_logging("finished", csv_path)
+        self._output_run_id = None
+        self.refresh_output_preview()
+
+    def on_stopped(self, message: str):
+        self.set_status("Stopped by user", "done", message)
+        self.append_log(message)
+        self.end_run_logging("stopped", message)
+        self._output_run_id = None
+        self.refresh_output_preview()
 
     def on_ao_test(self):
         mw = self.window()

@@ -61,6 +61,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.connections = self.conn_dock.conns
         self.device_manager = DeviceManager(self.connections)
         self.conn_dock.set_device_manager(self.device_manager)
+        self.refresh_models_from_ui()
 
         self.tabs = QtWidgets.QTabWidget()
         self.setCentralWidget(self.tabs)
@@ -72,6 +73,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tabs.addTab(self.tab_gate_scan, "Gate Scan")
         self.tabs.addTab(self.tab_cosweep, "2D Map")
         self.tabs.addTab(self.tab_photocurrent, "Photocurrent")
+        self._bind_save_preview_updates()
         self._bind_plot_mode_settings()
         self._load_plot_mode_settings()
 
@@ -89,6 +91,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.connections.daq_dev = c.daq_dev
         self.connections.mono = c.mono
         self.device_manager.sync_addresses()
+
+    def _bind_save_preview_updates(self):
+        for widget in (self.conn_dock.ed_user, self.conn_dock.ed_device_id, self.conn_dock.ed_base):
+            widget.textChanged.connect(self._on_save_settings_edited)
+
+    def _on_save_settings_edited(self):
+        self.refresh_models_from_ui()
+        for tab in (self.tab_dual, self.tab_gate_scan, self.tab_cosweep, self.tab_photocurrent):
+            if hasattr(tab, "refresh_output_preview"):
+                tab.refresh_output_preview()
 
     def closeEvent(self, event):
         self._save_plot_mode_settings()
@@ -160,12 +172,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.device_manager.emergency_stop(daq_channels)
 
         msg = "Stop signal sent to all workers.\n\n"
-        msg += "Actions taken:\n"
-        msg += "- All Keithley Gates (G1, G2, G3) ramped to 0V.\n"
+        msg += "Safe ramp started:\n"
+        msg += "- Keithley outputs G1, G2, and G3 are being ramped toward 0 V where connected.\n"
         if daq_zeroed_log:
-            msg += f"- DAQ Vds Source: {', '.join(set(daq_zeroed_log))}\n"
+            msg += f"- DAQ Vds source requested: {', '.join(set(daq_zeroed_log))}\n"
         else:
-            msg += "- DAQ AO channels were NOT touched (not set as Vds source).\n"
+            msg += "- DAQ AO channels were not requested because no tab had DAQ selected as Vds source.\n"
+        msg += "\nWatch Instrument Setup status for safe-ramp completion."
         QtWidgets.QMessageBox.critical(self, "Emergency Stop", msg)
 
 

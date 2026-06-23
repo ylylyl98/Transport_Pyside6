@@ -25,7 +25,7 @@ class RunPanel(QtWidgets.QWidget):
         self.progress = QtWidgets.QProgressBar()
         self.progress.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.progress.setRange(0, 100)
-        self.progress.setFormat("Step %v of %m")
+        self.progress.setFormat("%p%")
         row.addWidget(self.btn_start)
         row.addWidget(self.btn_stop)
         row.addWidget(self.progress, 1)

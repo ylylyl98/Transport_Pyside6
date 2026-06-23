@@ -16,8 +16,9 @@ from app.constants import (
 )
 from app.models import Connections, PhotocurrentParams, SaveRoot
 from app.result_channels import KEITHLEY_CHANNEL
-from app.utils import _safe, _sanitize_base, clamp, safe_ramp
-from app.workers.base import RunWorker
+from app.run_output import update_run_metadata_status, write_run_metadata
+from app.utils import _sanitize_base, safe_ramp
+from app.workers.base import RunStopped, RunWorker
 
 
 class PhotocurrentWorker(RunWorker):
@@ -37,35 +38,62 @@ class PhotocurrentWorker(RunWorker):
 
     @QtCore.pyqtSlot()
     def run(self):
+        csv_path = self.p.output_csv_path
+        run_status = "error"
+        run_detail = "Run ended before completion."
         try:
             if self.daq is None or self.mono is None:
-                self.error.emit("Required sessions missing: DAQ or Monochromator")
-                return
+                raise RuntimeError("Required sessions missing: DAQ or Monochromator")
+            if int(self.p.n_sample) < 1:
+                raise RuntimeError("Averages must be at least 1.")
+            if self.p.wl_step <= 0:
+                raise RuntimeError("Wavelength step must be greater than zero.")
+            if self.p.use_vds and self.p.vds_ramp <= 0:
+                raise RuntimeError("Vds ramp step must be greater than zero.")
+            if self.p.use_vds and self.p.vds_source == "None":
+                raise RuntimeError("Vds bias is enabled but no Vds source is selected.")
+            if abs(self.p.vtg_set) > 1e-12 and self.g1 is None:
+                raise RuntimeError("G1 / Vtg is required because the fixed Vtg bias is nonzero.")
+            if abs(self.p.vbg_set) > 1e-12 and self.g2 is None:
+                raise RuntimeError("G2 / Vbg is required because the fixed Vbg bias is nonzero.")
 
             for field in ("vds_set", "vtg_set", "vbg_set"):
-                setattr(self.p, field, clamp(getattr(self.p, field), -V_LIMIT, V_LIMIT))
+                value = float(getattr(self.p, field))
+                if abs(value) > V_LIMIT:
+                    raise RuntimeError(f"{field} is {value:.3f} V, above the {V_LIMIT:.1f} V limit.")
 
-            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            tag_vds = "novds"
-            if self.p.use_vds:
-                if self.p.vds_source.startswith("NI DAQ"):
-                    tag_vds = f"ao{self.p.ao_channel}"
-                elif self.p.vds_source == "Keithley 2400":
-                    tag_vds = "keth"
-            g1_tag = "Tg" if self.g1 else "NoTg"
-            g2_tag = "Bg" if self.g2 else "NoBg"
-            device_id = _sanitize_base(self.save.device_id)
-            stem = f"{device_id}_{_sanitize_base(self.p.base_name)}_{g1_tag}_{g2_tag}_pc_{tag_vds}_Vtg{self.p.vtg_set:+.3f}V_Vbg{self.p.vbg_set:+.3f}V_{ts}"
-            csv_path = os.path.join(self.save.path(), stem + ".csv")
+            if not csv_path:
+                ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                tag_vds = "noVds"
+                if self.p.use_vds:
+                    if self.p.vds_source.startswith("NI DAQ"):
+                        tag_vds = f"ao{self.p.ao_channel}"
+                    elif self.p.vds_source == "Keithley 2400":
+                        tag_vds = "Keithley"
+                g1_tag = "Tg" if self.g1 else "NoTg"
+                g2_tag = "Bg" if self.g2 else "NoBg"
+                device_id = _sanitize_base(self.save.device_id)
+                stem = f"{device_id}_{_sanitize_base(self.p.base_name)}_{g1_tag}_{g2_tag}_pc_{tag_vds}_Vtg{self.p.vtg_set:+.3f}V_Vbg{self.p.vbg_set:+.3f}V_{ts}"
+                csv_path = os.path.join(self.save.path(), stem + ".csv")
+            os.makedirs(os.path.dirname(csv_path), exist_ok=True)
             self.log.emit(f"Save -> {csv_path}")
+            if self.p.output_metadata_path:
+                write_run_metadata(
+                    self.p.output_metadata_path,
+                    {
+                        "measurement": "photocurrent",
+                        "csv_path": csv_path,
+                        "save_root": self.save,
+                        "connections": self.conns,
+                        "params": self.p,
+                    },
+                )
 
-            need_header = not os.path.exists(csv_path) or os.path.getsize(csv_path) == 0
-            with open(csv_path, "a", newline="", buffering=1, encoding="utf-8") as f:
+            with open(csv_path, "x", newline="", buffering=1, encoding="utf-8") as f:
                 w = csv.writer(f)
-                if need_header:
-                    w.writerow(["Wavelength", "Vtg", "Vbg", "Vbias", "raw_X", "raw_Y", "raw_DC", "Ids_X", "Ids_Y", "Ids_DC", KEITHLEY_CHANNEL])
-                    w.writerow(["nm", "V", "V", "V", "A", "A", "A", "A", "A", "A", "A"])
-                    self.log.emit("[csv] header written")
+                w.writerow(["Wavelength", "Vtg", "Vbg", "Vds", "raw_X", "raw_Y", "raw_DC", "Ids_X", "Ids_Y", "Ids_DC", KEITHLEY_CHANNEL])
+                w.writerow(["nm", "V", "V", "V", "A", "A", "A", "A", "A", "A", "A"])
+                self.log.emit("[csv] header written")
 
                 if self.g1 is not None:
                     self.log.emit(
@@ -99,12 +127,12 @@ class PhotocurrentWorker(RunWorker):
                     vds_now = float(self.p.vds_set)
                     if self.p.vds_source == "Keithley 2400":
                         if self.g3:
-                            _safe(self.g3, "ramp_voltage", vds_now, self.p.vds_ramp)
+                            self.g3.ramp_voltage(vds_now, self.p.vds_ramp)
                         else:
                             self.error.emit("Vds Source set to Keithley but Gate3 not connected.")
                             return
                     elif self.p.vds_source.startswith("NI DAQ"):
-                        _safe(self.daq, "ramp_voltage", self.p.ao_channel, vds_now, self.p.vds_ramp)
+                        self.daq.ramp_voltage(self.p.ao_channel, vds_now, self.p.vds_ramp)
 
                 wl = self.p.wl_start
                 step = self.p.wl_step if self.p.wl_stop >= self.p.wl_start else -abs(self.p.wl_step)
@@ -112,7 +140,8 @@ class PhotocurrentWorker(RunWorker):
                 idx = 0
                 while True:
                     self.check_abort_pause()
-                    _safe(self.mono, "set_wavelength", float(wl))
+                    self.status.emit(f"Wavelength point {idx + 1}/{total}")
+                    self.mono.set_wavelength(float(wl))
                     time.sleep(max(0.0, self.p.delay))
 
                     raw_x = raw_y = raw_dc = 0.0
@@ -151,16 +180,30 @@ class PhotocurrentWorker(RunWorker):
                     if (step >= 0 and wl >= self.p.wl_stop - 1e-12) or (step < 0 and wl <= self.p.wl_stop + 1e-12):
                         break
                     wl += step
-
+            run_status = "finished"
+            run_detail = csv_path
             self.finished.emit(csv_path)
+        except RunStopped as ex:
+            run_status = "stopped"
+            run_detail = f"{ex}. Partial data saved to: {csv_path}" if csv_path else str(ex)
+            self.stopped.emit(run_detail)
         except Exception as ex:
-            self.error.emit(str(ex))
+            run_status = "error"
+            run_detail = str(ex)
+            self.error.emit(run_detail)
         finally:
+            failures = []
             try:
                 if self.g1 is not None:
                     safe_ramp(self.g1.set_voltage, getattr(self.g1, "voltage", None) or 0.0, 0.0, SAFE_RAMP_STEP_V, SAFE_RAMP_STEP_T)
+            except Exception as ex:
+                failures.append(f"G1/Vtg zero failed: {ex}")
+            try:
                 if self.g2 is not None:
                     safe_ramp(self.g2.set_voltage, getattr(self.g2, "voltage", None) or 0.0, 0.0, SAFE_RAMP_STEP_V, SAFE_RAMP_STEP_T)
+            except Exception as ex:
+                failures.append(f"G2/Vbg zero failed: {ex}")
+            try:
                 if self.p.use_vds:
                     if self.p.vds_source == "Keithley 2400":
                         if self.g3 is not None:
@@ -173,9 +216,10 @@ class PhotocurrentWorker(RunWorker):
                             SAFE_RAMP_STEP_V,
                             SAFE_RAMP_STEP_T,
                         )
-            except Exception:
-                pass
-            self.log.emit("Outputs returned to 0 V; sessions kept open.")
+            except Exception as ex:
+                failures.append(f"Vds zero failed: {ex}")
+            self.emit_safe_state_report(failures)
+            update_run_metadata_status(self.p.output_metadata_path, run_status, run_detail, failures)
 
     def _read_keithley_current(self):
         if not self.p.use_vds or self.p.vds_source != "Keithley 2400" or self.g3 is None:
