@@ -44,6 +44,94 @@ class DisconnectWorker(QtCore.QThread):
             self.failed.emit(str(ex))
 
 
+class ManualControlWorker(QtCore.QThread):
+    """Perform one manual hardware operation without blocking the Qt UI."""
+
+    def __init__(self, name: str, session: object, target: float, parent=None):
+        super().__init__(parent)
+        self.name = name
+        self.session = session
+        self.target = float(target)
+        self.success = False
+        self.message = ""
+        self._cancel_requested = False
+
+    def request_cancel(self):
+        self._cancel_requested = True
+
+    def _check_cancelled(self):
+        if self._cancel_requested:
+            raise RuntimeError("Manual operation cancelled for emergency stop.")
+
+    def run(self):
+        try:
+            if self.name in {"g1", "g2", "g3"}:
+                from app.constants import (
+                    GATE_BIAS_RAMP_STEP_T,
+                    GATE_BIAS_RAMP_STEP_V,
+                    SAFE_RAMP_STEP_T,
+                    SAFE_RAMP_STEP_V,
+                )
+                from app.utils import safe_ramp
+
+                # Query the source directly so the ramp begins at the present
+                # programmed level even if the software cache is stale.
+                start = float(self.session.get_voltage_setpoint())
+                zeroing = abs(self.target) < 1e-9
+                step_v, step_t = (
+                    (SAFE_RAMP_STEP_V, SAFE_RAMP_STEP_T)
+                    if zeroing
+                    else (GATE_BIAS_RAMP_STEP_V, GATE_BIAS_RAMP_STEP_T)
+                )
+                safe_ramp(
+                    self.session.set_voltage,
+                    start,
+                    self.target,
+                    step_v,
+                    step_t,
+                    check_fn=self._check_cancelled,
+                )
+                action = "safely ramped to 0 V" if zeroing else f"ramped to {self.target:g} V"
+                self.message = f"{self.name.upper()} {action} from {start:g} V."
+            else:
+                self._check_cancelled()
+                self.session.set_wavelength(self.target)
+                self.message = f"Monochromator moved to {self.target:g} nm."
+            self.success = True
+        except Exception as ex:
+            self.message = f"{self.name.upper()} manual control failed: {ex}"
+
+
+class GateCurrentReadWorker(QtCore.QThread):
+    """Read connected gate currents without blocking the Qt UI."""
+
+    def __init__(self, sessions: dict, parent=None):
+        super().__init__(parent)
+        self.sessions = dict(sessions)
+        self.currents: dict[str, float | None] = {}
+        self.message = ""
+
+    def run(self):
+        failures: list[str] = []
+        for name in ("g1", "g2", "g3"):
+            session = self.sessions.get(name)
+            if session is None:
+                self.currents[name] = None
+                continue
+            try:
+                readings = session.acquire()
+                current = readings.get("current") if isinstance(readings, dict) else None
+                if current is None:
+                    current = getattr(session, "current", None)
+                self.currents[name] = None if current is None else float(current)
+            except Exception as ex:
+                self.currents[name] = None
+                failures.append(f"{name.upper()}: {ex}")
+        self.message = "Gate current read complete."
+        if failures:
+            self.message += " Unavailable: " + "; ".join(failures)
+
+
 class EmergencyRampWorker(QtCore.QThread):
     ramp_finished = QtCore.pyqtSignal(str)
 
@@ -61,7 +149,13 @@ class EmergencyRampWorker(QtCore.QThread):
             session = self._sessions.get(name)
             if session is not None:
                 try:
-                    safe_ramp(session.set_voltage, getattr(session, "voltage", None) or 0.0, 0.0, SAFE_RAMP_STEP_V, SAFE_RAMP_STEP_T)
+                    safe_ramp(
+                        session.set_voltage,
+                        session.get_voltage_setpoint(),
+                        0.0,
+                        SAFE_RAMP_STEP_V,
+                        SAFE_RAMP_STEP_T,
+                    )
                 except Exception as ex:
                     failures.append(f"{name.upper()} zero failed: {ex}")
         daq = self._sessions.get("daq")
@@ -86,6 +180,8 @@ class EmergencyRampWorker(QtCore.QThread):
 class DeviceManager(QtCore.QObject):
     status_changed = QtCore.pyqtSignal(str, str, str)
     operation_changed = QtCore.pyqtSignal(bool, str)
+    manual_control_finished = QtCore.pyqtSignal(str, bool, str)
+    gate_currents_read = QtCore.pyqtSignal(dict, str)
 
     def __init__(self, connections: Connections):
         super().__init__()
@@ -97,7 +193,10 @@ class DeviceManager(QtCore.QObject):
         self._connected_modes: Dict[str, str] = {name: self._mode_for(name) for name in self.sessions}
         self._in_use: Set[str] = set()
         self._operation_thread: Optional[QtCore.QThread] = None
+        self._manual_worker: Optional[ManualControlWorker] = None
+        self._gate_current_worker: Optional[GateCurrentReadWorker] = None
         self._emergency_worker: Optional[QtCore.QThread] = None
+        self._pending_emergency_daq_channels: Optional[list[int]] = None
 
     def _address_for(self, name: str) -> str:
         return {
@@ -162,12 +261,19 @@ class DeviceManager(QtCore.QObject):
         return self.get_session(name) is not None and self.state(name) == "ok"
 
     def is_busy(self) -> bool:
-        return self._operation_thread is not None and self._operation_thread.isRunning()
+        return (
+            (self._operation_thread is not None and self._operation_thread.isRunning())
+            or (self._manual_worker is not None and self._manual_worker.isRunning())
+            or (self._gate_current_worker is not None and self._gate_current_worker.isRunning())
+            or (self._emergency_worker is not None and self._emergency_worker.isRunning())
+        )
 
     def current_in_use(self) -> Set[str]:
         return set(self._in_use)
 
     def mark_in_use(self, names: Iterable[str]) -> tuple[bool, List[str]]:
+        if self.is_busy():
+            return False, ["hardware operation"]
         requested = {name for name in names if name}
         blocked = sorted(requested & self._in_use)
         if blocked:
@@ -236,6 +342,96 @@ class DeviceManager(QtCore.QObject):
         worker.start()
         return True
 
+    def ramp_gate(self, name: str, target: float) -> bool:
+        """Safely ramp one connected gate source to a requested voltage."""
+        if name not in {"g1", "g2", "g3"}:
+            raise ValueError(f"Unknown gate: {name}")
+        if not self._manual_control_available(name):
+            return False
+        self._start_manual_worker(name, self.sessions[name], target)
+        return True
+
+    def set_monochromator_wavelength(self, wavelength_nm: float) -> bool:
+        """Move the connected monochromator without blocking the UI."""
+        if not self._manual_control_available("mono"):
+            return False
+        self._start_manual_worker("mono", self.sessions["mono"], wavelength_nm)
+        return True
+
+    def read_gate_currents(self) -> bool:
+        """Read the present current from every connected voltage-source gate."""
+        if self.is_busy():
+            self.operation_changed.emit(False, "Wait for the current hardware operation to finish.")
+            return False
+        if self._in_use:
+            self.operation_changed.emit(False, "Gate currents cannot be read while a measurement is running.")
+            return False
+        sessions = {
+            name: self.sessions[name]
+            if self.is_connected(name) and self.is_voltage_source_mode(name)
+            else None
+            for name in ("g1", "g2", "g3")
+        }
+        if not any(sessions.values()):
+            self.operation_changed.emit(False, "Connect a gate in 2-wire voltage-source mode before reading current.")
+            return False
+        worker = GateCurrentReadWorker(sessions, self)
+        self._gate_current_worker = worker
+        worker.finished.connect(self._finish_gate_current_read)
+        self.operation_changed.emit(True, "Reading gate currents...")
+        worker.start()
+        return True
+
+    def _manual_control_available(self, name: str) -> bool:
+        if self.is_busy():
+            self.operation_changed.emit(False, "Wait for the current hardware operation to finish.")
+            return False
+        if self._in_use:
+            self.operation_changed.emit(False, "Manual control is unavailable while a measurement is running.")
+            return False
+        if not self.is_connected(name):
+            self.operation_changed.emit(False, f"Connect {name.upper()} before using manual control.")
+            return False
+        if name in {"g1", "g2", "g3"} and not self.is_voltage_source_mode(name):
+            self.operation_changed.emit(False, f"{name.upper()} must use 2-wire voltage source mode for manual voltage control.")
+            return False
+        return True
+
+    def _start_manual_worker(self, name: str, session: object, target: float):
+        worker = ManualControlWorker(name, session, target, self)
+        self._manual_worker = worker
+        worker.finished.connect(self._finish_manual_worker)
+        if name in {"g1", "g2", "g3"}:
+            action = "safely ramping to 0 V" if abs(target) < 1e-9 else f"ramping to {target:g} V"
+            message = f"{name.upper()} {action}..."
+        else:
+            message = f"Moving monochromator to {target:g} nm..."
+        self.operation_changed.emit(True, message)
+        worker.start()
+
+    def _finish_manual_worker(self):
+        worker = self._manual_worker
+        if worker is None:
+            return
+        self._manual_worker = None
+        worker.deleteLater()
+        self.manual_control_finished.emit(worker.name, worker.success, worker.message)
+        if self._pending_emergency_daq_channels is not None:
+            daq_channels = self._pending_emergency_daq_channels
+            self._pending_emergency_daq_channels = None
+            self._start_emergency_worker(daq_channels)
+        else:
+            self.operation_changed.emit(False, worker.message)
+
+    def _finish_gate_current_read(self):
+        worker = self._gate_current_worker
+        if worker is None:
+            return
+        self._gate_current_worker = None
+        worker.deleteLater()
+        self.gate_currents_read.emit(worker.currents, worker.message)
+        self.operation_changed.emit(False, worker.message)
+
     def _clear_operation_thread(self):
         if self._operation_thread is not None:
             self._operation_thread.deleteLater()
@@ -256,7 +452,13 @@ class DeviceManager(QtCore.QObject):
             session = self.sessions.get(session_name)
             if session is not None:
                 try:
-                    safe_ramp(session.set_voltage, getattr(session, "voltage", None) or 0.0, 0.0, SAFE_RAMP_STEP_V, SAFE_RAMP_STEP_T)
+                    safe_ramp(
+                        session.set_voltage,
+                        session.get_voltage_setpoint(),
+                        0.0,
+                        SAFE_RAMP_STEP_V,
+                        SAFE_RAMP_STEP_T,
+                    )
                 except Exception:
                     pass
         self._close_daq_outputs()
@@ -361,6 +563,14 @@ class DeviceManager(QtCore.QObject):
     def emergency_stop(self, daq_channels: Optional[Iterable[int]] = None):
         if self._emergency_worker is not None and self._emergency_worker.isRunning():
             return
+        if self._manual_worker is not None and self._manual_worker.isRunning():
+            self._pending_emergency_daq_channels = list(daq_channels or [])
+            self._manual_worker.request_cancel()
+            self.operation_changed.emit(True, "Emergency stop requested: stopping manual control before zeroing outputs...")
+            return
+        self._start_emergency_worker(list(daq_channels or []))
+
+    def _start_emergency_worker(self, daq_channels: list[int]):
         worker = EmergencyRampWorker(self.sessions, list(daq_channels or []))
         self._emergency_worker = worker
         worker.ramp_finished.connect(lambda msg: self.operation_changed.emit(False, msg))
@@ -373,6 +583,15 @@ class DeviceManager(QtCore.QObject):
         self._emergency_worker = None
 
     def shutdown(self):
+        if self._manual_worker is not None and self._manual_worker.isRunning():
+            self._manual_worker.request_cancel()
+            self._manual_worker.wait()
+            self._finish_manual_worker()
+        if self._gate_current_worker is not None and self._gate_current_worker.isRunning():
+            self._gate_current_worker.wait()
+            self._finish_gate_current_read()
+        if self._emergency_worker is not None and self._emergency_worker.isRunning():
+            self._emergency_worker.wait()
         self._disconnect_all_in_thread(self.status_changed)
         for name in ("g1", "g2", "g3", "daq", "mono"):
             self._close_device(name)

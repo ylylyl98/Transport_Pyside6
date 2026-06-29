@@ -55,6 +55,7 @@ def build_planned_output(
     summary_parts: Iterable[str] = (),
     run_id: str | None = None,
     create_dir: bool = False,
+    filename_measurement_type: str | None = None,
 ) -> PlannedOutput:
     run_id = sanitize_segment(run_id or new_run_id(), new_run_id())
     measurement_type = sanitize_segment(measurement_type, "measurement")
@@ -62,7 +63,8 @@ def build_planned_output(
     clean_stem = _sanitize_base(str(filename_stem or ""))
     clean_parts = [sanitize_segment(part, "") for part in summary_parts]
     clean_parts = [part for part in clean_parts if part]
-    stem_parts = [device_id, measurement_type]
+    filename_measurement_type = sanitize_segment(filename_measurement_type or measurement_type, measurement_type)
+    stem_parts = [device_id, filename_measurement_type]
     if clean_stem:
         stem_parts.append(clean_stem)
     stem_parts.extend(clean_parts)

@@ -10,11 +10,11 @@ from app.device_manager import DeviceManager
 from app.models import Connections, DualGateParams, SaveRoot
 from app.result_channels import compare_channel_options, plot_channel_options, plot_channel_value
 from app.run_output import build_planned_output, planned_output_warning
-from app.ui.helpers import apply_tooltip, configure_volt_spinbox, flash_button_success, set_standard_input_height, style_form_layout
+from app.ui.helpers import apply_tooltip, configure_volt_spinbox, set_standard_input_height, style_form_layout
 from app.ui.tabs.base_tab import BaseMeasurementTab
 from app.ui.widgets.collapsible_section import CollapsibleSection
 from app.ui.widgets.status_panel import SectionHeader, StatusPanel
-from app.utils import _safe, safe_ramp
+from app.utils import _safe
 from app.workers.dual_gate import DualGateWorker
 
 SET_BUTTON_WIDTH = 48
@@ -258,8 +258,9 @@ class DualGateTab(BaseMeasurementTab):
 
     def _update_manual_buttons(self):
         self._sync_sessions_from_manager()
-        self.btn_set_vtg.setEnabled(self.s_g1 is not None and self.device_manager.is_voltage_source_mode("g1"))
-        self.btn_set_vbg.setEnabled(self.s_g2 is not None and self.device_manager.is_voltage_source_mode("g2"))
+        manual_available = not self.device_manager.is_busy() and not self.device_manager.current_in_use()
+        self.btn_set_vtg.setEnabled(manual_available and self.s_g1 is not None and self.device_manager.is_voltage_source_mode("g1"))
+        self.btn_set_vbg.setEnabled(manual_available and self.s_g2 is not None and self.device_manager.is_voltage_source_mode("g2"))
         source_ready = (
             self.cbo_source.currentText() != "Keithley 2400"
             or (self.s_g3 is not None and self.device_manager.is_voltage_source_mode("g3"))
@@ -309,7 +310,7 @@ class DualGateTab(BaseMeasurementTab):
     def _on_operation_changed(self, busy: bool, message: str):
         if busy:
             self.set_status(message, "idle")
-        self._update_connection_hint()
+        self._update_manual_buttons()
 
     def _required_devices(self) -> List[str]:
         required = ["daq"]
@@ -368,46 +369,14 @@ class DualGateTab(BaseMeasurementTab):
         self.lbl_connection_hint.style().polish(self.lbl_connection_hint)
 
     def on_set_vtg(self):
-        if self.s_g1:
-            try:
-                val = self.sp_vtg.value()
-                self.log.appendPlainText(
-                    f"[Manual] Ramping G1 / Vtg to {val} V ({GATE_BIAS_RAMP_STEP_V:g} V/step)"
-                )
-                safe_ramp(
-                    self.s_g1.set_voltage,
-                    getattr(self.s_g1, "voltage", None) or 0.0,
-                    val,
-                    GATE_BIAS_RAMP_STEP_V,
-                    GATE_BIAS_RAMP_STEP_T,
-                )
-                self.log.appendPlainText(f"[Manual] G1 / Vtg set to {val} V ({GATE_BIAS_RAMP_STEP_V:g} V/step)")
-                flash_button_success(self.btn_set_vtg)
-            except Exception as ex:
-                self.log.appendPlainText(f"Error setting G1: {ex}")
-        else:
-            self.log.appendPlainText("G1 / Vtg not connected.")
+        val = self.sp_vtg.value()
+        if self.device_manager.ramp_gate("g1", val):
+            self.log.appendPlainText(f"[Manual] Ramping G1 / Vtg to {val} V.")
 
     def on_set_vbg(self):
-        if self.s_g2:
-            try:
-                val = self.sp_vbg.value()
-                self.log.appendPlainText(
-                    f"[Manual] Ramping G2 / Vbg to {val} V ({GATE_BIAS_RAMP_STEP_V:g} V/step)"
-                )
-                safe_ramp(
-                    self.s_g2.set_voltage,
-                    getattr(self.s_g2, "voltage", None) or 0.0,
-                    val,
-                    GATE_BIAS_RAMP_STEP_V,
-                    GATE_BIAS_RAMP_STEP_T,
-                )
-                self.log.appendPlainText(f"[Manual] G2 / Vbg set to {val} V ({GATE_BIAS_RAMP_STEP_V:g} V/step)")
-                flash_button_success(self.btn_set_vbg)
-            except Exception as ex:
-                self.log.appendPlainText(f"Error setting G2: {ex}")
-        else:
-            self.log.appendPlainText("G2 / Vbg not connected.")
+        val = self.sp_vbg.value()
+        if self.device_manager.ramp_gate("g2", val):
+            self.log.appendPlainText(f"[Manual] Ramping G2 / Vbg to {val} V.")
 
     def collect_params(self):
         self.refresh_output_preview()

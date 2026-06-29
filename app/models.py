@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -123,6 +123,17 @@ class LineSweepParams:
 
 
 @dataclass
+class PhotocurrentBiasCondition:
+    """One complete gate/drain bias condition for a photocurrent spectrum."""
+
+    enabled: bool = True
+    vtg: float = 0.0
+    vbg: float = 0.0
+    vds: float = 0.0
+    settle_s: float = 2.0
+
+
+@dataclass
 class PhotocurrentParams:
     base_name: str = "pcspec"
     output_csv_path: str = ""
@@ -136,6 +147,9 @@ class PhotocurrentParams:
     vtg_set: float = 0.0
     vbg_set: float = 0.0
     vg_ramp: float = 0.2
+    bias_conditions: list[PhotocurrentBiasCondition] = field(
+        default_factory=lambda: [PhotocurrentBiasCondition()]
+    )
     wl_start: float = 550.0
     wl_stop: float = 740.0
     wl_step: float = 0.5

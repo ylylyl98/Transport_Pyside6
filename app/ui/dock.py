@@ -10,7 +10,7 @@ from app.hw_discovery import scan_all
 from app.keithley_modes import KEITHLEY_MODE_LABELS, keithley_mode_label, keithley_mode_options
 from app.models import Connections, SaveRoot
 from app.settings import get_app_settings
-from app.ui.helpers import apply_tooltip, set_standard_input_height, style_form_layout
+from app.ui.helpers import apply_tooltip, configure_volt_spinbox, flash_button_success, set_standard_input_height, style_form_layout
 from app.ui.widgets.collapsible_section import CollapsibleSection
 from app.ui.widgets.status_panel import StatusPanel
 from app.ui.widgets.resource_combo import ResourceComboBox
@@ -161,6 +161,8 @@ class ConnDock(QtWidgets.QWidget):
         self.sp_lkn.setRange(self.LIA_MIN_V, 10.0)
         self.sp_lkn.setSingleStep(0.001)
         self.sp_lkn.setValue(0.1)
+        self.sp_amp.valueChanged.connect(self._save_signal_chain_settings)
+        self.sp_lkn.valueChanged.connect(self._save_signal_chain_settings)
         lbl_amp = QtWidgets.QLabel("Pre-amp (A):")
         lbl_lkn = QtWidgets.QLabel("Lock-in (V):")
         form_rate.addRow(lbl_amp, self.sp_amp)
@@ -197,6 +199,67 @@ class ConnDock(QtWidgets.QWidget):
         lay_conn.addWidget(self.dock_status_panel)
         layout.addWidget(grp_conn)
 
+        grp_manual = QtWidgets.QGroupBox("Manual Controls")
+        form_manual = QtWidgets.QFormLayout(grp_manual)
+        style_form_layout(form_manual)
+        self.sp_manual_g1 = QtWidgets.QDoubleSpinBox()
+        self.sp_manual_g2 = QtWidgets.QDoubleSpinBox()
+        self.sp_manual_g3 = QtWidgets.QDoubleSpinBox()
+        for spinbox in (self.sp_manual_g1, self.sp_manual_g2, self.sp_manual_g3):
+            configure_volt_spinbox(spinbox, 0.0)
+        self.btn_manual_g1_set = QtWidgets.QPushButton("Ramp")
+        self.btn_manual_g2_set = QtWidgets.QPushButton("Ramp")
+        self.btn_manual_g3_set = QtWidgets.QPushButton("Ramp")
+        self.btn_manual_g1_zero = QtWidgets.QPushButton("Zero")
+        self.btn_manual_g2_zero = QtWidgets.QPushButton("Zero")
+        self.btn_manual_g3_zero = QtWidgets.QPushButton("Zero")
+        self._manual_gate_controls = {
+            "g1": (self.sp_manual_g1, self.btn_manual_g1_set, self.btn_manual_g1_zero),
+            "g2": (self.sp_manual_g2, self.btn_manual_g2_set, self.btn_manual_g2_zero),
+            "g3": (self.sp_manual_g3, self.btn_manual_g3_set, self.btn_manual_g3_zero),
+        }
+        for spinbox, set_button, zero_button in self._manual_gate_controls.values():
+            set_button.clicked.connect(lambda _checked=False, sb=spinbox: self._on_manual_gate_ramp(sb))
+            zero_button.clicked.connect(lambda _checked=False, sb=spinbox: self._on_manual_gate_zero(sb))
+
+        self.sp_manual_wavelength = QtWidgets.QDoubleSpinBox()
+        self.sp_manual_wavelength.setDecimals(3)
+        self.sp_manual_wavelength.setRange(200.0, 2000.0)
+        self.sp_manual_wavelength.setValue(633.0)
+        self.btn_manual_wavelength = QtWidgets.QPushButton("Go")
+        self.btn_manual_wavelength.clicked.connect(self._on_manual_wavelength_move)
+
+        lbl_manual_g1 = QtWidgets.QLabel("G1 / Vtg (V):")
+        lbl_manual_g2 = QtWidgets.QLabel("G2 / Vbg (V):")
+        lbl_manual_g3 = QtWidgets.QLabel("G3 / Vds (V):")
+        lbl_manual_wavelength = QtWidgets.QLabel("Mono (nm):")
+        form_manual.addRow(lbl_manual_g1, self._make_manual_control_row(*self._manual_gate_controls["g1"]))
+        form_manual.addRow(lbl_manual_g2, self._make_manual_control_row(*self._manual_gate_controls["g2"]))
+        form_manual.addRow(lbl_manual_g3, self._make_manual_control_row(*self._manual_gate_controls["g3"]))
+        form_manual.addRow(lbl_manual_wavelength, self._make_manual_control_row(self.sp_manual_wavelength, self.btn_manual_wavelength))
+        self.lbl_manual_currents = {
+            name: QtWidgets.QLabel(f"{name.upper()}: —")
+            for name in ("g1", "g2", "g3")
+        }
+        current_wrap = QtWidgets.QWidget()
+        current_layout = QtWidgets.QVBoxLayout(current_wrap)
+        current_layout.setContentsMargins(0, 0, 0, 0)
+        current_layout.setSpacing(2)
+        for label in self.lbl_manual_currents.values():
+            label.setProperty("role", "hint")
+            current_layout.addWidget(label)
+        self.btn_read_gate_currents = QtWidgets.QPushButton("Read Gate Currents")
+        self.btn_read_gate_currents.clicked.connect(self._on_read_gate_currents)
+        current_layout.addWidget(self.btn_read_gate_currents)
+        form_manual.addRow("Current (A):", current_wrap)
+        self.lbl_manual_hint = QtWidgets.QLabel(
+            "Connect a gate in 2-wire voltage-source mode to enable it. Gate moves are ramped; Zero safely ramps the current source setpoint to 0 V."
+        )
+        self.lbl_manual_hint.setWordWrap(True)
+        self.lbl_manual_hint.setProperty("role", "hint")
+        form_manual.addRow("", self.lbl_manual_hint)
+        layout.addWidget(grp_manual)
+
         sep = QtWidgets.QFrame()
         sep.setProperty("role", "separator")
         sep.setFrameShape(QtWidgets.QFrame.Shape.HLine)
@@ -214,7 +277,7 @@ class ConnDock(QtWidgets.QWidget):
             widget.setMinimumWidth(0)
             widget.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
 
-        for widget in (self.sp_amp, self.sp_lkn):
+        for widget in (self.sp_amp, self.sp_lkn, self.sp_manual_g1, self.sp_manual_g2, self.sp_manual_g3, self.sp_manual_wavelength):
             widget.setMinimumWidth(0)
             widget.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
 
@@ -232,7 +295,14 @@ class ConnDock(QtWidgets.QWidget):
         apply_tooltip("Lock-in sensitivity shown on the lock-in front panel, entered in volts.", lbl_lkn, self.sp_lkn)
         apply_tooltip("Open all configured hardware sessions so tabs can reuse them.", self.btn_connect_all)
         apply_tooltip("Close all instrument sessions managed by the dock.", self.btn_disconnect_all)
+        apply_tooltip("Ramp this gate from its current source setpoint to the requested voltage.", lbl_manual_g1, self.sp_manual_g1, self.btn_manual_g1_set)
+        apply_tooltip("Ramp this gate from its current source setpoint to the requested voltage.", lbl_manual_g2, self.sp_manual_g2, self.btn_manual_g2_set)
+        apply_tooltip("Ramp this gate from its current source setpoint to the requested voltage.", lbl_manual_g3, self.sp_manual_g3, self.btn_manual_g3_set)
+        apply_tooltip("Safely ramp this gate from its current source setpoint to 0 V.", self.btn_manual_g1_zero, self.btn_manual_g2_zero, self.btn_manual_g3_zero)
+        apply_tooltip("Move the connected monochromator to this wavelength.", lbl_manual_wavelength, self.sp_manual_wavelength, self.btn_manual_wavelength)
+        apply_tooltip("Read the measured current from every connected gate in 2-wire voltage-source mode.", self.btn_read_gate_currents)
         apply_tooltip("Immediately request stop and ramp outputs back to 0 V where supported.", self.btn_stop)
+        self._update_manual_controls()
 
     def get_rates(self):
         preamp_sensitivity_a = max(float(self.sp_amp.value()), self.AMP_MIN_A)
@@ -248,6 +318,29 @@ class ConnDock(QtWidgets.QWidget):
         row.setSpacing(4)
         row.addWidget(address_widget)
         row.addWidget(mode_widget)
+        return wrap
+
+    def _make_manual_control_row(self, spinbox: QtWidgets.QWidget, *buttons: QtWidgets.QPushButton) -> QtWidgets.QWidget:
+        wrap = QtWidgets.QWidget()
+        if len(buttons) == 1:
+            row = QtWidgets.QHBoxLayout(wrap)
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(4)
+            row.addWidget(spinbox, 1)
+            row.addWidget(buttons[0])
+            return wrap
+
+        column = QtWidgets.QVBoxLayout(wrap)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(4)
+        column.addWidget(spinbox)
+        actions = QtWidgets.QHBoxLayout()
+        actions.setContentsMargins(0, 0, 0, 0)
+        actions.setSpacing(4)
+        for button in buttons:
+            button.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
+            actions.addWidget(button)
+        column.addLayout(actions)
         return wrap
 
     def _set_combo_data(self, combo: QtWidgets.QComboBox, value: str):
@@ -283,6 +376,14 @@ class ConnDock(QtWidgets.QWidget):
         s.setValue("path/base", self.ed_base.text())
         s.setValue("rates/amp", float(self.sp_amp.value()))
         s.setValue("rates/lkn", float(self.sp_lkn.value()))
+        s.sync()
+
+    def _save_signal_chain_settings(self, *_args):
+        """Persist signal-chain values as soon as an operator changes them."""
+        s = get_app_settings()
+        s.setValue("rates/amp", float(self.sp_amp.value()))
+        s.setValue("rates/lkn", float(self.sp_lkn.value()))
+        s.sync()
 
     def load_settings(self):
         s = get_app_settings()
@@ -319,9 +420,12 @@ class ConnDock(QtWidgets.QWidget):
         self.btn_disconnect_all.clicked.connect(self._on_disconnect_all_clicked)
         self.device_manager.status_changed.connect(self._on_device_status_changed)
         self.device_manager.operation_changed.connect(self._on_operation_changed)
+        self.device_manager.manual_control_finished.connect(self._on_manual_control_finished)
+        self.device_manager.gate_currents_read.connect(self._on_gate_currents_read)
         for name in ("g1", "g2", "g3", "daq", "mono"):
             self._on_device_status_changed(name, self.device_manager.state(name), self.device_manager.detail(name))
         self._update_reconnect_indicators()
+        self._update_manual_controls()
 
     def _on_connect_all_clicked(self):
         if hasattr(self.window(), "refresh_models_from_ui"):
@@ -333,7 +437,10 @@ class ConnDock(QtWidgets.QWidget):
 
     def _on_device_status_changed(self, name: str, state: str, detail: str):
         self.dock_status_panel.set_status(name, state, detail if state == "err" else None)
+        if name in self.lbl_manual_currents and state != "ok":
+            self.lbl_manual_currents[name].setText(f"{name.upper()}: —")
         self._update_reconnect_indicators()
+        self._update_manual_controls()
 
     def _on_operation_changed(self, busy: bool, message: str):
         self.btn_connect_all.setEnabled(not busy)
@@ -361,6 +468,74 @@ class ConnDock(QtWidgets.QWidget):
         self.lbl_connection_status.setToolTip(message)
         self.btn_connection_details.setVisible(bool(message))
         self._update_reconnect_indicators()
+        self._update_manual_controls()
+
+    def _on_manual_gate_ramp(self, spinbox: QtWidgets.QDoubleSpinBox):
+        name = next(name for name, (control, _set, _zero) in self._manual_gate_controls.items() if control is spinbox)
+        self.device_manager.ramp_gate(name, spinbox.value())
+
+    def _on_manual_gate_zero(self, spinbox: QtWidgets.QDoubleSpinBox):
+        name = next(name for name, (control, _set, _zero) in self._manual_gate_controls.items() if control is spinbox)
+        self.device_manager.ramp_gate(name, 0.0)
+
+    def _on_manual_wavelength_move(self):
+        self.device_manager.set_monochromator_wavelength(self.sp_manual_wavelength.value())
+
+    def _on_read_gate_currents(self):
+        self.device_manager.read_gate_currents()
+
+    def _on_manual_control_finished(self, name: str, success: bool, message: str):
+        self.lbl_manual_hint.setText(message)
+        self.lbl_manual_hint.setProperty("role", "hint" if success else "warning-hint")
+        self.lbl_manual_hint.style().unpolish(self.lbl_manual_hint)
+        self.lbl_manual_hint.style().polish(self.lbl_manual_hint)
+        if not success:
+            return
+        if name in self._manual_gate_controls:
+            spinbox, set_button, zero_button = self._manual_gate_controls[name]
+            if "0 V" in message:
+                spinbox.setValue(0.0)
+                flash_button_success(zero_button)
+            else:
+                flash_button_success(set_button)
+        elif name == "mono":
+            flash_button_success(self.btn_manual_wavelength)
+
+    def _on_gate_currents_read(self, currents: dict, message: str):
+        for name, label in self.lbl_manual_currents.items():
+            current = currents.get(name)
+            label.setText(f"{name.upper()}: —" if current is None else f"{name.upper()}: {current:.3e} A")
+        self.lbl_manual_hint.setText(message)
+        self.lbl_manual_hint.setProperty("role", "hint")
+        self.lbl_manual_hint.style().unpolish(self.lbl_manual_hint)
+        self.lbl_manual_hint.style().polish(self.lbl_manual_hint)
+
+    def _update_manual_controls(self):
+        if self.device_manager is None:
+            for spinbox, set_button, zero_button in self._manual_gate_controls.values():
+                spinbox.setEnabled(False)
+                set_button.setEnabled(False)
+                zero_button.setEnabled(False)
+            self.sp_manual_wavelength.setEnabled(False)
+            self.btn_manual_wavelength.setEnabled(False)
+            self.btn_read_gate_currents.setEnabled(False)
+            return
+        enabled = not self.device_manager.is_busy() and not self.device_manager.current_in_use()
+        for name, (spinbox, set_button, zero_button) in self._manual_gate_controls.items():
+            gate_enabled = enabled and self.device_manager.is_connected(name) and self.device_manager.is_voltage_source_mode(name)
+            spinbox.setEnabled(gate_enabled)
+            set_button.setEnabled(gate_enabled)
+            zero_button.setEnabled(gate_enabled)
+        mono_enabled = enabled and self.device_manager.is_connected("mono")
+        self.sp_manual_wavelength.setEnabled(mono_enabled)
+        self.btn_manual_wavelength.setEnabled(mono_enabled)
+        self.btn_read_gate_currents.setEnabled(
+            enabled
+            and any(
+                self.device_manager.is_connected(name) and self.device_manager.is_voltage_source_mode(name)
+                for name in ("g1", "g2", "g3")
+            )
+        )
 
     def _show_connection_details(self):
         if not self._connection_detail:

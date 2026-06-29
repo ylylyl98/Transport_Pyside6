@@ -11,7 +11,7 @@ Desktop application for automated electrical transport and photocurrent measurem
 | **Vds Sweep** | Sweep drain-source bias while holding top- and back-gate biases. Vds can come from Keithley G3 or an NI-DAQ analog-output channel. |
 | **Gate Scan** | Run a one-dimensional raw-voltage trajectory or a derived doping/electric-field trajectory, with an optional reverse pass. |
 | **2D Map** | Acquire a 1D or 2D grid across `Vtg`, `Vbg`, and/or `Vds`; select fast and slow axes and preview the planned sweep. |
-| **Photocurrent** | Sweep monochromator wavelength at fixed gate biases and optional Vds. |
+| **Photocurrent** | Sweep monochromator wavelength for one or more enabled Vtg/Vbg recipe conditions, with optional per-condition Vds. |
 
 Across the modes, the application averages DAQ readings, plots the selected current channel live, and writes the acquired points to CSV as the run proceeds. The plot can switch between a single selected channel and a four-channel comparison view.
 
@@ -59,9 +59,10 @@ python transport_UI.py
 2. Select the GPIB/serial/DAQ addresses and the operating mode for each Keithley. Use **Scan Hardware** to populate detected resources.
 3. Set the save location, operator name, device ID, amplifier gain, and lock-in gain as appropriate for the experiment.
 4. Click **Connect All** and confirm that the required instruments report an OK status.
-5. Select a measurement tab, set its sweep bounds, timing, averaging, source, and file name, then review any preview or estimated sweep information.
-6. Start the measurement and monitor the live plot and status messages. Use the run-level **STOP** or dock-level **STOP / ZERO ALL** if needed.
-7. Review the resulting CSV in the selected save directory.
+5. Use **Manual Controls** in Instrument Setup when needed: set G1, G2, or G3 individually, safely ramp any gate back to 0 V, or move the monochromator to a wavelength. Gate controls are available only in 2-wire voltage-source mode and while no measurement is active.
+6. Select a measurement tab, set its sweep bounds, timing, averaging, source, and file name, then review any preview or estimated sweep information. The Photocurrent tab supports an editable bias recipe: unchecked rows are retained but skipped, every enabled condition creates its own CSV file, and Vds values are available only when a compatible Vds source is connected and explicitly enabled.
+7. Start the measurement and monitor the live plot and status messages. Use the run-level **STOP** or dock-level **STOP / ZERO ALL** if needed.
+8. Review the resulting CSV in the selected save directory.
 
 The application uses dock-managed connections: address or Keithley-mode changes require reconnection before they apply to a measurement.
 
@@ -80,7 +81,7 @@ CSV writes are flushed during acquisition, which helps preserve data already col
 ## Safety behavior
 
 - The UI limits requested bias values to ±20 V.
-- Gate moves and outputs are ramped rather than stepped abruptly.
+- Manual gate moves read the Keithley's present programmed source level, then ramp rather than stepping abruptly. The per-gate **Zero** controls use the stricter safe-ramp step to return that source to 0 V.
 - On normal completion, stop, or disconnect, active outputs are ramped back to 0 V while sessions remain open where possible.
 - **STOP / ZERO ALL** requests all workers to stop, ramps connected Keithley outputs to 0 V, and zeros the selected DAQ Vds channels.
 

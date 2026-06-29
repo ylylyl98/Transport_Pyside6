@@ -181,6 +181,17 @@ class Keithley2400Base(PyvisaInstrument):
         self.set_voltage_fast(value)
         return self.acquire()
 
+    def get_voltage_setpoint(self) -> float:
+        """Return the voltage level currently programmed into the source.
+
+        Ramps must begin at the instrument's programmed source level instead of
+        relying on a potentially stale UI-side cache.
+        """
+        if self._operating_mode != KEITHLEY_MODE_VOLTAGE_2W:
+            raise InstrumentError(self.name, "Keithley is not configured for 2-wire voltage source mode.")
+        with self.lock:
+            return float(self._query(":SOUR:VOLT:LEV?"))
+
     def _write_voltage(self, volt: float):
         with self.lock:
             self._write(":SOUR:VOLT:LEV %.6e" % volt)
@@ -190,12 +201,7 @@ class Keithley2400Base(PyvisaInstrument):
             raise InstrumentError(self.name, "Keithley is not configured for 2-wire voltage source mode.")
         if np.isclose(step, 0.0):
             raise InstrumentError(self.name, "step cannot be 0.")
-        start = self.voltage
-        if start is None:
-            try:
-                start = float(self._query(":SOUR:VOLT:LEV?"))
-            except Exception:
-                start = 0.0
+        start = self.get_voltage_setpoint()
         step = abs(step) if target > start else -abs(step)
         for v in np.arange(start, target, step):
             self.set_voltage_fast(v)

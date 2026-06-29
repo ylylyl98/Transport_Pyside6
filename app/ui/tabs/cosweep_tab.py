@@ -361,11 +361,15 @@ class CoSweepTab(BaseMeasurementTab):
 
     def _update_manual_buttons(self):
         self._sync_sessions_from_manager()
-        self.btn_set_vtg.setEnabled(self.s_g1 is not None and self.device_manager.is_voltage_source_mode("g1"))
-        self.btn_set_vbg.setEnabled(self.s_g2 is not None and self.device_manager.is_voltage_source_mode("g2"))
+        manual_available = not self.device_manager.is_busy() and not self.device_manager.current_in_use()
+        self.btn_set_vtg.setEnabled(manual_available and self.s_g1 is not None and self.device_manager.is_voltage_source_mode("g1"))
+        self.btn_set_vbg.setEnabled(manual_available and self.s_g2 is not None and self.device_manager.is_voltage_source_mode("g2"))
         self.btn_set_vds.setEnabled(
-            ("NI DAQ" in self.cbo_source.currentText() and self.s_daq is not None)
-            or (self.s_g3 is not None and self.device_manager.is_voltage_source_mode("g3"))
+            manual_available
+            and (
+                ("NI DAQ" in self.cbo_source.currentText() and self.s_daq is not None)
+                or (self.s_g3 is not None and self.device_manager.is_voltage_source_mode("g3"))
+            )
         )
         source_ready = (
             self.cbo_source.currentText() != "Keithley 2400"
@@ -416,7 +420,7 @@ class CoSweepTab(BaseMeasurementTab):
     def _on_operation_changed(self, busy: bool, message: str):
         if busy:
             self.set_status(message, "idle")
-        self._update_connection_hint()
+        self._update_manual_buttons()
 
     def _required_devices(self) -> list[str]:
         required = ["daq"]
@@ -649,46 +653,30 @@ class CoSweepTab(BaseMeasurementTab):
 
     def on_set_generic(self, name, button):
         if name == "Vtg":
-            val, sess = self.sp_vtg_start.value(), self.s_g1
+            val, gate_name = self.sp_vtg_start.value(), "g1"
         elif name == "Vbg":
-            val, sess = self.sp_vbg_start.value(), self.s_g2
+            val, gate_name = self.sp_vbg_start.value(), "g2"
         else:
             val = self.sp_vds_start.value()
-            sess = self.s_daq if "NI DAQ" in self.cbo_source.currentText() else self.s_g3
+            gate_name = "g3" if "NI DAQ" not in self.cbo_source.currentText() else None
+        if gate_name is not None:
+            if self.device_manager.ramp_gate(gate_name, val):
+                self.log.appendPlainText(f"Ramping {name} -> {val} V.")
+            return
+
+        sess = self.s_daq
         if sess:
             try:
-                if name in {"Vtg", "Vbg"}:
-                    self.log.appendPlainText(
-                        f"Ramping {name} -> {val} ({GATE_BIAS_RAMP_STEP_V:g} V/step)"
-                    )
-                    safe_ramp(
-                        sess.set_voltage,
-                        getattr(sess, "voltage", None) or 0.0,
-                        val,
-                        GATE_BIAS_RAMP_STEP_V,
-                        GATE_BIAS_RAMP_STEP_T,
-                    )
-                    self.log.appendPlainText(f"Set {name} -> {val} ({GATE_BIAS_RAMP_STEP_V:g} V/step)")
-                else:
-                    self.log.appendPlainText(f"Ramping {name} -> {val} ({SAFE_RAMP_STEP_V:g} V/step)")
-                    if "NI DAQ" in self.cbo_source.currentText():
-                        idx = int(self.cbo_source.currentText().split()[-1].replace("ao", ""))
-                        safe_ramp(
-                            lambda v: sess.set_voltage(idx, v),
-                            sess.get_ao_value(idx),
-                            val,
-                            SAFE_RAMP_STEP_V,
-                            SAFE_RAMP_STEP_T,
-                        )
-                    else:
-                        safe_ramp(
-                            sess.set_voltage,
-                            getattr(sess, "voltage", None) or 0.0,
-                            val,
-                            SAFE_RAMP_STEP_V,
-                            SAFE_RAMP_STEP_T,
-                        )
-                    self.log.appendPlainText(f"Set {name} -> {val} ({SAFE_RAMP_STEP_V:g} V/step)")
+                self.log.appendPlainText(f"Ramping {name} -> {val} ({SAFE_RAMP_STEP_V:g} V/step)")
+                idx = int(self.cbo_source.currentText().split()[-1].replace("ao", ""))
+                safe_ramp(
+                    lambda v: sess.set_voltage(idx, v),
+                    sess.get_ao_value(idx),
+                    val,
+                    SAFE_RAMP_STEP_V,
+                    SAFE_RAMP_STEP_T,
+                )
+                self.log.appendPlainText(f"Set {name} -> {val} ({SAFE_RAMP_STEP_V:g} V/step)")
                 flash_button_success(button)
             except Exception as ex:
                 self.log.appendPlainText(str(ex))
