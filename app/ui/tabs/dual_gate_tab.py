@@ -21,6 +21,8 @@ SET_BUTTON_WIDTH = 48
 
 
 class DualGateTab(BaseMeasurementTab):
+    SETTINGS_PREFIX = "tabs/vds_sweep"
+
     def __init__(self, save: SaveRoot, conns: Connections, device_manager: DeviceManager, get_global_rates_callable=None):
         self.save = save
         self.conns = conns
@@ -39,6 +41,8 @@ class DualGateTab(BaseMeasurementTab):
         self.device_manager.status_changed.connect(self._on_device_status_changed)
         self.device_manager.operation_changed.connect(self._on_operation_changed)
         self._sync_sessions_from_manager()
+        self._load_tab_settings()
+        self._bind_tab_settings()
         self._update_manual_buttons()
 
     def get_ao_items_if_available(self) -> List[str]:
@@ -256,6 +260,34 @@ class DualGateTab(BaseMeasurementTab):
         self._planned_output = planned
         self.set_output_preview_text(planned, planned_output_warning(planned, self.save))
 
+    def _settings_widgets(self):
+        return [
+            ("base_name", self.ed_base),
+            ("source", self.cbo_source),
+            ("plot_y", self.cbo_y),
+            ("vds_start", self.sp_vds_start),
+            ("vds_stop", self.sp_vds_stop),
+            ("vds_step", self.sp_vds_step),
+            ("vds_ramp", self.sp_vds_ramp),
+            ("vtg", self.sp_vtg),
+            ("vbg", self.sp_vbg),
+            ("delay", self.sp_delay),
+            ("averages", self.sp_nsamp),
+            ("sweep_bidirectional", self.chk_sweep_bidirectional),
+        ]
+
+    def _load_tab_settings(self):
+        self._load_tab_widget_settings(self.SETTINGS_PREFIX, self._settings_widgets())
+        self._update_plot_axis_choices()
+        self.set_plot_axis_source(self.cbo_y.currentText())
+        self.refresh_output_preview()
+
+    def _bind_tab_settings(self):
+        self._bind_tab_widget_settings(self.SETTINGS_PREFIX, self._settings_widgets())
+
+    def save_tab_settings(self):
+        self._save_tab_widget_settings(self.SETTINGS_PREFIX, self._settings_widgets())
+
     def _update_manual_buttons(self):
         self._sync_sessions_from_manager()
         manual_available = not self.device_manager.is_busy() and not self.device_manager.current_in_use()
@@ -416,11 +448,15 @@ class DualGateTab(BaseMeasurementTab):
             return
         if not self._validate_required_sessions():
             return
+        try:
+            self.collect_params()
+        except Exception as ex:
+            QtWidgets.QMessageBox.warning(self, "Invalid Parameters", str(ex))
+            return
         claimed, blocked = self.device_manager.mark_in_use(self._required_devices())
         if not claimed:
             QtWidgets.QMessageBox.warning(self, "Busy", f"Devices already in use: {', '.join(blocked).upper()}")
             return
-        self.collect_params()
         self._plot_records = []
         self.plot.clear()
         self.plot.ax.set_xlabel("Vds (V)")

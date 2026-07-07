@@ -15,8 +15,9 @@ from app.workers.line_sweep import LineSweepWorker
 
 
 class GateScanTab(BaseMeasurementTab):
+    SETTINGS_PREFIX = "tabs/gate_scan"
+
     def __init__(self, save: SaveRoot, conns: Connections, device_manager: DeviceManager, get_global_rates_callable=None, get_ao_items_callable=None):
-        self._filename_is_auto: bool = True
         self.save = save
         self.conns = conns
         self.device_manager = device_manager
@@ -40,9 +41,10 @@ class GateScanTab(BaseMeasurementTab):
         self.device_manager.status_changed.connect(self._on_device_status_changed)
         self.device_manager.operation_changed.connect(self._on_operation_changed)
         self._sync_sessions_from_manager()
-        self._update_manual_buttons()
+        self._load_tab_settings()
+        self._bind_tab_settings()
         self._update_mode_ui()
-        self._maybe_update_auto_filename()
+        self._update_manual_buttons()
 
     def _build_control_panel(self, ctl_layout: QtWidgets.QVBoxLayout):
         ctl_layout.addWidget(SectionHeader("Mode"))
@@ -115,18 +117,7 @@ class GateScanTab(BaseMeasurementTab):
         form_output.addRow(lbl_source, self.cbo_source)
         form_output.addRow(lbl_x, self.cbo_x)
         form_output.addRow(lbl_y, self.cbo_y)
-        self.btn_reset_filename = QtWidgets.QPushButton("Reset")
-        self.btn_reset_filename.setFixedWidth(54)
-        self.btn_reset_filename.setToolTip(
-            "Regenerate filename from current sweep parameters. Re-enables auto-update if you have manually edited the filename."
-        )
-        fn_wrap = QtWidgets.QWidget()
-        fn_row = QtWidgets.QHBoxLayout(fn_wrap)
-        fn_row.setContentsMargins(0, 0, 0, 0)
-        fn_row.setSpacing(4)
-        fn_row.addWidget(self.ed_base, 1)
-        fn_row.addWidget(self.btn_reset_filename)
-        form_output.addRow(lbl_base, fn_wrap)
+        form_output.addRow(lbl_base, self.ed_base)
         self.exp_output = CollapsibleSection("Output and Plot Options", grp_output, expanded=True)
         ctl_layout.addWidget(self.exp_output)
         self._add_output_preview_section(ctl_layout)
@@ -150,7 +141,7 @@ class GateScanTab(BaseMeasurementTab):
 
         widgets = [
             self.sp_n_points, self.sp_delay, self.sp_nsamp,
-            self.cbo_source, self.cbo_x, self.cbo_y, self.ed_base, self.btn_reset_filename,
+            self.cbo_source, self.cbo_x, self.cbo_y, self.ed_base,
             self.sp_raw_vtg_start, self.sp_raw_vtg_stop, self.sp_raw_vbg_start, self.sp_raw_vbg_stop,
             self.sp_raw_vds_start, self.sp_raw_vds_stop, self.sp_ratio, self.sp_derived_start,
             self.sp_derived_stop, self.sp_derived_fixed,
@@ -440,80 +431,52 @@ class GateScanTab(BaseMeasurementTab):
         self.plot.plot_mode_changed.connect(lambda _mode: self._redraw_plot())
         self.chk_sweep_bidirectional.toggled.connect(self._update_eta)
         self.chk_sweep_bidirectional.toggled.connect(self.refresh_output_preview)
-        self.ed_base.textEdited.connect(self._on_filename_manually_edited)
         self.ed_base.textChanged.connect(self.refresh_output_preview)
-        self.btn_reset_filename.clicked.connect(self._on_reset_filename)
 
-        auto_fn_widgets = [
+        preview_widgets = [
             self.sp_raw_vtg_start, self.sp_raw_vtg_stop,
             self.sp_raw_vbg_start, self.sp_raw_vbg_stop,
             self.sp_raw_vds_start, self.sp_raw_vds_stop,
             self.sp_derived_start, self.sp_derived_stop, self.sp_derived_fixed,
             self.sp_derived_vds_fixed, self.sp_derived_vds_start, self.sp_derived_vds_stop,
         ]
-        for widget in auto_fn_widgets:
-            widget.valueChanged.connect(self._maybe_update_auto_filename)
+        for widget in preview_widgets:
+            widget.valueChanged.connect(self.refresh_output_preview)
         for chk in (self.chk_raw_vtg_active, self.chk_raw_vbg_active, self.chk_raw_vds_active):
-            chk.toggled.connect(self._maybe_update_auto_filename)
-        self.rad_mode_raw.toggled.connect(self._maybe_update_auto_filename)
-        self.rad_sweep_doping.toggled.connect(self._maybe_update_auto_filename)
-        self.rad_sweep_efield.toggled.connect(self._maybe_update_auto_filename)
-        self.btn_derived_vbias_fixed.toggled.connect(self._maybe_update_auto_filename)
-        self.btn_derived_vbias_swept.toggled.connect(self._maybe_update_auto_filename)
-
-    def _build_auto_filename(self) -> str:
-        if self.rad_mode_raw.isChecked():
-            parts = ["gate_scan"]
-            if self.chk_raw_vtg_active.isChecked():
-                parts.append(f"Vtg_{self.sp_raw_vtg_start.value():g}to{self.sp_raw_vtg_stop.value():g}V")
-            else:
-                parts.append(f"fixedVtg_{self.sp_raw_vtg_start.value():g}V")
-            if self.chk_raw_vbg_active.isChecked():
-                parts.append(f"Vbg_{self.sp_raw_vbg_start.value():g}to{self.sp_raw_vbg_stop.value():g}V")
-            else:
-                parts.append(f"fixedVbg_{self.sp_raw_vbg_start.value():g}V")
-            if self.chk_raw_vds_active.isChecked():
-                parts.append(f"Vds_{self.sp_raw_vds_start.value():g}to{self.sp_raw_vds_stop.value():g}V")
-            else:
-                parts.append(f"fixedVds_{self.sp_raw_vds_start.value():g}V")
-            return "_".join(parts)
-        axis = "Doping" if self.rad_sweep_doping.isChecked() else "E-field"
-        fixed_axis = "E-field" if self.rad_sweep_doping.isChecked() else "Doping"
-        start = self.sp_derived_start.value()
-        stop = self.sp_derived_stop.value()
-        fixed = self.sp_derived_fixed.value()
-        parts = [
-            "gate_scan",
-            f"{axis}_{start:g}to{stop:g}V",
-            f"fixed{fixed_axis}_{fixed:g}V",
-        ]
-        if self._derived_vbias_is_swept():
-            parts.append(f"Vds_{self.sp_derived_vds_start.value():g}to{self.sp_derived_vds_stop.value():g}V")
-        else:
-            parts.append(f"fixedVds_{self.sp_derived_vds_fixed.value():g}V")
-        return "_".join(parts)
-
-    def _maybe_update_auto_filename(self, *_args) -> None:
-        if not self._filename_is_auto:
-            return
-        self.ed_base.blockSignals(True)
-        self.ed_base.setText(self._build_auto_filename())
-        self.ed_base.blockSignals(False)
-        self.refresh_output_preview()
-
-    def _on_filename_manually_edited(self, *_args) -> None:
-        self._filename_is_auto = False
-        self.refresh_output_preview()
-
-    def _on_reset_filename(self) -> None:
-        self._filename_is_auto = True
-        self._maybe_update_auto_filename()
+            chk.toggled.connect(self.refresh_output_preview)
+        self.rad_mode_raw.toggled.connect(self.refresh_output_preview)
+        self.rad_sweep_doping.toggled.connect(self.refresh_output_preview)
+        self.rad_sweep_efield.toggled.connect(self.refresh_output_preview)
+        self.btn_derived_vbias_fixed.toggled.connect(self.refresh_output_preview)
+        self.btn_derived_vbias_swept.toggled.connect(self.refresh_output_preview)
 
     def _output_summary_parts(self) -> list[str]:
         source = "keithley_g3" if self.cbo_source.currentText() == "Keithley 2400" else self.cbo_source.currentText()
         mode = "raw" if self.rad_mode_raw.isChecked() else "derived"
         direction = "forward_backward" if self.chk_sweep_bidirectional.isChecked() else "forward"
-        return [mode, source, direction]
+        parts = [mode, source, direction]
+        if self.rad_mode_raw.isChecked():
+            for axis, start, stop, active in (
+                ("Vtg", self.sp_raw_vtg_start.value(), self.sp_raw_vtg_stop.value(), self.chk_raw_vtg_active.isChecked()),
+                ("Vbg", self.sp_raw_vbg_start.value(), self.sp_raw_vbg_stop.value(), self.chk_raw_vbg_active.isChecked()),
+                ("Vds", self.sp_raw_vds_start.value(), self.sp_raw_vds_stop.value(), self.chk_raw_vds_active.isChecked()),
+            ):
+                parts.append(f"{axis}_{start:g}to{stop:g}V" if active else f"fixed_{axis}_{start:g}V")
+            return parts
+
+        axis = "Doping" if self.rad_sweep_doping.isChecked() else "E-field"
+        fixed_axis = "E-field" if self.rad_sweep_doping.isChecked() else "Doping"
+        parts.extend(
+            [
+                f"{axis}_{self.sp_derived_start.value():g}to{self.sp_derived_stop.value():g}V",
+                f"fixed_{fixed_axis}_{self.sp_derived_fixed.value():g}V",
+            ]
+        )
+        if self._derived_vbias_is_swept():
+            parts.append(f"Vds_{self.sp_derived_vds_start.value():g}to{self.sp_derived_vds_stop.value():g}V")
+        else:
+            parts.append(f"fixed_Vds_{self.sp_derived_vds_fixed.value():g}V")
+        return parts
 
     def refresh_output_preview(self, *_args) -> None:
         planned = build_planned_output(
@@ -526,6 +489,57 @@ class GateScanTab(BaseMeasurementTab):
         self._output_run_id = planned.run_id
         self._planned_output = planned
         self.set_output_preview_text(planned, planned_output_warning(planned, self.save))
+
+    def _settings_widgets(self):
+        return [
+            ("base_name", self.ed_base),
+            ("source", self.cbo_source),
+            ("plot_x", self.cbo_x),
+            ("plot_y", self.cbo_y),
+            ("mode_raw", self.rad_mode_raw),
+            ("mode_derived", self.rad_mode_derived),
+            ("sweep_bidirectional", self.chk_sweep_bidirectional),
+            ("raw_vtg_active", self.chk_raw_vtg_active),
+            ("raw_vtg_start", self.sp_raw_vtg_start),
+            ("raw_vtg_stop", self.sp_raw_vtg_stop),
+            ("raw_vbg_active", self.chk_raw_vbg_active),
+            ("raw_vbg_start", self.sp_raw_vbg_start),
+            ("raw_vbg_stop", self.sp_raw_vbg_stop),
+            ("raw_vds_active", self.chk_raw_vds_active),
+            ("raw_vds_start", self.sp_raw_vds_start),
+            ("raw_vds_stop", self.sp_raw_vds_stop),
+            ("derived_ratio", self.sp_ratio),
+            ("derived_axis_doping", self.rad_sweep_doping),
+            ("derived_axis_efield", self.rad_sweep_efield),
+            ("derived_start", self.sp_derived_start),
+            ("derived_stop", self.sp_derived_stop),
+            ("derived_fixed", self.sp_derived_fixed),
+            ("derived_vds_fixed_mode", self.btn_derived_vbias_fixed),
+            ("derived_vds_swept_mode", self.btn_derived_vbias_swept),
+            ("derived_vds_fixed", self.sp_derived_vds_fixed),
+            ("derived_vds_start", self.sp_derived_vds_start),
+            ("derived_vds_stop", self.sp_derived_vds_stop),
+            ("n_points", self.sp_n_points),
+            ("delay", self.sp_delay),
+            ("averages", self.sp_nsamp),
+        ]
+
+    def _load_tab_settings(self):
+        self._load_tab_widget_settings(self.SETTINGS_PREFIX, self._settings_widgets())
+        self._update_mode_ui()
+        self._update_raw_row_states()
+        self._update_derived_labels()
+        self._update_derived_vds_mode()
+        self._update_eta()
+        self._update_plot_axis_choices()
+        self.set_plot_axis_source(self.cbo_y.currentText())
+        self.refresh_output_preview()
+
+    def _bind_tab_settings(self):
+        self._bind_tab_widget_settings(self.SETTINGS_PREFIX, self._settings_widgets())
+
+    def save_tab_settings(self):
+        self._save_tab_widget_settings(self.SETTINGS_PREFIX, self._settings_widgets())
 
     def _sync_sessions_from_manager(self):
         self.s_g1 = self.device_manager.get_session("g1")
@@ -929,11 +943,15 @@ class GateScanTab(BaseMeasurementTab):
             return
         if not self._validate_required_sessions() or not self._validate_params():
             return
+        try:
+            self.collect_params()
+        except Exception as ex:
+            QtWidgets.QMessageBox.warning(self, "Invalid Parameters", str(ex))
+            return
         claimed, blocked = self.device_manager.mark_in_use(self._required_devices())
         if not claimed:
             QtWidgets.QMessageBox.warning(self, "Busy", f"Devices already in use: {', '.join(blocked).upper()}")
             return
-        self.collect_params()
         self._plot_records = []
         self.plot.clear()
         self.set_plot_axis_source(self.p.plot_choice)

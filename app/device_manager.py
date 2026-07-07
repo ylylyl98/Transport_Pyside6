@@ -368,6 +368,9 @@ class DeviceManager(QtCore.QObject):
             pass
         return items or ["ao0", "ao1"]
 
+    def daq_output_channels(self) -> list[int]:
+        return self._daq_output_channels()
+
     def sync_addresses(self):
         changed = []
         for name in self.sessions:
@@ -376,6 +379,11 @@ class DeviceManager(QtCore.QObject):
             if self.sessions[name] is not None and (new_addr != self._connected_addresses.get(name) or new_mode != self._connected_modes.get(name)):
                 changed.append(name)
         for name in changed:
+            try:
+                self._safe_zero_keithley_before_close(name)
+            except Exception as ex:
+                self._emit_status(name, "err", f"Zero before reconnect failed: {ex}")
+                continue
             self._close_device(name)
             self._emit_status(name, "idle", "Address changed")
             self._connected_addresses[name] = self._address_for(name)
@@ -518,22 +526,11 @@ class DeviceManager(QtCore.QObject):
         self._connect_lockin(emitter=emitter)
 
     def _disconnect_all_in_thread(self, emitter):
-        from app.constants import SAFE_RAMP_STEP_T, SAFE_RAMP_STEP_V
-        from app.utils import safe_ramp
-
         for session_name in ("g1", "g2", "g3"):
-            session = self.sessions.get(session_name)
-            if session is not None:
-                try:
-                    safe_ramp(
-                        session.set_voltage,
-                        session.get_voltage_setpoint(),
-                        0.0,
-                        SAFE_RAMP_STEP_V,
-                        SAFE_RAMP_STEP_T,
-                    )
-                except Exception:
-                    pass
+            try:
+                self._safe_zero_keithley_before_close(session_name)
+            except Exception:
+                pass
         self._close_daq_outputs()
         for name in ("g1", "g2", "g3", "daq", "mono", "lockin"):
             self._close_device(name)
@@ -543,14 +540,20 @@ class DeviceManager(QtCore.QObject):
         address = self._address_for(name)
         mode = self._mode_for(name)
         if not address:
+            try:
+                self._safe_zero_keithley_before_close(name)
+            except Exception as ex:
+                emitter.emit(name, "err", f"Zero before disconnect failed: {ex}")
+                return
             self._close_device(name)
             emitter.emit(name, "idle", "")
             return
         if self.sessions[name] is not None and self._connected_addresses.get(name) == address and self._connected_modes.get(name) == mode:
             emitter.emit(name, "ok", keithley_mode_label(mode))
             return
-        self._close_device(name)
         try:
+            self._safe_zero_keithley_before_close(name)
+            self._close_device(name)
             session_cls = Keithley2400OhmMode if mode == KEITHLEY_MODE_OHM_4W else Keithley2400VoltMode
             session = session_cls(name, address, curr_comp=curr_comp, volt_comp=volt_comp)
             session.connect()
@@ -633,6 +636,44 @@ class DeviceManager(QtCore.QObject):
         self._connected_addresses[name] = self._address_for(name)
         self._connected_modes[name] = self._mode_for(name)
 
+    def _safe_zero_keithley_before_close(self, name: str):
+        if name not in {"g1", "g2", "g3"}:
+            return
+        session = self.sessions.get(name)
+        if session is None or self.connected_mode(name) != KEITHLEY_MODE_VOLTAGE_2W:
+            return
+        from app.constants import SAFE_RAMP_STEP_T, SAFE_RAMP_STEP_V
+        from app.utils import safe_ramp
+
+        safe_ramp(
+            session.set_voltage,
+            session.get_voltage_setpoint(),
+            0.0,
+            SAFE_RAMP_STEP_V,
+            SAFE_RAMP_STEP_T,
+        )
+
+    def _daq_output_channels(self, requested: Optional[Iterable[int]] = None) -> list[int]:
+        if requested is not None:
+            channels = requested
+        else:
+            daq = self.sessions.get("daq")
+            if daq is None:
+                channels = []
+            else:
+                channels = getattr(daq, "ao_channel_indexes", [])
+            if daq is not None and not channels:
+                channels = [int(ao[2:]) for ao in self.get_ao_items() if ao.startswith("ao")]
+        unique: list[int] = []
+        for channel in channels:
+            try:
+                index = int(channel)
+            except (TypeError, ValueError):
+                continue
+            if index not in unique:
+                unique.append(index)
+        return sorted(unique)
+
     def _close_daq_outputs(self):
         from app.constants import SAFE_RAMP_STEP_T, SAFE_RAMP_STEP_V
         from app.utils import safe_ramp
@@ -640,9 +681,8 @@ class DeviceManager(QtCore.QObject):
         daq = self.sessions.get("daq")
         if daq is None:
             return
-        for ao in self.get_ao_items():
+        for idx in self._daq_output_channels():
             try:
-                idx = int(ao[2:])
                 safe_ramp(
                     lambda v, i=idx: daq.set_voltage(i, v),
                     daq.get_ao_value(idx),
@@ -654,17 +694,18 @@ class DeviceManager(QtCore.QObject):
                 pass
 
     def emergency_stop(self, daq_channels: Optional[Iterable[int]] = None):
+        daq_channels = self._daq_output_channels(daq_channels)
         if self._emergency_worker is not None and self._emergency_worker.isRunning():
             return
         if self._manual_worker is not None and self._manual_worker.isRunning():
-            self._pending_emergency_daq_channels = list(daq_channels or [])
+            self._pending_emergency_daq_channels = list(daq_channels)
             self._manual_worker.request_cancel()
             self.operation_changed.emit(True, "Emergency stop requested: stopping manual control before zeroing outputs...")
             return
-        self._start_emergency_worker(list(daq_channels or []))
+        self._start_emergency_worker(list(daq_channels))
 
     def _start_emergency_worker(self, daq_channels: list[int]):
-        worker = EmergencyRampWorker(self.sessions, list(daq_channels or []))
+        worker = EmergencyRampWorker(self.sessions, self._daq_output_channels(daq_channels))
         self._emergency_worker = worker
         worker.ramp_finished.connect(lambda msg: self.operation_changed.emit(False, msg))
         worker.finished.connect(self._clear_emergency_worker)

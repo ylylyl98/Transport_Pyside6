@@ -124,6 +124,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def closeEvent(self, event):
         self._save_plot_mode_settings()
+        for tab in (self.tab_dual, self.tab_gate_scan, self.tab_cosweep, self.tab_photocurrent):
+            if hasattr(tab, "save_tab_settings"):
+                tab.save_tab_settings()
         self.lockin_panel.save_panel_settings()
         self.conn_dock.save_settings()
         self.device_manager.shutdown()
@@ -172,33 +175,20 @@ class MainWindow(QtWidgets.QMainWindow):
                 tab.worker.request_stop()
                 tab.log.appendPlainText("!!! EMERGENCY STOP REQUESTED !!!")
 
-        daq_zeroed_log = []
         for tab in tabs:
-            vds_source_text = tab.cbo_source.currentText()
-            if "NI DAQ" in vds_source_text:
-                try:
-                    chan_idx = int(vds_source_text.split()[-1].replace("ao", ""))
-                    daq_zeroed_log.append(f"Zeroed ao{chan_idx} (Vds)")
-                except Exception:
-                    pass
             if hasattr(tab, "run_panel"):
                 tab.run_panel.set_running(False)
 
-        daq_channels = []
-        for entry in daq_zeroed_log:
-            try:
-                daq_channels.append(int(entry.split("ao")[1].split(" ")[0]))
-            except Exception:
-                pass
-        self.device_manager.emergency_stop(daq_channels)
+        daq_channels = self.device_manager.daq_output_channels()
+        self.device_manager.emergency_stop()
 
         msg = "Stop signal sent to all workers.\n\n"
         msg += "Safe ramp started:\n"
         msg += "- Keithley outputs G1, G2, and G3 are being ramped toward 0 V where connected.\n"
-        if daq_zeroed_log:
-            msg += f"- DAQ Vds source requested: {', '.join(set(daq_zeroed_log))}\n"
+        if daq_channels:
+            msg += "- DAQ AO outputs requested: " + ", ".join(f"ao{channel}" for channel in daq_channels) + "\n"
         else:
-            msg += "- DAQ AO channels were not requested because no tab had DAQ selected as Vds source.\n"
+            msg += "- No connected DAQ AO outputs were available to request.\n"
         msg += "\nWatch Instrument Setup status for safe-ramp completion."
         QtWidgets.QMessageBox.critical(self, "Emergency Stop", msg)
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 
 from PyQt6 import QtCore, QtWidgets
@@ -19,6 +20,8 @@ SET_BUTTON_WIDTH = 48
 
 
 class PhotocurrentTab(BaseMeasurementTab):
+    SETTINGS_PREFIX = "tabs/photocurrent"
+
     def __init__(self, save: SaveRoot, conns: Connections, device_manager: DeviceManager, get_global_rates_callable=None, get_ao_items_callable=None):
         self.save = save
         self.conns = conns
@@ -32,12 +35,15 @@ class PhotocurrentTab(BaseMeasurementTab):
         self._plot_records = []
         self._output_run_id = None
         self._planned_output = None
+        self._loading_tab_settings = False
         super().__init__("START PHOTOCURRENT", "Wavelength (nm)", "Ids (A)", ["g1", "g2", "g3", "daq", "mono"])
         self._wire()
         self.btn_start.setToolTip("Connect instruments first")
         self.device_manager.status_changed.connect(self._on_device_status_changed)
         self.device_manager.operation_changed.connect(self._on_operation_changed)
         self._sync_sessions_from_manager()
+        self._load_tab_settings()
+        self._bind_tab_settings()
         self._update_manual_buttons()
 
     def _make_set_row(self, spinbox, button):
@@ -361,6 +367,8 @@ class PhotocurrentTab(BaseMeasurementTab):
             return
         self._refresh_condition_preview()
         self.refresh_output_preview()
+        if not getattr(self, "_loading_tab_settings", False):
+            self._save_bias_conditions_settings()
 
     def _vds_sources(self) -> list[str]:
         sources: list[str] = []
@@ -421,8 +429,107 @@ class PhotocurrentTab(BaseMeasurementTab):
         self.set_output_preview_text(planned, planned_output_warning(planned, self.save))
         condition_paths = self._condition_csv_paths()
         if condition_paths:
-            self.lbl_filename_preview.setPlainText(f"{len(condition_paths)} CSV files (one per selected condition)")
+            condition_names = [os.path.basename(path) for path in condition_paths]
+            if len(condition_names) == 1:
+                preview_text = condition_names[0]
+            else:
+                preview_lines = [f"{len(condition_names)} CSV files:"]
+                preview_lines.extend(condition_names[:3])
+                if len(condition_names) > 3:
+                    preview_lines.append(f"... {len(condition_names) - 3} more")
+                preview_text = "\n".join(preview_lines)
+            self.lbl_filename_preview.setPlainText(preview_text)
             self.lbl_filename_preview.setToolTip("\n".join(condition_paths))
+
+    def _settings_widgets(self):
+        return [
+            ("base_name", self.ed_base),
+            ("source", self.cbo_source),
+            ("plot_y", self.cbo_y),
+            ("wl_start", self.sp_wls),
+            ("wl_stop", self.sp_wle),
+            ("wl_step", self.sp_wld),
+            ("use_vds", self.chk_use_vds),
+            ("manual_vds", self.sp_vds),
+            ("vds_ramp", self.sp_vds_ramp),
+            ("delay", self.sp_delay),
+            ("averages", self.sp_nsamp),
+        ]
+
+    def _load_tab_settings(self):
+        self._loading_tab_settings = True
+        try:
+            self._load_tab_widget_settings(self.SETTINGS_PREFIX, self._settings_widgets())
+            self._load_bias_conditions_settings()
+        finally:
+            self._loading_tab_settings = False
+        self._update_vds_bias_state()
+        self._update_plot_axis_choices()
+        self.set_plot_axis_source(self.cbo_y.currentText())
+        self._refresh_condition_preview()
+        self.refresh_output_preview()
+
+    def _bind_tab_settings(self):
+        self._bind_tab_widget_settings(self.SETTINGS_PREFIX, self._settings_widgets())
+
+    def save_tab_settings(self):
+        self._save_tab_widget_settings(self.SETTINGS_PREFIX, self._settings_widgets())
+        self._save_bias_conditions_settings()
+
+    def _save_bias_conditions_settings(self):
+        try:
+            conditions = self._bias_conditions(strict=False)
+        except Exception:
+            return
+        from app.settings import get_app_settings
+
+        payload = [
+            {
+                "enabled": condition.enabled,
+                "vtg": condition.vtg,
+                "vbg": condition.vbg,
+                "vds": condition.vds,
+                "settle_s": condition.settle_s,
+            }
+            for condition in conditions
+        ]
+        settings = get_app_settings()
+        settings.setValue(f"{self.SETTINGS_PREFIX}/bias_conditions", json.dumps(payload))
+        settings.sync()
+
+    def _load_bias_conditions_settings(self):
+        from app.settings import get_app_settings
+
+        raw = get_app_settings().value(f"{self.SETTINGS_PREFIX}/bias_conditions", "")
+        if not raw:
+            return
+        try:
+            rows = json.loads(str(raw))
+        except (TypeError, ValueError):
+            return
+        if not isinstance(rows, list):
+            return
+        conditions: list[PhotocurrentBiasCondition] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            try:
+                conditions.append(
+                    PhotocurrentBiasCondition(
+                        enabled=bool(row.get("enabled", True)),
+                        vtg=float(row.get("vtg", 0.0)),
+                        vbg=float(row.get("vbg", 0.0)),
+                        vds=float(row.get("vds", 0.0)),
+                        settle_s=float(row.get("settle_s", 2.0)),
+                    )
+                )
+            except (TypeError, ValueError):
+                continue
+        if not conditions:
+            return
+        self.tbl_bias_conditions.setRowCount(0)
+        for condition in conditions:
+            self._append_bias_condition(condition)
 
     def _condition_csv_paths(self) -> list[str]:
         if self._planned_output is None:
@@ -663,6 +770,8 @@ class PhotocurrentTab(BaseMeasurementTab):
         self.p.vds_set = self.sp_vds.value()
         self.p.vds_ramp = self.sp_vds_ramp.value()
         self.p.bias_conditions = self._active_bias_conditions(strict=True)
+        if not self.p.bias_conditions:
+            raise ValueError("Select at least one enabled bias condition to run.")
         first = self.p.bias_conditions[0]
         self.p.vtg_set = first.vtg
         self.p.vbg_set = first.vbg
@@ -686,13 +795,17 @@ class PhotocurrentTab(BaseMeasurementTab):
             return
         if not self._validate_required_sessions():
             return
+        try:
+            self.collect_params()
+        except Exception as ex:
+            QtWidgets.QMessageBox.warning(self, "Invalid Parameters", str(ex))
+            return
         if not self._validate_condition_output_paths():
             return
         claimed, blocked = self.device_manager.mark_in_use(self._required_devices())
         if not claimed:
             QtWidgets.QMessageBox.warning(self, "Busy", f"Devices already in use: {', '.join(blocked).upper()}")
             return
-        self.collect_params()
         self._plot_records = []
         self.plot.clear()
         self.plot.ax.set_xlabel("Wavelength (nm)")

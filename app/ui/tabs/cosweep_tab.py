@@ -20,6 +20,8 @@ COSWEEP_PANEL_MAX_WIDTH = 560
 
 
 class CoSweepTab(BaseMeasurementTab):
+    SETTINGS_PREFIX = "tabs/map_2d"
+
     def __init__(self, save: SaveRoot, conns: Connections, device_manager: DeviceManager, get_global_rates_callable=None, get_ao_items_callable=None):
         self.save = save
         self.conns = conns
@@ -43,6 +45,8 @@ class CoSweepTab(BaseMeasurementTab):
         self.device_manager.status_changed.connect(self._on_device_status_changed)
         self.device_manager.operation_changed.connect(self._on_operation_changed)
         self._sync_sessions_from_manager()
+        self._load_tab_settings()
+        self._bind_tab_settings()
         self._update_manual_buttons()
         self.on_fast_combo_changed()
 
@@ -177,16 +181,10 @@ class CoSweepTab(BaseMeasurementTab):
         self.sp_nsamp = QtWidgets.QSpinBox()
         self.sp_nsamp.setRange(1, 1000)
         self.sp_nsamp.setValue(3)
-        self.sp_vg_ramp = QtWidgets.QDoubleSpinBox()
-        self.sp_vg_ramp.setDecimals(3)
-        self.sp_vg_ramp.setRange(1e-3, 5.0)
-        self.sp_vg_ramp.setValue(0.2)
         lbl_delay = QtWidgets.QLabel("Delay (s):")
         lbl_avg = QtWidgets.QLabel("Averages:")
-        lbl_ramp = QtWidgets.QLabel("Gate Step (V):")
         form_time.addRow(lbl_delay, self.sp_delay)
         form_time.addRow(lbl_avg, self.sp_nsamp)
-        form_time.addRow(lbl_ramp, self.sp_vg_ramp)
         ctl_layout.addWidget(grp_time)
 
         ctl_layout.addWidget(SectionHeader("Output"))
@@ -221,7 +219,7 @@ class CoSweepTab(BaseMeasurementTab):
             self.sp_vtg_start, self.sp_vtg_stop, self.sp_vtg_step,
             self.sp_vbg_start, self.sp_vbg_stop, self.sp_vbg_step,
             self.sp_vds_start, self.sp_vds_stop, self.sp_vds_step,
-            self.sp_delay, self.sp_nsamp, self.sp_vg_ramp,
+            self.sp_delay, self.sp_nsamp,
             self.ed_base, self.cbo_source, self.cbo_y, self.cbo_fast, self.cbo_slow, self.cbo_sweep_dim, self.sp_ratio,
         ]:
             set_standard_input_height(widget)
@@ -253,7 +251,6 @@ class CoSweepTab(BaseMeasurementTab):
         apply_tooltip("Back-gate weighting r used only when plotting the map as Doping/E-field.", lbl_ratio, self.sp_ratio)
         apply_tooltip("Wait time after each setpoint update before acquiring data.", lbl_delay, self.sp_delay)
         apply_tooltip("Number of DAQ reads averaged at each map point.", lbl_avg, self.sp_nsamp)
-        apply_tooltip("Voltage step size used for gate moves during the sweep.", lbl_ramp, self.sp_vg_ramp)
         apply_tooltip("Show the planned point order without running hardware acquisition.", self.btn_preview)
         apply_tooltip("Base filename for the output CSV.", lbl_base, self.ed_base)
         apply_tooltip("Select which current channel is drawn in the live plot.", lbl_y, self.cbo_y)
@@ -358,6 +355,43 @@ class CoSweepTab(BaseMeasurementTab):
         self._output_run_id = planned.run_id
         self._planned_output = planned
         self.set_output_preview_text(planned, planned_output_warning(planned, self.save))
+
+    def _settings_widgets(self):
+        return [
+            ("base_name", self.ed_base),
+            ("source", self.cbo_source),
+            ("plot_y", self.cbo_y),
+            ("sweep_dim", self.cbo_sweep_dim),
+            ("fast_axis", self.cbo_fast),
+            ("slow_axis", self.cbo_slow),
+            ("link_doping_efield", self.chk_link),
+            ("ratio", self.sp_ratio),
+            ("vtg_start", self.sp_vtg_start),
+            ("vtg_stop", self.sp_vtg_stop),
+            ("vtg_step", self.sp_vtg_step),
+            ("vbg_start", self.sp_vbg_start),
+            ("vbg_stop", self.sp_vbg_stop),
+            ("vbg_step", self.sp_vbg_step),
+            ("vds_start", self.sp_vds_start),
+            ("vds_stop", self.sp_vds_stop),
+            ("vds_step", self.sp_vds_step),
+            ("delay", self.sp_delay),
+            ("averages", self.sp_nsamp),
+        ]
+
+    def _load_tab_settings(self):
+        self._load_tab_widget_settings(self.SETTINGS_PREFIX, self._settings_widgets())
+        self.on_sweep_type_changed()
+        self._update_plot_axis_choices()
+        self.set_plot_axis_source(self.cbo_y.currentText())
+        self._update_sweep_summary()
+        self.refresh_output_preview()
+
+    def _bind_tab_settings(self):
+        self._bind_tab_widget_settings(self.SETTINGS_PREFIX, self._settings_widgets())
+
+    def save_tab_settings(self):
+        self._save_tab_widget_settings(self.SETTINGS_PREFIX, self._settings_widgets())
 
     def _update_manual_buttons(self):
         self._sync_sessions_from_manager()
@@ -470,9 +504,6 @@ class CoSweepTab(BaseMeasurementTab):
                 return False
         if self.sp_nsamp.value() < 1:
             QtWidgets.QMessageBox.warning(self, "Invalid Averages", "Averages must be at least 1.")
-            return False
-        if self.sp_vg_ramp.value() <= 0:
-            QtWidgets.QMessageBox.warning(self, "Invalid Ramp Step", "Gate Ramp Step must be greater than zero.")
             return False
         if self.chk_link.isChecked() and not self._link_plot_available():
             QtWidgets.QMessageBox.warning(
@@ -712,7 +743,7 @@ class CoSweepTab(BaseMeasurementTab):
         self.p.delay = self.sp_delay.value()
         self.p.n_sample = self.sp_nsamp.value()
         self.p.plot_choice = self.cbo_y.currentText()
-        self.p.vg_ramp = self.sp_vg_ramp.value()
+        self.p.vg_ramp = GATE_BIAS_RAMP_STEP_V
 
     def start_run(self):
         if self.worker_thread:
@@ -727,11 +758,15 @@ class CoSweepTab(BaseMeasurementTab):
             return
         if not self._validate_required_sessions():
             return
+        try:
+            self.collect_params()
+        except Exception as ex:
+            QtWidgets.QMessageBox.warning(self, "Invalid Parameters", str(ex))
+            return
         claimed, blocked = self.device_manager.mark_in_use(self._required_devices())
         if not claimed:
             QtWidgets.QMessageBox.warning(self, "Busy", f"Devices already in use: {', '.join(blocked).upper()}")
             return
-        self.collect_params()
         self._plot_records = []
         self.plot.clear()
         self.set_plot_axis_source(self.p.plot_choice)

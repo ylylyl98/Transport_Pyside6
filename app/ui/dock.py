@@ -546,11 +546,11 @@ class ConnDock(QtWidgets.QWidget):
         elif "fail" in message.lower() or "cannot" in message.lower():
             summary = "Connection issue"
             role = "warning-hint"
-        elif "connect" in message.lower():
-            summary = "Connected"
-            role = "hint"
         elif "disconnect" in message.lower():
             summary = "Disconnected"
+            role = "hint"
+        elif "connect" in message.lower():
+            summary = "Connected"
             role = "hint"
         else:
             summary = "Ready"

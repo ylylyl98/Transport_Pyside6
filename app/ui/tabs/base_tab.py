@@ -6,6 +6,7 @@ from PyQt6 import QtCore, QtGui, QtWidgets
 from PyQt6.QtCore import Qt
 
 from app.run_output import output_blocking_reason
+from app.settings import get_app_settings
 from app.ui.widgets.plot_widget import PlotWidget
 from app.ui.widgets.run_panel import RunPanel
 
@@ -236,3 +237,79 @@ class BaseMeasurementTab(QtWidgets.QWidget):
                 f.write(f"Ended: {datetime.datetime.now().isoformat(timespec='seconds')}\n")
         except Exception:
             pass
+
+    def _load_tab_widget_settings(self, prefix: str, widgets: list[tuple[str, QtWidgets.QWidget]]) -> None:
+        settings = get_app_settings()
+        for key, widget in widgets:
+            value = settings.value(f"{prefix}/{key}", None)
+            if value is None:
+                continue
+            previous = widget.blockSignals(True)
+            try:
+                self._apply_widget_setting(widget, value)
+            finally:
+                widget.blockSignals(previous)
+
+    def _bind_tab_widget_settings(self, prefix: str, widgets: list[tuple[str, QtWidgets.QWidget]]) -> None:
+        for key, widget in widgets:
+            def save_setting(*_args, setting_key=key, setting_widget=widget):
+                self._save_single_tab_widget_setting(prefix, setting_key, setting_widget)
+
+            if isinstance(widget, QtWidgets.QLineEdit):
+                widget.textChanged.connect(save_setting)
+            elif isinstance(widget, QtWidgets.QComboBox):
+                widget.currentTextChanged.connect(save_setting)
+            elif isinstance(widget, QtWidgets.QDoubleSpinBox):
+                widget.valueChanged.connect(save_setting)
+            elif isinstance(widget, QtWidgets.QSpinBox):
+                widget.valueChanged.connect(save_setting)
+            elif isinstance(widget, QtWidgets.QAbstractButton) and widget.isCheckable():
+                widget.toggled.connect(save_setting)
+
+    def _save_tab_widget_settings(self, prefix: str, widgets: list[tuple[str, QtWidgets.QWidget]]) -> None:
+        for key, widget in widgets:
+            self._save_single_tab_widget_setting(prefix, key, widget)
+        get_app_settings().sync()
+
+    def _save_single_tab_widget_setting(self, prefix: str, key: str, widget: QtWidgets.QWidget) -> None:
+        value = self._widget_setting_value(widget)
+        if value is None:
+            return
+        settings = get_app_settings()
+        settings.setValue(f"{prefix}/{key}", value)
+
+    @staticmethod
+    def _widget_setting_value(widget: QtWidgets.QWidget):
+        if isinstance(widget, QtWidgets.QLineEdit):
+            return widget.text()
+        if isinstance(widget, QtWidgets.QComboBox):
+            return widget.currentText()
+        if isinstance(widget, QtWidgets.QDoubleSpinBox):
+            return float(widget.value())
+        if isinstance(widget, QtWidgets.QSpinBox):
+            return int(widget.value())
+        if isinstance(widget, QtWidgets.QAbstractButton) and widget.isCheckable():
+            return bool(widget.isChecked())
+        return None
+
+    def _apply_widget_setting(self, widget: QtWidgets.QWidget, value) -> None:
+        if isinstance(widget, QtWidgets.QLineEdit):
+            widget.setText(str(value))
+        elif isinstance(widget, QtWidgets.QComboBox):
+            index = widget.findText(str(value))
+            if index >= 0:
+                widget.setCurrentIndex(index)
+        elif isinstance(widget, QtWidgets.QDoubleSpinBox):
+            widget.setValue(float(value))
+        elif isinstance(widget, QtWidgets.QSpinBox):
+            widget.setValue(int(float(value)))
+        elif isinstance(widget, QtWidgets.QAbstractButton) and widget.isCheckable():
+            widget.setChecked(self._settings_bool(value))
+
+    @staticmethod
+    def _settings_bool(value) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        return str(value).strip().lower() in {"1", "true", "yes", "on"}

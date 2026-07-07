@@ -104,6 +104,8 @@ class Keithley2400Base(PyvisaInstrument):
             self._write(":SENS:CURR:PROT %.6e" % self._init_curr_comp)
             self._write(":SOUR:VOLT:RANG %.6e" % self._init_volt_comp)
             self._write("SOUR:DEL %.6e" % self._init_source_delay)
+            self._write(":SOUR:VOLT:LEV 0")
+            self._output_values[self.VOLT_OUTPUT] = 0.0
             self.turn_on_output()
             self._operating_mode = KEITHLEY_MODE_VOLTAGE_2W
 
