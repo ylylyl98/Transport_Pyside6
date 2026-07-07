@@ -9,6 +9,7 @@ from app.app_identity import APP_NAME, configure_qapp, set_windows_app_id
 from app.device_manager import DeviceManager
 from app.settings import get_app_settings
 from app.ui.dock import ConnDock
+from app.ui.lockin_panel import LockinPanel
 from app.ui.style import APP_STYLE
 from app.ui.tabs.cosweep_tab import CoSweepTab
 from app.ui.tabs.dual_gate_tab import DualGateTab
@@ -28,6 +29,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if app is not None and not app.windowIcon().isNull():
             self.setWindowIcon(app.windowIcon())
         self.resize(1400, 860)
+        self.view_menu = self.menuBar().addMenu("View")
 
         self.conn_dock = ConnDock()
         self.conn_dock.load_settings()
@@ -55,13 +57,30 @@ class MainWindow(QtWidgets.QMainWindow):
             | QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetMovable
         )
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.instrument_dock)
-        self.menuBar().addMenu("View").addAction(self.instrument_dock.toggleViewAction())
+        self.view_menu.addAction(self.instrument_dock.toggleViewAction())
 
         self.save_root = self.conn_dock.save_root
         self.connections = self.conn_dock.conns
         self.device_manager = DeviceManager(self.connections)
         self.conn_dock.set_device_manager(self.device_manager)
         self.refresh_models_from_ui()
+
+        self.lockin_panel = LockinPanel(self.device_manager)
+        self.lockin_panel.sensitivity_read.connect(self.conn_dock.set_lockin_sensitivity_from_sr830)
+        self.lockin_dock = QtWidgets.QDockWidget("SR830 Lock-in", self)
+        self.lockin_scroll = QtWidgets.QScrollArea()
+        self.lockin_scroll.setWidgetResizable(True)
+        self.lockin_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        self.lockin_scroll.setWidget(self.lockin_panel)
+        self.lockin_dock.setWidget(self.lockin_scroll)
+        self.lockin_dock.setMinimumWidth(360)
+        self.lockin_dock.setFeatures(
+            QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetClosable
+            | QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetMovable
+            | QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetFloatable
+        )
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.lockin_dock)
+        self.view_menu.addAction(self.lockin_dock.toggleViewAction())
 
         self.tabs = QtWidgets.QTabWidget()
         self.setCentralWidget(self.tabs)
@@ -90,6 +109,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.connections.gate3_mode = c.gate3_mode
         self.connections.daq_dev = c.daq_dev
         self.connections.mono = c.mono
+        self.connections.lockin = c.lockin
         self.device_manager.sync_addresses()
 
     def _bind_save_preview_updates(self):
@@ -104,6 +124,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def closeEvent(self, event):
         self._save_plot_mode_settings()
+        self.lockin_panel.save_panel_settings()
         self.conn_dock.save_settings()
         self.device_manager.shutdown()
         event.accept()

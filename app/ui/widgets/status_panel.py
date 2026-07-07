@@ -98,6 +98,7 @@ class StatusPanel(QtWidgets.QGroupBox):
         "g3": "G3 / Vds",
         "daq": "DAQ",
         "mono": "Mono",
+        "lockin": "Lock-in",
     }
 
     def __init__(self, names: List[str], parent=None, columns: int | None = None):

@@ -15,6 +15,7 @@ class Connections:
     gate3_mode: str = "voltage_2w"
     daq_dev: str = "Dev1"
     mono: str = "ASRL13::INSTR"
+    lockin: str = "GPIB1::08::INSTR"
 
 
 @dataclass

@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Tuple
 
 from PyQt6 import QtCore, QtGui, QtWidgets
+from PyQt6.QtCore import Qt
 
 from app.constants import SETTINGS_APP, SETTINGS_ORG
 from app.device_manager import DeviceManager
@@ -14,6 +15,7 @@ from app.ui.helpers import apply_tooltip, configure_volt_spinbox, flash_button_s
 from app.ui.widgets.collapsible_section import CollapsibleSection
 from app.ui.widgets.status_panel import StatusPanel
 from app.ui.widgets.resource_combo import ResourceComboBox
+from instruments.SR830 import SENSITIVITY_LABELS, sensitivity_value
 
 
 class ScanWorker(QtCore.QThread):
@@ -65,6 +67,7 @@ class ConnDock(QtWidgets.QWidget):
         self.save_root = SaveRoot()
         self.device_manager = device_manager
         self._scan_thread = None
+        self._lockin_sensitivity_from_sr830 = False
         self._build()
         QtCore.QTimer.singleShot(0, self._start_scan)
         self._bind_device_manager()
@@ -95,11 +98,13 @@ class ConnDock(QtWidgets.QWidget):
         self.cbo_g3_mode = QtWidgets.QComboBox()
         self.cbo_daq = ResourceComboBox()
         self.cbo_mono = ResourceComboBox()
+        self.cbo_lockin = ResourceComboBox()
         self.ed_g1 = self.cbo_g1
         self.ed_g2 = self.cbo_g2
         self.ed_g3 = self.cbo_g3
         self.ed_daq = self.cbo_daq
         self.ed_mono = self.cbo_mono
+        self.ed_lockin = self.cbo_lockin
         self.cbo_g1.setCurrentText(self.conns.gate1)
         self.cbo_g2.setCurrentText(self.conns.gate2)
         self.cbo_g3.setCurrentText(self.conns.gate3)
@@ -112,7 +117,8 @@ class ConnDock(QtWidgets.QWidget):
         self._set_combo_data(self.cbo_g3_mode, self.conns.gate3_mode)
         self.cbo_daq.setCurrentText(self.conns.daq_dev)
         self.cbo_mono.setCurrentText(self.conns.mono)
-        for widget in (self.cbo_g1, self.cbo_g2, self.cbo_g3, self.cbo_daq, self.cbo_mono, self.cbo_g1_mode, self.cbo_g2_mode, self.cbo_g3_mode):
+        self.cbo_lockin.setCurrentText(self.conns.lockin)
+        for widget in (self.cbo_g1, self.cbo_g2, self.cbo_g3, self.cbo_daq, self.cbo_mono, self.cbo_lockin, self.cbo_g1_mode, self.cbo_g2_mode, self.cbo_g3_mode):
             widget.currentTextChanged.connect(self._update_reconnect_indicators)
 
         lbl_g1 = QtWidgets.QLabel("G1 / Vtg:")
@@ -120,12 +126,14 @@ class ConnDock(QtWidgets.QWidget):
         lbl_g3 = QtWidgets.QLabel("G3 / Vds:")
         lbl_daq = QtWidgets.QLabel("DAQ:")
         lbl_mono = QtWidgets.QLabel("Mono:")
+        lbl_lockin = QtWidgets.QLabel("Lock-in:")
         form_hw.addRow("", scan_wrap)
         form_hw.addRow(lbl_g1, self._make_address_mode_row(self.cbo_g1, self.cbo_g1_mode))
         form_hw.addRow(lbl_g2, self._make_address_mode_row(self.cbo_g2, self.cbo_g2_mode))
         form_hw.addRow(lbl_g3, self._make_address_mode_row(self.cbo_g3, self.cbo_g3_mode))
         form_hw.addRow(lbl_daq, self.cbo_daq)
         form_hw.addRow(lbl_mono, self.cbo_mono)
+        form_hw.addRow(lbl_lockin, self.cbo_lockin)
         self.lbl_reconnect_hint = QtWidgets.QLabel("")
         self.lbl_reconnect_hint.setWordWrap(True)
         self.lbl_reconnect_hint.setProperty("role", "warning-hint")
@@ -162,11 +170,15 @@ class ConnDock(QtWidgets.QWidget):
         self.sp_lkn.setSingleStep(0.001)
         self.sp_lkn.setValue(0.1)
         self.sp_amp.valueChanged.connect(self._save_signal_chain_settings)
-        self.sp_lkn.valueChanged.connect(self._save_signal_chain_settings)
+        self.sp_lkn.valueChanged.connect(self._on_manual_lockin_sensitivity_changed)
         lbl_amp = QtWidgets.QLabel("Pre-amp (A):")
         lbl_lkn = QtWidgets.QLabel("Lock-in (V):")
+        self.lbl_lkn_source = QtWidgets.QLabel("Manual value")
+        self.lbl_lkn_source.setWordWrap(True)
+        self.lbl_lkn_source.setProperty("role", "hint")
         form_rate.addRow(lbl_amp, self.sp_amp)
         form_rate.addRow(lbl_lkn, self.sp_lkn)
+        form_rate.addRow("", self.lbl_lkn_source)
         layout.addWidget(grp_rate)
 
         grp_conn = QtWidgets.QGroupBox("Connections")
@@ -194,7 +206,7 @@ class ConnDock(QtWidgets.QWidget):
         status_row.addWidget(self.lbl_connection_status, 1)
         status_row.addWidget(self.btn_connection_details)
         self._connection_detail = "Connect hardware from here. Tabs will reuse the same sessions."
-        self.dock_status_panel = StatusPanel(["g1", "g2", "g3", "daq", "mono"], columns=1)
+        self.dock_status_panel = StatusPanel(["g1", "g2", "g3", "daq", "mono", "lockin"], columns=1)
         lay_conn.addLayout(status_row)
         lay_conn.addWidget(self.dock_status_panel)
         layout.addWidget(grp_conn)
@@ -237,21 +249,35 @@ class ConnDock(QtWidgets.QWidget):
         form_manual.addRow(lbl_manual_g2, self._make_manual_control_row(*self._manual_gate_controls["g2"]))
         form_manual.addRow(lbl_manual_g3, self._make_manual_control_row(*self._manual_gate_controls["g3"]))
         form_manual.addRow(lbl_manual_wavelength, self._make_manual_control_row(self.sp_manual_wavelength, self.btn_manual_wavelength))
-        self.lbl_manual_currents = {
-            name: QtWidgets.QLabel(f"{name.upper()}: —")
-            for name in ("g1", "g2", "g3")
-        }
-        current_wrap = QtWidgets.QWidget()
-        current_layout = QtWidgets.QVBoxLayout(current_wrap)
-        current_layout.setContentsMargins(0, 0, 0, 0)
-        current_layout.setSpacing(2)
-        for label in self.lbl_manual_currents.values():
+        readback_wrap = QtWidgets.QWidget()
+        readback_layout = QtWidgets.QGridLayout(readback_wrap)
+        readback_layout.setContentsMargins(0, 0, 0, 0)
+        readback_layout.setHorizontalSpacing(8)
+        readback_layout.setVerticalSpacing(3)
+        headers = ("Gate", "Set V", "Meas V", "Current", "Mode")
+        for col, text in enumerate(headers):
+            label = QtWidgets.QLabel(text)
             label.setProperty("role", "hint")
-            current_layout.addWidget(label)
-        self.btn_read_gate_currents = QtWidgets.QPushButton("Read Gate Currents")
+            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            readback_layout.addWidget(label, 0, col)
+
+        self.gate_readback_labels: dict[str, dict[str, QtWidgets.QLabel]] = {}
+        for row, name in enumerate(("g1", "g2", "g3"), start=1):
+            gate_label = QtWidgets.QLabel(name.upper())
+            gate_label.setProperty("role", "status-name")
+            readback_layout.addWidget(gate_label, row, 0)
+            self.gate_readback_labels[name] = {}
+            for col, key in enumerate(("set_voltage", "measured_voltage", "current", "mode"), start=1):
+                label = QtWidgets.QLabel("--")
+                label.setProperty("role", "hint")
+                label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                readback_layout.addWidget(label, row, col)
+                self.gate_readback_labels[name][key] = label
+
+        self.btn_read_gate_currents = QtWidgets.QPushButton("Refresh Gate Readback")
         self.btn_read_gate_currents.clicked.connect(self._on_read_gate_currents)
-        current_layout.addWidget(self.btn_read_gate_currents)
-        form_manual.addRow("Current (A):", current_wrap)
+        readback_layout.addWidget(self.btn_read_gate_currents, 4, 0, 1, len(headers))
+        form_manual.addRow("Gate Readback:", readback_wrap)
         self.lbl_manual_hint = QtWidgets.QLabel(
             "Connect a gate in 2-wire voltage-source mode to enable it. Gate moves are ramped; Zero safely ramps the current source setpoint to 0 V."
         )
@@ -272,7 +298,7 @@ class ConnDock(QtWidgets.QWidget):
         layout.addWidget(self.btn_stop)
         layout.addStretch()
 
-        for widget in [self.cbo_g1, self.cbo_g2, self.cbo_g3, self.cbo_g1_mode, self.cbo_g2_mode, self.cbo_g3_mode, self.cbo_daq, self.cbo_mono, self.ed_user, self.ed_device_id, self.ed_base]:
+        for widget in [self.cbo_g1, self.cbo_g2, self.cbo_g3, self.cbo_g1_mode, self.cbo_g2_mode, self.cbo_g3_mode, self.cbo_daq, self.cbo_mono, self.cbo_lockin, self.ed_user, self.ed_device_id, self.ed_base]:
             set_standard_input_height(widget, 26)
             widget.setMinimumWidth(0)
             widget.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
@@ -288,11 +314,12 @@ class ConnDock(QtWidgets.QWidget):
         apply_tooltip("Choose whether this Keithley should be configured as a 2-wire voltage source or a 4-wire ohms meter after connection.", self.cbo_g1_mode, self.cbo_g2_mode, self.cbo_g3_mode)
         apply_tooltip("DAQ device used for current acquisition and any NI AO-based Vds output.", lbl_daq, self.cbo_daq)
         apply_tooltip("Monochromator / serial resource used by the Photocurrent tab.", lbl_mono, self.cbo_mono)
+        apply_tooltip("GPIB resource for the SR830 lock-in amplifier control panel.", lbl_lockin, self.cbo_lockin)
         apply_tooltip("Operator name added to the save path.", lbl_user, self.ed_user)
         apply_tooltip("Device identifier added to the save path.", lbl_device_id, self.ed_device_id)
         apply_tooltip("Root folder where all CSV output is stored.", lbl_base, self.ed_base)
         apply_tooltip("Pre-amp sensitivity shown on the amplifier front panel, entered in amps.", lbl_amp, self.sp_amp)
-        apply_tooltip("Lock-in sensitivity shown on the lock-in front panel, entered in volts.", lbl_lkn, self.sp_lkn)
+        apply_tooltip("Lock-in voltage sensitivity used for Ids_X/Ids_Y scaling. If the SR830 is connected, this is updated from SENS?.", lbl_lkn, self.sp_lkn, self.lbl_lkn_source)
         apply_tooltip("Open all configured hardware sessions so tabs can reuse them.", self.btn_connect_all)
         apply_tooltip("Close all instrument sessions managed by the dock.", self.btn_disconnect_all)
         apply_tooltip("Ramp this gate from its current source setpoint to the requested voltage.", lbl_manual_g1, self.sp_manual_g1, self.btn_manual_g1_set)
@@ -300,16 +327,75 @@ class ConnDock(QtWidgets.QWidget):
         apply_tooltip("Ramp this gate from its current source setpoint to the requested voltage.", lbl_manual_g3, self.sp_manual_g3, self.btn_manual_g3_set)
         apply_tooltip("Safely ramp this gate from its current source setpoint to 0 V.", self.btn_manual_g1_zero, self.btn_manual_g2_zero, self.btn_manual_g3_zero)
         apply_tooltip("Move the connected monochromator to this wavelength.", lbl_manual_wavelength, self.sp_manual_wavelength, self.btn_manual_wavelength)
-        apply_tooltip("Read the measured current from every connected gate in 2-wire voltage-source mode.", self.btn_read_gate_currents)
+        apply_tooltip("Refresh connected gate voltage and current readback once.", self.btn_read_gate_currents)
         apply_tooltip("Immediately request stop and ramp outputs back to 0 V where supported.", self.btn_stop)
         self._update_manual_controls()
 
     def get_rates(self):
+        self.refresh_lockin_sensitivity_from_session()
         preamp_sensitivity_a = max(float(self.sp_amp.value()), self.AMP_MIN_A)
         lockin_sensitivity_v = max(float(self.sp_lkn.value()), self.LIA_MIN_V)
         amp_v_per_a = 1.0 / preamp_sensitivity_a
         lockin_legacy_scale = lockin_sensitivity_v * 1000.0
         return amp_v_per_a, lockin_legacy_scale
+
+    def set_lockin_sensitivity_from_sr830(self, sensitivity_v: float, label: str = ""):
+        try:
+            sensitivity_v = float(sensitivity_v)
+        except (TypeError, ValueError):
+            return False
+        if sensitivity_v <= 0.0:
+            return False
+        previous = self.sp_lkn.blockSignals(True)
+        try:
+            self.sp_lkn.setValue(max(sensitivity_v, self.LIA_MIN_V))
+        finally:
+            self.sp_lkn.blockSignals(previous)
+        self._lockin_sensitivity_from_sr830 = True
+        suffix = f" ({label})" if label else ""
+        self._set_lockin_sensitivity_source(f"Using SR830 SENS{suffix}")
+        self.lbl_lkn_source.setToolTip("")
+        self._save_signal_chain_settings()
+        return True
+
+    def refresh_lockin_sensitivity_from_session(self) -> bool:
+        if self.device_manager is None or not self.device_manager.is_connected("lockin"):
+            if not self._lockin_sensitivity_from_sr830:
+                self._set_lockin_sensitivity_source("Manual value")
+            return False
+        session = self.device_manager.get_session("lockin")
+        if session is None:
+            return False
+        try:
+            settings = session.read_sensitivity() if hasattr(session, "read_sensitivity") else session.read_settings()
+            index = int(settings.get("sensitivity"))
+        except Exception as ex:
+            self._set_lockin_sensitivity_source("SR830 read failed; using last value", warning=True)
+            self.lbl_lkn_source.setToolTip(str(ex))
+            return False
+        sensitivity_v = settings.get("sensitivity_v")
+        if sensitivity_v is None:
+            sensitivity_v = sensitivity_value(index, use_current=False)
+        if sensitivity_v is None:
+            self._set_lockin_sensitivity_source("SR830 sensitivity unknown; using last value", warning=True)
+            return False
+        label = str(settings.get("sensitivity_label") or "")
+        if not label:
+            label = SENSITIVITY_LABELS[index] if 0 <= index < len(SENSITIVITY_LABELS) else f"Code {index}"
+        return self.set_lockin_sensitivity_from_sr830(float(sensitivity_v), label)
+
+    def _on_manual_lockin_sensitivity_changed(self, *_args):
+        self._lockin_sensitivity_from_sr830 = False
+        self._set_lockin_sensitivity_source("Manual value")
+        self._save_signal_chain_settings()
+
+    def _set_lockin_sensitivity_source(self, text: str, warning: bool = False):
+        if not hasattr(self, "lbl_lkn_source"):
+            return
+        self.lbl_lkn_source.setText(text)
+        self.lbl_lkn_source.setProperty("role", "warning-hint" if warning else "hint")
+        self.lbl_lkn_source.style().unpolish(self.lbl_lkn_source)
+        self.lbl_lkn_source.style().polish(self.lbl_lkn_source)
 
     def _make_address_mode_row(self, address_widget: QtWidgets.QWidget, mode_widget: QtWidgets.QWidget) -> QtWidgets.QWidget:
         wrap = QtWidgets.QWidget()
@@ -357,6 +443,7 @@ class ConnDock(QtWidgets.QWidget):
             gate3_mode=self.cbo_g3_mode.currentData(),
             daq_dev=self.cbo_daq.current_address(),
             mono=self.cbo_mono.current_address(),
+            lockin=self.cbo_lockin.current_address(),
         )
         s = SaveRoot(user=self.ed_user.text(), device_id=self.ed_device_id.text(), base=self.ed_base.text())
         return c, s, True
@@ -371,6 +458,7 @@ class ConnDock(QtWidgets.QWidget):
         s.setValue("mode/g3", self.cbo_g3_mode.currentData())
         s.setValue("addr/daq", self.cbo_daq.current_address())
         s.setValue("addr/mono", self.cbo_mono.current_address())
+        s.setValue("addr/lockin", self.cbo_lockin.current_address())
         s.setValue("path/user", self.ed_user.text())
         s.setValue("path/device_id", self.ed_device_id.text())
         s.setValue("path/base", self.ed_base.text())
@@ -395,6 +483,7 @@ class ConnDock(QtWidgets.QWidget):
         self._set_combo_data(self.cbo_g3_mode, str(s.value("mode/g3", self.conns.gate3_mode)))
         self.cbo_daq.setCurrentText(str(s.value("addr/daq", self.conns.daq_dev)))
         self.cbo_mono.setCurrentText(str(s.value("addr/mono", self.conns.mono)))
+        self.cbo_lockin.setCurrentText(str(s.value("addr/lockin", self.conns.lockin)))
         self.ed_user.setText(str(s.value("path/user", self.save_root.user)))
         device_id = str(s.value("path/device_id", s.value("path/sample", "YZ315")))
         self.ed_device_id.setText(device_id)
@@ -422,7 +511,7 @@ class ConnDock(QtWidgets.QWidget):
         self.device_manager.operation_changed.connect(self._on_operation_changed)
         self.device_manager.manual_control_finished.connect(self._on_manual_control_finished)
         self.device_manager.gate_currents_read.connect(self._on_gate_currents_read)
-        for name in ("g1", "g2", "g3", "daq", "mono"):
+        for name in ("g1", "g2", "g3", "daq", "mono", "lockin"):
             self._on_device_status_changed(name, self.device_manager.state(name), self.device_manager.detail(name))
         self._update_reconnect_indicators()
         self._update_manual_controls()
@@ -437,8 +526,13 @@ class ConnDock(QtWidgets.QWidget):
 
     def _on_device_status_changed(self, name: str, state: str, detail: str):
         self.dock_status_panel.set_status(name, state, detail if state == "err" else None)
-        if name in self.lbl_manual_currents and state != "ok":
-            self.lbl_manual_currents[name].setText(f"{name.upper()}: —")
+        if name in getattr(self, "gate_readback_labels", {}) and state != "ok":
+            self._set_gate_readback_row(name, {})
+        if name == "lockin":
+            if state == "ok":
+                QtCore.QTimer.singleShot(0, self.refresh_lockin_sensitivity_from_session)
+            elif self._lockin_sensitivity_from_sr830:
+                self._set_lockin_sensitivity_source("Last SR830 value; reconnect to update")
         self._update_reconnect_indicators()
         self._update_manual_controls()
 
@@ -486,7 +580,7 @@ class ConnDock(QtWidgets.QWidget):
 
     def _on_manual_control_finished(self, name: str, success: bool, message: str):
         self.lbl_manual_hint.setText(message)
-        self.lbl_manual_hint.setProperty("role", "hint" if success else "warning-hint")
+        self.lbl_manual_hint.setProperty("role", "hint" if success and "unavailable" not in message.lower() else "warning-hint")
         self.lbl_manual_hint.style().unpolish(self.lbl_manual_hint)
         self.lbl_manual_hint.style().polish(self.lbl_manual_hint)
         if not success:
@@ -502,13 +596,71 @@ class ConnDock(QtWidgets.QWidget):
             flash_button_success(self.btn_manual_wavelength)
 
     def _on_gate_currents_read(self, currents: dict, message: str):
-        for name, label in self.lbl_manual_currents.items():
-            current = currents.get(name)
-            label.setText(f"{name.upper()}: —" if current is None else f"{name.upper()}: {current:.3e} A")
+        for name, readback in currents.items():
+            self._set_gate_readback_row(name, readback if isinstance(readback, dict) else {})
+            if isinstance(readback, dict):
+                self._sync_gate_target_from_readback(name, readback)
         self.lbl_manual_hint.setText(message)
-        self.lbl_manual_hint.setProperty("role", "hint")
+        self.lbl_manual_hint.setProperty("role", "warning-hint" if "unavailable" in message.lower() else "hint")
         self.lbl_manual_hint.style().unpolish(self.lbl_manual_hint)
         self.lbl_manual_hint.style().polish(self.lbl_manual_hint)
+        return
+
+    def _set_gate_readback_row(self, name: str, readback: dict):
+        labels = self.gate_readback_labels.get(name)
+        if not labels:
+            return
+        error = str(readback.get("error") or "") if isinstance(readback, dict) else ""
+        connected = bool(readback.get("connected")) if isinstance(readback, dict) else False
+        mode = str(readback.get("mode") or "") if isinstance(readback, dict) else ""
+
+        labels["set_voltage"].setText(self._format_voltage(readback.get("set_voltage")))
+        labels["measured_voltage"].setText(self._format_voltage(readback.get("measured_voltage")))
+        labels["current"].setText(self._format_current(readback.get("current")))
+        labels["mode"].setText(self._short_gate_mode(mode) if connected else "--")
+
+        tooltip = error or ("Connected" if connected else "Disconnected")
+        for label in labels.values():
+            label.setToolTip(tooltip)
+
+    def _sync_gate_target_from_readback(self, name: str, readback: dict):
+        if name not in self._manual_gate_controls:
+            return
+        value = readback.get("set_voltage")
+        if value is None:
+            value = readback.get("measured_voltage")
+        if value is None:
+            return
+        spinbox = self._manual_gate_controls[name][0]
+        previous = spinbox.blockSignals(True)
+        try:
+            spinbox.setValue(float(value))
+        except (TypeError, ValueError):
+            pass
+        finally:
+            spinbox.blockSignals(previous)
+
+    @staticmethod
+    def _format_voltage(value) -> str:
+        try:
+            return f"{float(value):+.4f} V"
+        except (TypeError, ValueError):
+            return "--"
+
+    @staticmethod
+    def _format_current(value) -> str:
+        try:
+            return f"{float(value):.3e} A"
+        except (TypeError, ValueError):
+            return "--"
+
+    @staticmethod
+    def _short_gate_mode(mode: str) -> str:
+        if mode == "voltage_2w":
+            return "2-wire V"
+        if mode == "ohm_4w":
+            return "4-wire Ohm"
+        return "--"
 
     def _update_manual_controls(self):
         if self.device_manager is None:
@@ -532,7 +684,7 @@ class ConnDock(QtWidgets.QWidget):
         self.btn_read_gate_currents.setEnabled(
             enabled
             and any(
-                self.device_manager.is_connected(name) and self.device_manager.is_voltage_source_mode(name)
+                self.device_manager.is_connected(name)
                 for name in ("g1", "g2", "g3")
             )
         )
@@ -563,6 +715,7 @@ class ConnDock(QtWidgets.QWidget):
             "g3": self.cbo_g3,
             "daq": self.cbo_daq,
             "mono": self.cbo_mono,
+            "lockin": self.cbo_lockin,
         }
         mode_widgets = {
             "g1": self.cbo_g1_mode,
@@ -606,6 +759,7 @@ class ConnDock(QtWidgets.QWidget):
         self.cbo_g1.populate(gpib, self.cbo_g1.current_address())
         self.cbo_g2.populate(gpib, self.cbo_g2.current_address())
         self.cbo_g3.populate(gpib, self.cbo_g3.current_address())
+        self.cbo_lockin.populate(gpib, self.cbo_lockin.current_address())
         self.cbo_daq.populate(daq, self.cbo_daq.current_address())
         self.cbo_mono.populate(asrl, self.cbo_mono.current_address())
 

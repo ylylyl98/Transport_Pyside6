@@ -7,7 +7,7 @@ from PyQt6 import QtCore
 from app.keithley_modes import KEITHLEY_MODE_LABELS, KEITHLEY_MODE_OHM_4W, KEITHLEY_MODE_VOLTAGE_2W, keithley_mode_label
 from app.models import Connections
 from app.utils import _safe
-from instruments import DaqCard, Keithley2400OhmMode, Keithley2400VoltMode, SP2300
+from instruments import DaqCard, Keithley2400OhmMode, Keithley2400VoltMode, SP2300, SR830
 
 
 class ConnectWorker(QtCore.QThread):
@@ -54,6 +54,7 @@ class ManualControlWorker(QtCore.QThread):
         self.target = float(target)
         self.success = False
         self.message = ""
+        self.gate_readback: dict[str, object] | None = None
         self._cancel_requested = False
 
     def request_cancel(self):
@@ -91,8 +92,21 @@ class ManualControlWorker(QtCore.QThread):
                     step_t,
                     check_fn=self._check_cancelled,
                 )
+                readback_warning = ""
+                try:
+                    self.gate_readback = self._read_gate_readback()
+                except Exception as ex:
+                    self.gate_readback = {
+                        "connected": True,
+                        "mode": KEITHLEY_MODE_VOLTAGE_2W,
+                        "set_voltage": None,
+                        "measured_voltage": None,
+                        "current": None,
+                        "error": str(ex),
+                    }
+                    readback_warning = f" Readback unavailable: {ex}"
                 action = "safely ramped to 0 V" if zeroing else f"ramped to {self.target:g} V"
-                self.message = f"{self.name.upper()} {action} from {start:g} V."
+                self.message = f"{self.name.upper()} {action} from {start:g} V.{readback_warning}"
             else:
                 self._check_cancelled()
                 self.session.set_wavelength(self.target)
@@ -101,33 +115,88 @@ class ManualControlWorker(QtCore.QThread):
         except Exception as ex:
             self.message = f"{self.name.upper()} manual control failed: {ex}"
 
+    def _read_gate_readback(self) -> dict[str, object]:
+        set_voltage = self.session.get_voltage_setpoint()
+        readings = self.session.acquire()
+        measured_voltage = readings.get("voltage") if isinstance(readings, dict) else None
+        current = readings.get("current") if isinstance(readings, dict) else None
+        if measured_voltage is None:
+            measured_voltage = getattr(self.session, "voltage", None)
+        if current is None:
+            current = getattr(self.session, "current", None)
+        return {
+            "connected": True,
+            "mode": KEITHLEY_MODE_VOLTAGE_2W,
+            "set_voltage": None if set_voltage is None else float(set_voltage),
+            "measured_voltage": None if measured_voltage is None else float(measured_voltage),
+            "current": None if current is None else float(current),
+            "error": "",
+        }
+
 
 class GateCurrentReadWorker(QtCore.QThread):
-    """Read connected gate currents without blocking the Qt UI."""
+    """Read connected gate voltage/current state without blocking the Qt UI."""
 
-    def __init__(self, sessions: dict, parent=None):
+    def __init__(self, sessions: dict, modes: dict, parent=None):
         super().__init__(parent)
         self.sessions = dict(sessions)
-        self.currents: dict[str, float | None] = {}
+        self.modes = dict(modes)
+        self.readbacks: dict[str, dict[str, object]] = {}
         self.message = ""
 
     def run(self):
         failures: list[str] = []
         for name in ("g1", "g2", "g3"):
             session = self.sessions.get(name)
+            mode = self.modes.get(name, "")
             if session is None:
-                self.currents[name] = None
+                self.readbacks[name] = {
+                    "connected": False,
+                    "mode": mode,
+                    "set_voltage": None,
+                    "measured_voltage": None,
+                    "current": None,
+                    "error": "",
+                }
+                continue
+            if mode != KEITHLEY_MODE_VOLTAGE_2W:
+                self.readbacks[name] = {
+                    "connected": True,
+                    "mode": mode,
+                    "set_voltage": None,
+                    "measured_voltage": None,
+                    "current": None,
+                    "error": "",
+                }
                 continue
             try:
+                set_voltage = session.get_voltage_setpoint()
                 readings = session.acquire()
+                measured_voltage = readings.get("voltage") if isinstance(readings, dict) else None
                 current = readings.get("current") if isinstance(readings, dict) else None
+                if measured_voltage is None:
+                    measured_voltage = getattr(session, "voltage", None)
                 if current is None:
                     current = getattr(session, "current", None)
-                self.currents[name] = None if current is None else float(current)
+                self.readbacks[name] = {
+                    "connected": True,
+                    "mode": mode,
+                    "set_voltage": None if set_voltage is None else float(set_voltage),
+                    "measured_voltage": None if measured_voltage is None else float(measured_voltage),
+                    "current": None if current is None else float(current),
+                    "error": "",
+                }
             except Exception as ex:
-                self.currents[name] = None
+                self.readbacks[name] = {
+                    "connected": True,
+                    "mode": mode,
+                    "set_voltage": None,
+                    "measured_voltage": None,
+                    "current": None,
+                    "error": str(ex),
+                }
                 failures.append(f"{name.upper()}: {ex}")
-        self.message = "Gate current read complete."
+        self.message = "Gate readback refresh complete."
         if failures:
             self.message += " Unavailable: " + "; ".join(failures)
 
@@ -186,7 +255,7 @@ class DeviceManager(QtCore.QObject):
     def __init__(self, connections: Connections):
         super().__init__()
         self.connections = connections
-        self.sessions: Dict[str, object | None] = {"g1": None, "g2": None, "g3": None, "daq": None, "mono": None}
+        self.sessions: Dict[str, object | None] = {"g1": None, "g2": None, "g3": None, "daq": None, "mono": None, "lockin": None}
         self.states: Dict[str, str] = {name: "idle" for name in self.sessions}
         self.details: Dict[str, str] = {name: "" for name in self.sessions}
         self._connected_addresses: Dict[str, str] = {name: self._address_for(name) for name in self.sessions}
@@ -205,6 +274,7 @@ class DeviceManager(QtCore.QObject):
             "g3": self.connections.gate3,
             "daq": self.connections.daq_dev,
             "mono": self.connections.mono,
+            "lockin": self.connections.lockin,
         }[name]
 
     def _mode_for(self, name: str) -> str:
@@ -214,6 +284,7 @@ class DeviceManager(QtCore.QObject):
             "g3": self.connections.gate3_mode,
             "daq": "",
             "mono": "",
+            "lockin": "",
         }[name]
 
     def _emit_status(self, name: str, state: str, detail: str = ""):
@@ -359,26 +430,25 @@ class DeviceManager(QtCore.QObject):
         return True
 
     def read_gate_currents(self) -> bool:
-        """Read the present current from every connected voltage-source gate."""
+        """Read the present voltage/current state from connected gates."""
         if self.is_busy():
             self.operation_changed.emit(False, "Wait for the current hardware operation to finish.")
             return False
         if self._in_use:
-            self.operation_changed.emit(False, "Gate currents cannot be read while a measurement is running.")
+            self.operation_changed.emit(False, "Gate readback cannot be refreshed while a measurement is running.")
             return False
         sessions = {
-            name: self.sessions[name]
-            if self.is_connected(name) and self.is_voltage_source_mode(name)
-            else None
+            name: self.sessions[name] if self.is_connected(name) else None
             for name in ("g1", "g2", "g3")
         }
         if not any(sessions.values()):
-            self.operation_changed.emit(False, "Connect a gate in 2-wire voltage-source mode before reading current.")
+            self.operation_changed.emit(False, "Connect at least one gate before refreshing gate readback.")
             return False
-        worker = GateCurrentReadWorker(sessions, self)
+        modes = {name: self.connected_mode(name) for name in ("g1", "g2", "g3")}
+        worker = GateCurrentReadWorker(sessions, modes, self)
         self._gate_current_worker = worker
         worker.finished.connect(self._finish_gate_current_read)
-        self.operation_changed.emit(True, "Reading gate currents...")
+        self.operation_changed.emit(True, "Refreshing gate readback...")
         worker.start()
         return True
 
@@ -415,6 +485,8 @@ class DeviceManager(QtCore.QObject):
             return
         self._manual_worker = None
         worker.deleteLater()
+        if worker.success and worker.name in {"g1", "g2", "g3"} and worker.gate_readback:
+            self.gate_currents_read.emit({worker.name: worker.gate_readback}, worker.message)
         self.manual_control_finished.emit(worker.name, worker.success, worker.message)
         if self._pending_emergency_daq_channels is not None:
             daq_channels = self._pending_emergency_daq_channels
@@ -429,7 +501,7 @@ class DeviceManager(QtCore.QObject):
             return
         self._gate_current_worker = None
         worker.deleteLater()
-        self.gate_currents_read.emit(worker.currents, worker.message)
+        self.gate_currents_read.emit(worker.readbacks, worker.message)
         self.operation_changed.emit(False, worker.message)
 
     def _clear_operation_thread(self):
@@ -443,6 +515,7 @@ class DeviceManager(QtCore.QObject):
         self._connect_keithley("g3", curr_comp=1e-6, volt_comp=20, emitter=emitter)
         self._connect_daq(emitter=emitter)
         self._connect_mono(emitter=emitter)
+        self._connect_lockin(emitter=emitter)
 
     def _disconnect_all_in_thread(self, emitter):
         from app.constants import SAFE_RAMP_STEP_T, SAFE_RAMP_STEP_V
@@ -462,7 +535,7 @@ class DeviceManager(QtCore.QObject):
                 except Exception:
                     pass
         self._close_daq_outputs()
-        for name in ("g1", "g2", "g3", "daq", "mono"):
+        for name in ("g1", "g2", "g3", "daq", "mono", "lockin"):
             self._close_device(name)
             emitter.emit(name, "idle", "")
 
@@ -531,6 +604,26 @@ class DeviceManager(QtCore.QObject):
             self.sessions["mono"] = None
             emitter.emit("mono", "err", str(ex))
 
+    def _connect_lockin(self, emitter):
+        address = self._address_for("lockin")
+        if not address:
+            self._close_device("lockin")
+            emitter.emit("lockin", "idle", "")
+            return
+        if self.sessions["lockin"] is not None and self._connected_addresses.get("lockin") == address:
+            emitter.emit("lockin", "ok", "")
+            return
+        self._close_device("lockin")
+        try:
+            session = SR830("lockin", address)
+            session.connect()
+            self.sessions["lockin"] = session
+            self._connected_addresses["lockin"] = address
+            emitter.emit("lockin", "ok", getattr(session, "identity", ""))
+        except Exception as ex:
+            self.sessions["lockin"] = None
+            emitter.emit("lockin", "err", str(ex))
+
     def _close_device(self, name: str):
         session = self.sessions.get(name)
         if session is None:
@@ -593,6 +686,6 @@ class DeviceManager(QtCore.QObject):
         if self._emergency_worker is not None and self._emergency_worker.isRunning():
             self._emergency_worker.wait()
         self._disconnect_all_in_thread(self.status_changed)
-        for name in ("g1", "g2", "g3", "daq", "mono"):
+        for name in ("g1", "g2", "g3", "daq", "mono", "lockin"):
             self._close_device(name)
             self._emit_status(name, "idle", "")
