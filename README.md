@@ -15,6 +15,10 @@ Desktop application for automated electrical transport and photocurrent measurem
 
 Across the modes, the application averages DAQ readings, plots the selected current channel live, and writes the acquired points to CSV as the run proceeds. The plot can switch between a single selected channel and a four-channel comparison view.
 
+Gate Scan provides a prominent **Raw Voltages** / **Doping / E-field** trajectory selector. For derived values, the coupling ratio can multiply either `Vbg` (the backward-compatible default) or `Vtg`. The displayed equations, computed voltage preview, generated sweep trajectory, plot axes, CSV columns, and run metadata all use the selected definition.
+
+Live plots default to **Follow Sweep** for the x-axis: Gate Scan follows its selected Doping/E-field or single raw-voltage sweep, while 2D Map follows its fast axis. A manual x-axis override can display Step Index, `Vtg`, `Vbg`, `Vds`, Doping, or E-field; changing this display setting replots already collected points without changing the hardware trajectory.
+
 ## Hardware and software requirements
 
 - Windows 10/11 (the supplied launcher is a Windows batch file)

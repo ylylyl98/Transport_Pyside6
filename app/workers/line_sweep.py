@@ -14,7 +14,9 @@ from app.constants import (
     SAFE_RAMP_STEP_V,
     V_LIMIT,
 )
+from app.gate_transform import derived_to_gates, gates_to_derived
 from app.models import Connections, LineSweepParams, SaveRoot
+from app.plot_x_axis import record_x_value, resolve_gate_scan_x_axis
 from app.result_channels import KEITHLEY_CHANNEL
 from app.run_output import update_run_metadata_status, write_run_metadata
 from app.utils import _sanitize_base, safe_ramp
@@ -223,10 +225,19 @@ class LineSweepWorker(RunWorker):
                 pass
 
             y_val = self._plot_value(ids_dc, ids_x, ids_y, ids_keithley)
-            x_plot = self._plot_x(point, idx_offset + idx - 1)
+            acquisition_index = idx_offset + idx - 1
+            x_plot = self._plot_x(point, acquisition_index)
             self.point.emit(x_plot, y_val)
             self.point_data.emit({
                 "x": x_plot,
+                "index": float(acquisition_index),
+                "vtg": point["vtg"],
+                "vbg": point["vbg"],
+                "vds": point["vds"],
+                "doping": point["doping"],
+                "efield": point["efield"],
+                "plot_ratio": float(self.p.derived_ratio),
+                "plot_ratio_target": self.p.derived_ratio_target,
                 "Ids_DC": ids_dc,
                 "Ids_X": ids_x,
                 "Ids_Y": ids_y,
@@ -263,13 +274,19 @@ class LineSweepWorker(RunWorker):
             vtg = _interp(self.p.raw_vtg_start, self.p.raw_vtg_stop, idx, count) if self.p.raw_vtg_active else self.p.raw_vtg_start
             vbg = _interp(self.p.raw_vbg_start, self.p.raw_vbg_stop, idx, count) if self.p.raw_vbg_active else self.p.raw_vbg_start
             vds = _interp(self.p.raw_vds_start, self.p.raw_vds_stop, idx, count) if self.p.raw_vds_active else self.p.raw_vds_start
+            doping, efield = gates_to_derived(
+                vtg,
+                vbg,
+                self.p.derived_ratio,
+                self.p.derived_ratio_target,
+            )
             points.append({
                 "index": float(idx),
                 "vtg": float(vtg),
                 "vbg": float(vbg),
                 "vds": float(vds),
-                "doping": float(vtg + (self.p.derived_ratio * vbg)),
-                "efield": float(vtg - (self.p.derived_ratio * vbg)),
+                "doping": float(doping),
+                "efield": float(efield),
             })
         return points
 
@@ -286,8 +303,12 @@ class LineSweepWorker(RunWorker):
             else:
                 doping = self.p.derived_fixed
                 efield = swept
-            vtg = (doping + efield) / 2.0
-            vbg = (doping - efield) / (2.0 * self.p.derived_ratio)
+            vtg, vbg = derived_to_gates(
+                doping,
+                efield,
+                self.p.derived_ratio,
+                self.p.derived_ratio_target,
+            )
             if self.p.derived_vds_mode == "Swept":
                 vds = _interp(self.p.derived_vds_start, self.p.derived_vds_stop, idx, count)
             else:
@@ -329,25 +350,12 @@ class LineSweepWorker(RunWorker):
         return ids_dc
 
     def _plot_x(self, point: dict[str, float], index: int) -> float:
-        axis = self.p.plot_x_axis
-        if axis == "Step Index":
-            return float(index)
-        if axis == "Vtg":
-            return point["vtg"]
-        if axis == "Vbg":
-            return point["vbg"]
-        if axis == "Vds":
-            return point["vds"]
-        if axis == "Doping":
-            return point["doping"]
-        if axis in {"Efield", "E-field"}:
-            return point["efield"]
-        if self.p.mode == "Derived":
-            return point["doping"] if self.p.derived_axis == "Doping" else point["efield"]
-        if self.p.raw_vds_active:
-            return point["vds"]
-        if self.p.raw_vtg_active:
-            return point["vtg"]
-        if self.p.raw_vbg_active:
-            return point["vbg"]
-        return float(index)
+        axis = resolve_gate_scan_x_axis(
+            self.p.plot_x_axis,
+            self.p.mode,
+            self.p.derived_axis,
+            self.p.raw_vtg_active,
+            self.p.raw_vbg_active,
+            self.p.raw_vds_active,
+        )
+        return record_x_value({**point, "index": float(index)}, axis)

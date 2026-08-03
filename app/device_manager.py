@@ -7,7 +7,7 @@ from PyQt6 import QtCore
 from app.keithley_modes import KEITHLEY_MODE_LABELS, KEITHLEY_MODE_OHM_4W, KEITHLEY_MODE_VOLTAGE_2W, keithley_mode_label
 from app.models import Connections
 from app.utils import _safe
-from instruments import DaqCard, Keithley2400OhmMode, Keithley2400VoltMode, SP2300, SR830
+from instruments import DaqCard, Keithley2400OhmMode, Keithley2400VoltMode, SP2300, SRSLockin
 
 
 class ConnectWorker(QtCore.QThread):
@@ -614,11 +614,11 @@ class DeviceManager(QtCore.QObject):
             emitter.emit("lockin", "idle", "")
             return
         if self.sessions["lockin"] is not None and self._connected_addresses.get("lockin") == address:
-            emitter.emit("lockin", "ok", "")
+            emitter.emit("lockin", "ok", getattr(self.sessions["lockin"], "identity", ""))
             return
         self._close_device("lockin")
         try:
-            session = SR830("lockin", address)
+            session = SRSLockin("lockin", address)
             session.connect()
             self.sessions["lockin"] = session
             self._connected_addresses["lockin"] = address

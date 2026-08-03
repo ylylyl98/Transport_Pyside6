@@ -14,7 +14,9 @@ from app.constants import (
     SAFE_RAMP_STEP_V,
     V_LIMIT,
 )
+from app.gate_transform import gates_to_derived
 from app.models import CoParams, Connections, SaveRoot
+from app.plot_x_axis import record_x_value, resolve_map_x_axis
 from app.result_channels import KEITHLEY_CHANNEL
 from app.run_output import update_run_metadata_status, write_run_metadata
 from app.utils import _frange_inc, _sanitize_base, safe_ramp
@@ -177,8 +179,12 @@ class CoSweepWorker(RunWorker):
                         curr_vtg = f_val if fast_axis == "Vtg" else (s_val if slow_axis == "Vtg" else self.p.vtg_start)
                         curr_vbg = f_val if fast_axis == "Vbg" else (s_val if slow_axis == "Vbg" else self.p.vbg_start)
                         curr_vds = f_val if fast_axis == "Vds" else (s_val if slow_axis == "Vds" else self.p.vds_start)
-                        doping = curr_vtg + (self.p.ratio * curr_vbg)
-                        efield = curr_vtg - (self.p.ratio * curr_vbg)
+                        doping, efield = gates_to_derived(
+                            curr_vtg,
+                            curr_vbg,
+                            self.p.ratio,
+                            self.p.ratio_target,
+                        )
 
                         w.writerow([curr_vtg, curr_vbg, curr_vds, raw_x, raw_y, raw_dc, ids_x, ids_y, ids_dc, ids_keithley, doping, efield, pass_idx, fast_direction])
                         try:
@@ -187,10 +193,22 @@ class CoSweepWorker(RunWorker):
                         except Exception:
                             pass
                         y_val = self._plot_value(ids_dc, ids_x, ids_y, ids_keithley)
-                        x_plot = doping if self.p.mode == "Linked" else f_val
+                        point_record = {
+                            "index": float(cnt),
+                            "vtg": float(curr_vtg),
+                            "vbg": float(curr_vbg),
+                            "vds": float(curr_vds),
+                            "doping": float(doping),
+                            "efield": float(efield),
+                        }
+                        x_axis = resolve_map_x_axis(self.p.plot_x_axis, self.p.axis_fast)
+                        x_plot = record_x_value(point_record, x_axis)
                         self.point.emit(x_plot, y_val)
                         self.point_data.emit({
                             "x": x_plot,
+                            **point_record,
+                            "plot_ratio": float(self.p.ratio),
+                            "plot_ratio_target": self.p.ratio_target,
                             "Ids_DC": ids_dc,
                             "Ids_X": ids_x,
                             "Ids_Y": ids_y,

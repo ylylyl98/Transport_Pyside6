@@ -10,16 +10,19 @@ from app.device_manager import DeviceManager
 from app.settings import get_app_settings
 from app.ui.helpers import apply_tooltip, set_standard_input_height, style_form_layout
 from app.ui.widgets.collapsible_section import CollapsibleSection
+from app.ui.widgets.safe_spinbox import SafeDoubleSpinBox, SafeSpinBox
 from instruments.SR830 import (
     FILTER_SLOPE_LABELS,
     INPUT_CONFIG_LABELS,
     INPUT_COUPLING_LABELS,
     INPUT_GROUND_LABELS,
     LINE_FILTER_LABELS,
+    LOCKIN_PROFILES,
     REFERENCE_SOURCE_LABELS,
     RESERVE_LABELS,
     SENSITIVITY_LABELS,
     TIME_CONSTANT_LABELS,
+    detect_lockin_model,
     sensitivity_value,
 )
 
@@ -39,7 +42,7 @@ class LockinWorker(QtCore.QThread):
             message = "Lock-in panel refreshed."
             if self.action == "apply":
                 self.session.apply_settings(self.payload)
-                message = "SR830 settings applied."
+                message = f"{self.session.model} settings applied."
             elif self.action != "refresh":
                 action_fn = getattr(self.session, self.action)
                 action_fn()
@@ -58,7 +61,7 @@ class LockinWorker(QtCore.QThread):
             "auto_offset_x": "Auto Offset X command sent.",
             "auto_offset_y": "Auto Offset Y command sent.",
             "auto_offset_r": "Auto Offset R command sent.",
-        }.get(action, "SR830 command sent.")
+        }.get(action, "Lock-in command sent.")
 
 
 class LockinPanel(QtWidgets.QWidget):
@@ -72,6 +75,7 @@ class LockinPanel(QtWidgets.QWidget):
         self._worker: LockinWorker | None = None
         self._claimed_device = False
         self._suppress_updates = False
+        self._capabilities = dict(LOCKIN_PROFILES["SR830"])
         self._build()
         self.load_panel_settings()
         self._bind_panel_settings()
@@ -85,8 +89,8 @@ class LockinPanel(QtWidgets.QWidget):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(8)
 
-        header = QtWidgets.QGroupBox("SR830 Lock-in")
-        header_layout = QtWidgets.QVBoxLayout(header)
+        self.header_group = QtWidgets.QGroupBox("SRS Lock-in")
+        header_layout = QtWidgets.QVBoxLayout(self.header_group)
         header_layout.setContentsMargins(10, 18, 10, 10)
         header_layout.setSpacing(6)
         top_row = QtWidgets.QHBoxLayout()
@@ -102,7 +106,7 @@ class LockinPanel(QtWidgets.QWidget):
         self.lbl_identity.setWordWrap(True)
         header_layout.addLayout(top_row)
         header_layout.addWidget(self.lbl_identity)
-        layout.addWidget(header)
+        layout.addWidget(self.header_group)
 
         readouts = QtWidgets.QGroupBox("Readouts")
         readout_grid = QtWidgets.QGridLayout(readouts)
@@ -161,35 +165,44 @@ class LockinPanel(QtWidgets.QWidget):
         self.cbo_filter_slope = self._make_combo(FILTER_SLOPE_LABELS)
         self.cbo_ref_source = self._make_combo(REFERENCE_SOURCE_LABELS)
         self.cbo_input_config = self._make_combo(INPUT_CONFIG_LABELS)
+        self.cbo_current_gain = self._make_combo([])
         self.cbo_input_coupling = self._make_combo(INPUT_COUPLING_LABELS)
         self.cbo_input_ground = self._make_combo(INPUT_GROUND_LABELS)
         self.cbo_line_filter = self._make_combo(LINE_FILTER_LABELS)
-        self.sp_phase = QtWidgets.QDoubleSpinBox()
+        self.sp_phase = SafeDoubleSpinBox()
         self.sp_phase.setDecimals(2)
         self.sp_phase.setRange(-360.0, 729.99)
         self.sp_phase.setSingleStep(1.0)
-        self.sp_frequency = QtWidgets.QDoubleSpinBox()
+        self.sp_frequency = SafeDoubleSpinBox()
         self.sp_frequency.setDecimals(4)
         self.sp_frequency.setRange(0.001, 102000.0)
         self.sp_frequency.setSingleStep(1.0)
-        self.sp_sine_out = QtWidgets.QDoubleSpinBox()
+        self.sp_sine_out = SafeDoubleSpinBox()
         self.sp_sine_out.setDecimals(3)
         self.sp_sine_out.setRange(0.004, 5.0)
         self.sp_sine_out.setSingleStep(0.01)
-        self.sp_harmonic = QtWidgets.QSpinBox()
+        self.sp_harmonic = SafeSpinBox()
         self.sp_harmonic.setRange(1, 19999)
         self.sp_harmonic.setValue(1)
         self.cbo_ref_source.currentIndexChanged.connect(self._update_frequency_enabled)
+        self.cbo_ref_source.currentIndexChanged.connect(self._update_reference_help)
+        self.cbo_input_config.currentIndexChanged.connect(self._update_current_gain_enabled)
         settings_form.addRow("Sensitivity:", self.cbo_sensitivity)
         settings_form.addRow("Time Constant:", self.cbo_time_constant)
         settings_form.addRow("Reserve:", self.cbo_reserve)
         settings_form.addRow("Filter Slope:", self.cbo_filter_slope)
         settings_form.addRow("Reference:", self.cbo_ref_source)
+        self.lbl_reference_help = QtWidgets.QLabel()
+        self.lbl_reference_help.setWordWrap(True)
+        self.lbl_reference_help.setProperty("role", "hint")
+        settings_form.addRow(self.lbl_reference_help)
         settings_form.addRow("Phase (deg):", self.sp_phase)
-        settings_form.addRow("Frequency (Hz):", self.sp_frequency)
+        settings_form.addRow("Internal Frequency (Hz):", self.sp_frequency)
         settings_form.addRow("Sine Out (V):", self.sp_sine_out)
         settings_form.addRow("Harmonic:", self.sp_harmonic)
         settings_form.addRow("Input:", self.cbo_input_config)
+        settings_form.addRow("Current Gain:", self.cbo_current_gain)
+        self.lbl_current_gain = settings_form.labelForField(self.cbo_current_gain)
         settings_form.addRow("Coupling:", self.cbo_input_coupling)
         settings_form.addRow("Shield:", self.cbo_input_ground)
         settings_form.addRow("Line Filter:", self.cbo_line_filter)
@@ -221,7 +234,7 @@ class LockinPanel(QtWidgets.QWidget):
             self.action_buttons[action] = btn
         layout.addWidget(actions)
 
-        self.lbl_message = QtWidgets.QLabel("Connect the SR830 from Instrument Setup, then refresh this panel.")
+        self.lbl_message = QtWidgets.QLabel("Connect an SR830 or SR850 from Instrument Setup, then refresh this panel.")
         self.lbl_message.setWordWrap(True)
         self.lbl_message.setProperty("role", "hint")
         layout.addWidget(self.lbl_message)
@@ -229,26 +242,29 @@ class LockinPanel(QtWidgets.QWidget):
 
         for widget in self._setting_widgets():
             set_standard_input_height(widget, 26)
-        apply_tooltip("Read SR830 X, Y, R, Theta, status indicators, and settings once.", self.btn_refresh)
-        apply_tooltip("Apply the selected SR830 front-panel settings over GPIB.", self.btn_apply)
+        apply_tooltip("Read lock-in X, Y, R, Theta, status indicators, and settings once.", self.btn_refresh)
+        apply_tooltip("Apply settings supported by the detected SR830 or SR850 over GPIB.", self.btn_apply)
         for button in self.action_buttons.values():
-            apply_tooltip("Send this one SR830 auto function command over GPIB.", button)
+            apply_tooltip("Send this lock-in auto function command over GPIB.", button)
+        self._apply_capabilities(self._capabilities)
+        self.header_group.setTitle("SRS Lock-in")
         self._update_frequency_enabled()
+        self._update_reference_help()
 
     def refresh_panel(self):
-        self._start_worker("refresh", message="Refreshing SR830 panel...")
+        self._start_worker("refresh", message="Refreshing lock-in panel...")
 
     def apply_settings(self):
-        self._start_worker("apply", self._collect_settings(), "Applying SR830 settings...")
+        self._start_worker("apply", self._collect_settings(), "Applying lock-in settings...")
 
     def run_action(self, action: str):
-        self._start_worker(action, message="Sending SR830 command...")
+        self._start_worker(action, message="Sending lock-in command...")
 
     def _start_worker(self, action: str, payload: dict | None = None, message: str = ""):
         if self._worker is not None and self._worker.isRunning():
             return
         if not self.device_manager.is_connected("lockin"):
-            self._set_message("Connect the SR830 before using the lock-in panel.", warning=True)
+            self._set_message("Connect an SR830 or SR850 before using the lock-in panel.", warning=True)
             return
         ok, blocked = self.device_manager.mark_in_use(["lockin"])
         if not ok:
@@ -269,7 +285,7 @@ class LockinPanel(QtWidgets.QWidget):
         self._set_message(message, warning=False)
 
     def _on_worker_failed(self, message: str):
-        self._set_message(f"SR830 operation failed: {message}", warning=True)
+        self._set_message(f"Lock-in operation failed: {message}", warning=True)
 
     def _on_worker_finished(self):
         if self._claimed_device:
@@ -283,6 +299,9 @@ class LockinPanel(QtWidgets.QWidget):
     def _apply_data(self, data: dict):
         outputs = data.get("outputs", {})
         settings = data.get("settings", {})
+        capabilities = data.get("capabilities")
+        if isinstance(capabilities, dict):
+            self._apply_capabilities(capabilities)
         signal_unit = self._signal_unit(settings)
         sensitivity_limit = self._sensitivity_limit(settings)
         self.readout_labels["x"].setText(self._format_engineering_value(outputs.get("x"), signal_unit))
@@ -306,6 +325,7 @@ class LockinPanel(QtWidgets.QWidget):
             self._set_combo(self.cbo_filter_slope, settings.get("filter_slope"))
             self._set_combo(self.cbo_ref_source, settings.get("ref_source"))
             self._set_combo(self.cbo_input_config, settings.get("input_config"))
+            self._set_combo(self.cbo_current_gain, settings.get("current_gain"))
             self._set_combo(self.cbo_input_coupling, settings.get("input_coupling"))
             self._set_combo(self.cbo_input_ground, settings.get("input_ground"))
             self._set_combo(self.cbo_line_filter, settings.get("line_filter"))
@@ -316,6 +336,8 @@ class LockinPanel(QtWidgets.QWidget):
         finally:
             self._suppress_updates = False
         self._update_frequency_enabled()
+        self._update_reference_help()
+        self._update_current_gain_enabled()
         self.save_panel_settings()
         self._emit_voltage_sensitivity(settings)
 
@@ -335,7 +357,9 @@ class LockinPanel(QtWidgets.QWidget):
             "input_ground": self.cbo_input_ground.currentData(),
             "line_filter": self.cbo_line_filter.currentData(),
         }
-        if ref_source == 1:
+        if self._capabilities.get("current_gain_labels") and settings["input_config"] == 2:
+            settings["current_gain"] = self.cbo_current_gain.currentData()
+        if ref_source == self._capabilities.get("internal_reference_code"):
             settings["frequency_hz"] = self.sp_frequency.value()
         return settings
 
@@ -347,8 +371,12 @@ class LockinPanel(QtWidgets.QWidget):
             self._set_combo(self.cbo_time_constant, self._saved_value(settings, "time_constant", 10, int))
             self._set_combo(self.cbo_reserve, self._saved_value(settings, "reserve", 1, int))
             self._set_combo(self.cbo_filter_slope, self._saved_value(settings, "filter_slope", 1, int))
-            self._set_combo(self.cbo_ref_source, self._saved_value(settings, "ref_source", 1, int))
+            self._set_combo(
+                self.cbo_ref_source,
+                self._saved_value(settings, "ref_source", self._capabilities["internal_reference_code"], int),
+            )
             self._set_combo(self.cbo_input_config, self._saved_value(settings, "input_config", 0, int))
+            self._set_combo(self.cbo_current_gain, self._saved_value(settings, "current_gain", 0, int))
             self._set_combo(self.cbo_input_coupling, self._saved_value(settings, "input_coupling", 0, int))
             self._set_combo(self.cbo_input_ground, self._saved_value(settings, "input_ground", 0, int))
             self._set_combo(self.cbo_line_filter, self._saved_value(settings, "line_filter", 0, int))
@@ -359,16 +387,17 @@ class LockinPanel(QtWidgets.QWidget):
         finally:
             self._suppress_updates = False
         self._update_frequency_enabled()
+        self._update_current_gain_enabled()
 
     def save_panel_settings(self, *_args):
         if self._suppress_updates:
             return
         settings = get_app_settings()
         values = self._collect_settings()
-        if self.cbo_ref_source.currentData() != 1:
+        if self.cbo_ref_source.currentData() != self._capabilities.get("internal_reference_code"):
             values["frequency_hz"] = self.sp_frequency.value()
         for key, value in values.items():
-            settings.setValue(f"{self.SETTINGS_PREFIX}/{key}", value)
+            settings.setValue(self._settings_key(key), value)
         settings.sync()
 
     def _bind_panel_settings(self):
@@ -379,6 +408,7 @@ class LockinPanel(QtWidgets.QWidget):
             self.cbo_filter_slope,
             self.cbo_ref_source,
             self.cbo_input_config,
+            self.cbo_current_gain,
             self.cbo_input_coupling,
             self.cbo_input_ground,
             self.cbo_line_filter,
@@ -388,7 +418,11 @@ class LockinPanel(QtWidgets.QWidget):
             spinbox.valueChanged.connect(self.save_panel_settings)
 
     def _saved_value(self, settings, key: str, default, cast):
-        value = settings.value(f"{self.SETTINGS_PREFIX}/{key}", default)
+        model_key = self._settings_key(key)
+        legacy_key = f"{self.SETTINGS_PREFIX}/{key}"
+        model_specific = {"ref_source", "reserve", "input_config", "current_gain"}
+        fallback = default if key in model_specific else settings.value(legacy_key, default)
+        value = settings.value(model_key, fallback)
         try:
             return cast(value)
         except (TypeError, ValueError):
@@ -400,6 +434,14 @@ class LockinPanel(QtWidgets.QWidget):
         if state == "ok":
             self.lbl_status.setText("Connected")
             self.lbl_status.setProperty("role", "hint")
+            try:
+                model = detect_lockin_model(detail)
+            except ValueError:
+                model = ""
+            if model:
+                self._apply_capabilities(LOCKIN_PROFILES[model])
+                self.lbl_identity.setText(detail)
+                self.load_panel_settings()
         elif state == "err":
             self.lbl_status.setText("Connection error")
             self.lbl_status.setProperty("role", "warning-hint")
@@ -428,11 +470,72 @@ class LockinPanel(QtWidgets.QWidget):
         for widget in self._setting_widgets():
             widget.setEnabled(available)
         self._update_frequency_enabled()
+        self._update_current_gain_enabled()
 
     def _update_frequency_enabled(self):
         if self._suppress_updates:
             return
-        self.sp_frequency.setEnabled(self.cbo_ref_source.currentData() == 1 and self.cbo_ref_source.isEnabled())
+        self.sp_frequency.setEnabled(
+            self.cbo_ref_source.currentData() == self._capabilities.get("internal_reference_code")
+            and self.cbo_ref_source.isEnabled()
+        )
+
+    def _update_reference_help(self):
+        ref_source = self.cbo_ref_source.currentData()
+        internal_code = self._capabilities.get("internal_reference_code")
+        model = self._capabilities.get("model", "lock-in")
+        if ref_source == internal_code:
+            message = "The fixed internal oscillator frequency is editable below."
+        elif model == "SR850" and ref_source == 1:
+            message = (
+                "Internal Sweep uses the SR850 sweep configuration, so the fixed frequency "
+                "field is disabled. Choose Internal (Fixed) to set one frequency."
+            )
+        else:
+            message = (
+                "The external reference determines frequency. Choose Internal"
+                + (" (Fixed)" if model == "SR850" else "")
+                + " to edit it."
+            )
+        self.lbl_reference_help.setText(message)
+
+    def _update_current_gain_enabled(self):
+        supported = bool(self._capabilities.get("current_gain_labels"))
+        current_input = self.cbo_input_config.currentData() == 2
+        self.cbo_current_gain.setEnabled(supported and current_input and self.cbo_input_config.isEnabled())
+
+    def _apply_capabilities(self, capabilities: dict[str, Any]):
+        model = str(capabilities.get("model") or "").upper()
+        if model not in LOCKIN_PROFILES:
+            return
+        selected = LOCKIN_PROFILES[model]
+        self._capabilities = {
+            key: list(value) if isinstance(value, list) else value
+            for key, value in selected.items()
+        }
+        self._suppress_updates = True
+        try:
+            self._replace_combo(self.cbo_ref_source, self._capabilities["reference_source_labels"])
+            self._replace_combo(self.cbo_reserve, self._capabilities["reserve_labels"])
+            self._replace_combo(self.cbo_input_config, self._capabilities["input_config_labels"])
+            self._replace_combo(self.cbo_current_gain, self._capabilities["current_gain_labels"])
+            self.sp_phase.setDecimals(self._capabilities["phase_decimals"])
+            self.sp_phase.setRange(self._capabilities["phase_min"], self._capabilities["phase_max"])
+            self.sp_harmonic.setRange(1, self._capabilities["harmonic_max"])
+        finally:
+            self._suppress_updates = False
+        supports_current_gain = bool(self._capabilities["current_gain_labels"])
+        self.cbo_current_gain.setVisible(supports_current_gain)
+        if self.lbl_current_gain is not None:
+            self.lbl_current_gain.setVisible(supports_current_gain)
+        self.header_group.setTitle(f"{model} Lock-in")
+        self._update_frequency_enabled()
+        self._update_reference_help()
+        self._update_current_gain_enabled()
+
+    def _settings_key(self, key: str) -> str:
+        model = self._capabilities.get("model", "SR830")
+        return f"{self.SETTINGS_PREFIX}/{model}/{key}"
 
     def _clear_readouts(self):
         for label in self.readout_labels.values():
@@ -454,6 +557,19 @@ class LockinPanel(QtWidgets.QWidget):
         for index, label in enumerate(labels):
             combo.addItem(label, index)
         return combo
+
+    @staticmethod
+    def _replace_combo(combo: QtWidgets.QComboBox, labels: list[str]):
+        previous = combo.currentData()
+        combo.clear()
+        for index, label in enumerate(labels):
+            combo.addItem(label, index)
+        try:
+            restored = combo.findData(int(previous))
+        except (TypeError, ValueError):
+            restored = -1
+        if restored >= 0:
+            combo.setCurrentIndex(restored)
 
     @staticmethod
     def _set_combo(combo: QtWidgets.QComboBox, value):
@@ -580,6 +696,7 @@ class LockinPanel(QtWidgets.QWidget):
             self.sp_sine_out,
             self.sp_harmonic,
             self.cbo_input_config,
+            self.cbo_current_gain,
             self.cbo_input_coupling,
             self.cbo_input_ground,
             self.cbo_line_filter,

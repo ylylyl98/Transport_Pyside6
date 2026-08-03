@@ -13,6 +13,7 @@ from app.run_output import build_planned_output, planned_output_warning
 from app.ui.helpers import apply_tooltip, configure_volt_spinbox, set_standard_input_height, style_form_layout
 from app.ui.tabs.base_tab import BaseMeasurementTab
 from app.ui.widgets.collapsible_section import CollapsibleSection
+from app.ui.widgets.safe_spinbox import SafeDoubleSpinBox, SafeSpinBox
 from app.ui.widgets.status_panel import SectionHeader, StatusPanel
 from app.utils import _safe
 from app.workers.dual_gate import DualGateWorker
@@ -62,15 +63,15 @@ class DualGateTab(BaseMeasurementTab):
         grp_vds = QtWidgets.QGroupBox("Vds Sweep")
         form_vds = QtWidgets.QFormLayout(grp_vds)
         style_form_layout(form_vds)
-        self.sp_vds_start = QtWidgets.QDoubleSpinBox()
-        self.sp_vds_stop = QtWidgets.QDoubleSpinBox()
+        self.sp_vds_start = SafeDoubleSpinBox()
+        self.sp_vds_stop = SafeDoubleSpinBox()
         configure_volt_spinbox(self.sp_vds_start, 0.0)
         configure_volt_spinbox(self.sp_vds_stop, 0.5)
-        self.sp_vds_step = QtWidgets.QDoubleSpinBox()
+        self.sp_vds_step = SafeDoubleSpinBox()
         self.sp_vds_step.setDecimals(3)
         self.sp_vds_step.setRange(1e-3, 5.0)
         self.sp_vds_step.setValue(0.01)
-        self.sp_vds_ramp = QtWidgets.QDoubleSpinBox()
+        self.sp_vds_ramp = SafeDoubleSpinBox()
         self.sp_vds_ramp.setDecimals(3)
         self.sp_vds_ramp.setRange(1e-3, 5.0)
         self.sp_vds_ramp.setValue(0.05)
@@ -96,8 +97,8 @@ class DualGateTab(BaseMeasurementTab):
         grp_gate = QtWidgets.QGroupBox("Fixed Gate Voltages")
         form_gate = QtWidgets.QFormLayout(grp_gate)
         style_form_layout(form_gate)
-        self.sp_vtg = QtWidgets.QDoubleSpinBox()
-        self.sp_vbg = QtWidgets.QDoubleSpinBox()
+        self.sp_vtg = SafeDoubleSpinBox()
+        self.sp_vbg = SafeDoubleSpinBox()
         configure_volt_spinbox(self.sp_vtg, 0.0)
         configure_volt_spinbox(self.sp_vbg, 0.0)
         self.btn_set_vtg = QtWidgets.QPushButton("Set")
@@ -114,11 +115,11 @@ class DualGateTab(BaseMeasurementTab):
         grp_time = QtWidgets.QGroupBox("Timing")
         form_time = QtWidgets.QFormLayout(grp_time)
         style_form_layout(form_time)
-        self.sp_delay = QtWidgets.QDoubleSpinBox()
+        self.sp_delay = SafeDoubleSpinBox()
         self.sp_delay.setDecimals(3)
         self.sp_delay.setRange(0.0, 10.0)
         self.sp_delay.setValue(0.5)
-        self.sp_nsamp = QtWidgets.QSpinBox()
+        self.sp_nsamp = SafeSpinBox()
         self.sp_nsamp.setRange(1, 1000)
         self.sp_nsamp.setValue(3)
         lbl_delay = QtWidgets.QLabel("Delay (s):")

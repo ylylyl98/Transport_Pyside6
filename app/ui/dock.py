@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Tuple
 
-from PyQt6 import QtCore, QtGui, QtWidgets
+from PyQt6 import QtCore, QtWidgets
 from PyQt6.QtCore import Qt
 
 from app.constants import SETTINGS_APP, SETTINGS_ORG
@@ -15,6 +15,7 @@ from app.ui.helpers import apply_tooltip, configure_volt_spinbox, flash_button_s
 from app.ui.widgets.collapsible_section import CollapsibleSection
 from app.ui.widgets.status_panel import StatusPanel
 from app.ui.widgets.resource_combo import ResourceComboBox
+from app.ui.widgets.safe_spinbox import SafeDoubleSpinBox, ScientificDoubleSpinBox
 from instruments.SR830 import SENSITIVITY_LABELS, sensitivity_value
 
 
@@ -27,32 +28,6 @@ class ScanWorker(QtCore.QThread):
             self.results_ready.emit(scan_all())
         except Exception as ex:
             self.scan_failed.emit(str(ex))
-
-
-class ScientificDoubleSpinBox(QtWidgets.QDoubleSpinBox):
-    def validate(self, text: str, pos: int):
-        if text.strip() in {"", "-", "+", ".", "-.", "+."}:
-            return (QtGui.QValidator.State.Intermediate, text, pos)
-        try:
-            float(text)
-            return (QtGui.QValidator.State.Acceptable, text, pos)
-        except ValueError:
-            return (QtGui.QValidator.State.Invalid, text, pos)
-
-    def valueFromText(self, text: str) -> float:
-        try:
-            return float(text)
-        except ValueError:
-            return self.minimum()
-
-    def textFromValue(self, value: float) -> str:
-        return f"{value:.0e}"
-
-    def stepBy(self, steps: int):
-        current = max(self.value(), self.minimum())
-        exponent = int(f"{current:.0e}".split("e")[1])
-        next_value = current + steps * (10 ** exponent)
-        self.setValue(min(max(next_value, self.minimum()), self.maximum()))
 
 
 class ConnDock(QtWidgets.QWidget):
@@ -164,7 +139,7 @@ class ConnDock(QtWidgets.QWidget):
         self.sp_amp.setDecimals(12)
         self.sp_amp.setRange(self.AMP_MIN_A, 1.0)
         self.sp_amp.setValue(1e-7)
-        self.sp_lkn = QtWidgets.QDoubleSpinBox()
+        self.sp_lkn = SafeDoubleSpinBox()
         self.sp_lkn.setDecimals(6)
         self.sp_lkn.setRange(self.LIA_MIN_V, 10.0)
         self.sp_lkn.setSingleStep(0.001)
@@ -214,9 +189,9 @@ class ConnDock(QtWidgets.QWidget):
         grp_manual = QtWidgets.QGroupBox("Manual Controls")
         form_manual = QtWidgets.QFormLayout(grp_manual)
         style_form_layout(form_manual)
-        self.sp_manual_g1 = QtWidgets.QDoubleSpinBox()
-        self.sp_manual_g2 = QtWidgets.QDoubleSpinBox()
-        self.sp_manual_g3 = QtWidgets.QDoubleSpinBox()
+        self.sp_manual_g1 = SafeDoubleSpinBox()
+        self.sp_manual_g2 = SafeDoubleSpinBox()
+        self.sp_manual_g3 = SafeDoubleSpinBox()
         for spinbox in (self.sp_manual_g1, self.sp_manual_g2, self.sp_manual_g3):
             configure_volt_spinbox(spinbox, 0.0)
         self.btn_manual_g1_set = QtWidgets.QPushButton("Ramp")
@@ -234,7 +209,7 @@ class ConnDock(QtWidgets.QWidget):
             set_button.clicked.connect(lambda _checked=False, sb=spinbox: self._on_manual_gate_ramp(sb))
             zero_button.clicked.connect(lambda _checked=False, sb=spinbox: self._on_manual_gate_zero(sb))
 
-        self.sp_manual_wavelength = QtWidgets.QDoubleSpinBox()
+        self.sp_manual_wavelength = SafeDoubleSpinBox()
         self.sp_manual_wavelength.setDecimals(3)
         self.sp_manual_wavelength.setRange(200.0, 2000.0)
         self.sp_manual_wavelength.setValue(633.0)
@@ -314,12 +289,12 @@ class ConnDock(QtWidgets.QWidget):
         apply_tooltip("Choose whether this Keithley should be configured as a 2-wire voltage source or a 4-wire ohms meter after connection.", self.cbo_g1_mode, self.cbo_g2_mode, self.cbo_g3_mode)
         apply_tooltip("DAQ device used for current acquisition and any NI AO-based Vds output.", lbl_daq, self.cbo_daq)
         apply_tooltip("Monochromator / serial resource used by the Photocurrent tab.", lbl_mono, self.cbo_mono)
-        apply_tooltip("GPIB resource for the SR830 lock-in amplifier control panel.", lbl_lockin, self.cbo_lockin)
+        apply_tooltip("GPIB resource for the SR830 or SR850 lock-in amplifier control panel.", lbl_lockin, self.cbo_lockin)
         apply_tooltip("Operator name added to the save path.", lbl_user, self.ed_user)
         apply_tooltip("Device identifier added to the save path.", lbl_device_id, self.ed_device_id)
         apply_tooltip("Root folder where all CSV output is stored.", lbl_base, self.ed_base)
         apply_tooltip("Pre-amp sensitivity shown on the amplifier front panel, entered in amps.", lbl_amp, self.sp_amp)
-        apply_tooltip("Lock-in voltage sensitivity used for Ids_X/Ids_Y scaling. If the SR830 is connected, this is updated from SENS?.", lbl_lkn, self.sp_lkn, self.lbl_lkn_source)
+        apply_tooltip("Lock-in voltage sensitivity used for Ids_X/Ids_Y scaling. When an SR830 or SR850 is connected, this is updated from SENS?.", lbl_lkn, self.sp_lkn, self.lbl_lkn_source)
         apply_tooltip("Open all configured hardware sessions so tabs can reuse them.", self.btn_connect_all)
         apply_tooltip("Close all instrument sessions managed by the dock.", self.btn_disconnect_all)
         apply_tooltip("Ramp this gate from its current source setpoint to the requested voltage.", lbl_manual_g1, self.sp_manual_g1, self.btn_manual_g1_set)
@@ -353,7 +328,7 @@ class ConnDock(QtWidgets.QWidget):
             self.sp_lkn.blockSignals(previous)
         self._lockin_sensitivity_from_sr830 = True
         suffix = f" ({label})" if label else ""
-        self._set_lockin_sensitivity_source(f"Using SR830 SENS{suffix}")
+        self._set_lockin_sensitivity_source(f"Using lock-in SENS{suffix}")
         self.lbl_lkn_source.setToolTip("")
         self._save_signal_chain_settings()
         return True
@@ -370,14 +345,14 @@ class ConnDock(QtWidgets.QWidget):
             settings = session.read_sensitivity() if hasattr(session, "read_sensitivity") else session.read_settings()
             index = int(settings.get("sensitivity"))
         except Exception as ex:
-            self._set_lockin_sensitivity_source("SR830 read failed; using last value", warning=True)
+            self._set_lockin_sensitivity_source("Lock-in read failed; using last value", warning=True)
             self.lbl_lkn_source.setToolTip(str(ex))
             return False
         sensitivity_v = settings.get("sensitivity_v")
         if sensitivity_v is None:
             sensitivity_v = sensitivity_value(index, use_current=False)
         if sensitivity_v is None:
-            self._set_lockin_sensitivity_source("SR830 sensitivity unknown; using last value", warning=True)
+            self._set_lockin_sensitivity_source("Lock-in sensitivity unknown; using last value", warning=True)
             return False
         label = str(settings.get("sensitivity_label") or "")
         if not label:
@@ -532,7 +507,7 @@ class ConnDock(QtWidgets.QWidget):
             if state == "ok":
                 QtCore.QTimer.singleShot(0, self.refresh_lockin_sensitivity_from_session)
             elif self._lockin_sensitivity_from_sr830:
-                self._set_lockin_sensitivity_source("Last SR830 value; reconnect to update")
+                self._set_lockin_sensitivity_source("Last lock-in value; reconnect to update")
         self._update_reconnect_indicators()
         self._update_manual_controls()
 

@@ -13,6 +13,7 @@ from app.run_output import build_planned_output, planned_output_warning
 from app.ui.helpers import apply_tooltip, configure_volt_spinbox, flash_button_success, set_standard_input_height, style_form_layout
 from app.ui.tabs.base_tab import BaseMeasurementTab
 from app.ui.widgets.collapsible_section import CollapsibleSection
+from app.ui.widgets.safe_spinbox import SafeDoubleSpinBox, SafeSpinBox
 from app.ui.widgets.status_panel import SectionHeader, StatusPanel
 from app.workers.photocurrent import PhotocurrentWorker
 
@@ -60,13 +61,13 @@ class PhotocurrentTab(BaseMeasurementTab):
         grp_wl = QtWidgets.QGroupBox("Wavelength Scan")
         form_wl = QtWidgets.QFormLayout(grp_wl)
         style_form_layout(form_wl)
-        self.sp_wls = QtWidgets.QDoubleSpinBox()
+        self.sp_wls = SafeDoubleSpinBox()
         self.sp_wls.setRange(200, 2000)
         self.sp_wls.setValue(550)
-        self.sp_wle = QtWidgets.QDoubleSpinBox()
+        self.sp_wle = SafeDoubleSpinBox()
         self.sp_wle.setRange(200, 2000)
         self.sp_wle.setValue(740)
-        self.sp_wld = QtWidgets.QDoubleSpinBox()
+        self.sp_wld = SafeDoubleSpinBox()
         self.sp_wld.setRange(0.001, 100)
         self.sp_wld.setValue(0.5)
         self.btn_go_wl = QtWidgets.QPushButton("Go")
@@ -84,11 +85,11 @@ class PhotocurrentTab(BaseMeasurementTab):
         form_vds = QtWidgets.QFormLayout(grp_vds)
         style_form_layout(form_vds)
         self.chk_use_vds = QtWidgets.QCheckBox("Apply Vds From Recipe")
-        self.sp_vds = QtWidgets.QDoubleSpinBox()
+        self.sp_vds = SafeDoubleSpinBox()
         configure_volt_spinbox(self.sp_vds, 0.0)
         self.btn_set_vds = QtWidgets.QPushButton("Set")
         self.btn_set_vds.setFixedWidth(SET_BUTTON_WIDTH)
-        self.sp_vds_ramp = QtWidgets.QDoubleSpinBox()
+        self.sp_vds_ramp = SafeDoubleSpinBox()
         self.sp_vds_ramp.setDecimals(3)
         self.sp_vds_ramp.setRange(1e-3, 5.0)
         self.sp_vds_ramp.setValue(0.01)
@@ -142,11 +143,11 @@ class PhotocurrentTab(BaseMeasurementTab):
         grp_time = QtWidgets.QGroupBox("Timing")
         form_time = QtWidgets.QFormLayout(grp_time)
         style_form_layout(form_time)
-        self.sp_delay = QtWidgets.QDoubleSpinBox()
+        self.sp_delay = SafeDoubleSpinBox()
         self.sp_delay.setDecimals(3)
         self.sp_delay.setRange(0.0, 30.0)
         self.sp_delay.setValue(0.01)
-        self.sp_nsamp = QtWidgets.QSpinBox()
+        self.sp_nsamp = SafeSpinBox()
         self.sp_nsamp.setRange(1, 1000)
         self.sp_nsamp.setValue(1)
         lbl_delay = QtWidgets.QLabel("Delay (s):")

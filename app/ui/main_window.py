@@ -67,7 +67,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.lockin_panel = LockinPanel(self.device_manager)
         self.lockin_panel.sensitivity_read.connect(self.conn_dock.set_lockin_sensitivity_from_sr830)
-        self.lockin_dock = QtWidgets.QDockWidget("SR830 Lock-in", self)
+        self.lockin_dock = QtWidgets.QDockWidget("SRS Lock-in", self)
         self.lockin_scroll = QtWidgets.QScrollArea()
         self.lockin_scroll.setWidgetResizable(True)
         self.lockin_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)

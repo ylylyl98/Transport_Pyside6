@@ -4,7 +4,7 @@ from .Keithley import Keithley2400CurrMode, Keithley2400OhmMode, Keithley2400Vol
 from .monochromater import SP2300
 from .lightField6 import LightField6
 from .motionController import EP300
-from .SR830 import SR830
+from .SR830 import SR830, SR850, SRSLockin
 
 
 supported_instruments = {'Keithley2400VoltMode': Keithley2400VoltMode,
@@ -14,4 +14,6 @@ supported_instruments = {'Keithley2400VoltMode': Keithley2400VoltMode,
                          'DaqCard': DaqCard,
                          'LightField6': LightField6,
                          'EP300': EP300,
-                         'SR830': SR830}
+                         'SR830': SR830,
+                         'SR850': SR850,
+                         'SRSLockin': SRSLockin}

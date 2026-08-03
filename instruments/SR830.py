@@ -4,7 +4,7 @@ from typing import Any
 
 import pyvisa
 
-from instruments import PyvisaInstrument
+from instruments.instrument import InstrumentError, PyvisaInstrument
 
 
 SENSITIVITY_LABELS = [
@@ -68,6 +68,50 @@ INPUT_COUPLING_LABELS = ["AC", "DC"]
 INPUT_GROUND_LABELS = ["Float", "Ground"]
 LINE_FILTER_LABELS = ["Out", "Line", "2x Line", "Both"]
 
+SR850_RESERVE_LABELS = ["Maximum", "Manual", "Minimum"]
+SR850_REFERENCE_SOURCE_LABELS = ["Internal (Fixed)", "Internal Sweep", "External"]
+SR850_INPUT_CONFIG_LABELS = ["A", "A-B", "I"]
+SR850_CURRENT_GAIN_LABELS = ["1 Mohm", "100 Mohm"]
+
+
+LOCKIN_PROFILES: dict[str, dict[str, Any]] = {
+    "SR830": {
+        "model": "SR830",
+        "reference_source_labels": REFERENCE_SOURCE_LABELS,
+        "internal_reference_code": 1,
+        "reserve_labels": RESERVE_LABELS,
+        "input_config_labels": INPUT_CONFIG_LABELS,
+        "current_gain_labels": [],
+        "phase_min": -360.0,
+        "phase_max": 729.99,
+        "phase_decimals": 2,
+        "harmonic_max": 19999,
+    },
+    "SR850": {
+        "model": "SR850",
+        "reference_source_labels": SR850_REFERENCE_SOURCE_LABELS,
+        "internal_reference_code": 0,
+        "reserve_labels": SR850_RESERVE_LABELS,
+        "input_config_labels": SR850_INPUT_CONFIG_LABELS,
+        "current_gain_labels": SR850_CURRENT_GAIN_LABELS,
+        "phase_min": -360.0,
+        "phase_max": 719.999,
+        "phase_decimals": 3,
+        "harmonic_max": 32767,
+    },
+}
+
+
+def detect_lockin_model(identity: str) -> str:
+    """Return the supported SRS model named by an IEEE-488.2 identity string."""
+    normalized = str(identity or "").upper()
+    for model in LOCKIN_PROFILES:
+        if model in normalized:
+            return model
+    raise ValueError(
+        f"Unsupported lock-in identity {identity!r}; expected an SRS SR830 or SR850."
+    )
+
 
 def _label(labels: list[str], index: int) -> str:
     return labels[index] if 0 <= index < len(labels) else f"Code {index}"
@@ -117,15 +161,16 @@ def sensitivity_value(index: Any, use_current: bool = False):
     return parse_prefixed_value(selected)
 
 
-class SR830(PyvisaInstrument):
-    """Stanford Research Systems SR830 lock-in amplifier over GPIB."""
+class SRSLockin(PyvisaInstrument):
+    """Auto-detecting Stanford Research Systems SR830/SR850 lock-in driver."""
 
     def __init__(
         self,
-        name: str = "SR830",
+        name: str = "SRS lock-in",
         address: str = "GPIB1::08::INSTR",
         timeout: float = 5000,
         test_mode=False,
+        expected_model: str | None = None,
     ):
         super().__init__(
             name=name,
@@ -136,22 +181,49 @@ class SR830(PyvisaInstrument):
             test_mode=test_mode,
         )
         self._identity = ""
+        self._model = ""
+        self._expected_model = expected_model
         self._last_snap_raw = ""
 
     def connect(self):
         try:
             super().connect()
+            self._identity = self.get_identity().strip()
+            self._model = detect_lockin_model(self._identity)
+            if self._expected_model and self._model != self._expected_model:
+                raise InstrumentError(
+                    self.name,
+                    f"Expected {self._expected_model}, but *IDN? identified {self._model}.",
+                )
             self._write("OUTX 1")
             self._write("OVRM 1")
-            self._identity = self.get_identity().strip()
-        except pyvisa.Error as e:
-            print(f"SR830 {self.address} connection failed.")
-            raise e
+        except Exception:
+            if self.is_connected():
+                self.close()
+            print(f"SRS lock-in {self.address} connection failed.")
+            raise
         return self
 
     @property
     def identity(self) -> str:
         return self._identity
+
+    @property
+    def model(self) -> str:
+        return self._model
+
+    @property
+    def capabilities(self) -> dict[str, Any]:
+        profile = LOCKIN_PROFILES.get(self.model)
+        if profile is None:
+            raise InstrumentError(self.name, "The lock-in model has not been detected yet.")
+        return {
+            key: list(value) if isinstance(value, list) else value
+            for key, value in profile.items()
+        }
+
+    def _profile_labels(self, key: str) -> list[str]:
+        return list(self.capabilities[key])
 
     def read_outputs(self) -> dict[str, float]:
         with self.lock:
@@ -159,7 +231,7 @@ class SR830(PyvisaInstrument):
             self._last_snap_raw = raw.strip()
             values = [float(part.strip()) for part in raw.split(",")]
             if len(values) != 4:
-                raise ValueError(f"Unexpected SR830 SNAP response: {raw!r}")
+                raise ValueError(f"Unexpected {self.model or 'lock-in'} SNAP response: {raw!r}")
             x, y, r, theta = values
             self._input_values.update({"x": x, "y": y, "r": r, "theta": theta})
             return self._input_values.copy()
@@ -194,6 +266,8 @@ class SR830(PyvisaInstrument):
             settings = self.read_settings()
             return {
                 "identity": self.identity,
+                "model": self.model,
+                "capabilities": self.capabilities,
                 "outputs": outputs,
                 "raw_snap": self._last_snap_raw,
                 "status": status,
@@ -215,23 +289,32 @@ class SR830(PyvisaInstrument):
             input_coupling = self._query_index("ICPL?")
             line_filter = self._query_index("ILIN?")
             harmonic = self._query_index("HARM?")
+            current_gain = self._query_index("IGAN?") if self.model == "SR850" else None
+            ref_labels = self._profile_labels("reference_source_labels")
+            reserve_labels = self._profile_labels("reserve_labels")
+            input_labels = self._profile_labels("input_config_labels")
+            current_gain_labels = self._profile_labels("current_gain_labels")
             return {
                 "phase_deg": phase,
                 "frequency_hz": frequency,
                 "sine_out_v": sine_out,
                 "harmonic": harmonic,
                 "ref_source": ref_source,
-                "ref_source_label": _label(REFERENCE_SOURCE_LABELS, ref_source),
+                "ref_source_label": _label(ref_labels, ref_source),
                 "sensitivity": sensitivity,
                 "sensitivity_label": _label(SENSITIVITY_LABELS, sensitivity),
                 "reserve": reserve,
-                "reserve_label": _label(RESERVE_LABELS, reserve),
+                "reserve_label": _label(reserve_labels, reserve),
                 "time_constant": time_constant,
                 "time_constant_label": _label(TIME_CONSTANT_LABELS, time_constant),
                 "filter_slope": filter_slope,
                 "filter_slope_label": _label(FILTER_SLOPE_LABELS, filter_slope),
                 "input_config": input_config,
-                "input_config_label": _label(INPUT_CONFIG_LABELS, input_config),
+                "input_config_label": _label(input_labels, input_config),
+                "current_gain": current_gain,
+                "current_gain_label": (
+                    _label(current_gain_labels, current_gain) if current_gain is not None else ""
+                ),
                 "input_ground": input_ground,
                 "input_ground_label": _label(INPUT_GROUND_LABELS, input_ground),
                 "input_coupling": input_coupling,
@@ -242,10 +325,17 @@ class SR830(PyvisaInstrument):
 
     def apply_settings(self, settings: dict[str, Any]):
         with self.lock:
+            profile = self.capabilities
             if "phase_deg" in settings:
-                self._write(f"PHAS {float(settings['phase_deg']):.2f}")
+                phase = float(settings["phase_deg"])
+                if phase < profile["phase_min"] or phase > profile["phase_max"]:
+                    raise ValueError(
+                        f"{self.model} phase must be between {profile['phase_min']} and "
+                        f"{profile['phase_max']} degrees."
+                    )
+                self._write(f"PHAS {phase:.{profile['phase_decimals']}f}")
             if "ref_source" in settings:
-                self._write_index("FMOD", settings["ref_source"], REFERENCE_SOURCE_LABELS)
+                self._write_index("FMOD", settings["ref_source"], profile["reference_source_labels"])
             if "frequency_hz" in settings:
                 self._write(f"FREQ {float(settings['frequency_hz']):.6g}")
             if "sine_out_v" in settings:
@@ -253,13 +343,15 @@ class SR830(PyvisaInstrument):
             if "sensitivity" in settings:
                 self._write_index("SENS", settings["sensitivity"], SENSITIVITY_LABELS)
             if "reserve" in settings:
-                self._write_index("RMOD", settings["reserve"], RESERVE_LABELS)
+                self._write_index("RMOD", settings["reserve"], profile["reserve_labels"])
             if "time_constant" in settings:
                 self._write_index("OFLT", settings["time_constant"], TIME_CONSTANT_LABELS)
             if "filter_slope" in settings:
                 self._write_index("OFSL", settings["filter_slope"], FILTER_SLOPE_LABELS)
             if "input_config" in settings:
-                self._write_index("ISRC", settings["input_config"], INPUT_CONFIG_LABELS)
+                self._write_index("ISRC", settings["input_config"], profile["input_config_labels"])
+            if "current_gain" in settings and profile["current_gain_labels"]:
+                self._write_index("IGAN", settings["current_gain"], profile["current_gain_labels"])
             if "input_ground" in settings:
                 self._write_index("IGND", settings["input_ground"], INPUT_GROUND_LABELS)
             if "input_coupling" in settings:
@@ -268,8 +360,10 @@ class SR830(PyvisaInstrument):
                 self._write_index("ILIN", settings["line_filter"], LINE_FILTER_LABELS)
             if "harmonic" in settings:
                 harmonic = int(settings["harmonic"])
-                if harmonic < 1:
-                    raise ValueError("SR830 harmonic must be at least 1.")
+                if harmonic < 1 or harmonic > profile["harmonic_max"]:
+                    raise ValueError(
+                        f"{self.model} harmonic must be between 1 and {profile['harmonic_max']}."
+                    )
                 self._write(f"HARM {harmonic:d}")
 
     def auto_phase(self):
@@ -307,3 +401,17 @@ class SR830(PyvisaInstrument):
         if index < 0 or index >= len(labels):
             raise ValueError(f"{command} index {index} is out of range.")
         self._write(f"{command} {index:d}")
+
+
+class SR830(SRSLockin):
+    """SR830-specific compatibility wrapper around the shared SRS driver."""
+
+    def __init__(self, name: str = "SR830", address: str = "GPIB1::08::INSTR", timeout: float = 5000, test_mode=False):
+        super().__init__(name, address, timeout, test_mode, expected_model="SR830")
+
+
+class SR850(SRSLockin):
+    """SR850-specific compatibility wrapper around the shared SRS driver."""
+
+    def __init__(self, name: str = "SR850", address: str = "GPIB1::08::INSTR", timeout: float = 5000, test_mode=False):
+        super().__init__(name, address, timeout, test_mode, expected_model="SR850")

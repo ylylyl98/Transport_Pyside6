@@ -70,11 +70,14 @@ class CoParams:
     vbg_stop: float = 1.0
     vbg_step: float = 0.1
     ratio: float = 1.0
+    ratio_target: str = "Vbg"
     vg_ramp: float = 0.2
     delay: float = 0.5
     n_sample: int = 3
     inner: str = "Vbg"
     plot_choice: str = "Ids_DC"
+    plot_x_axis: str = "Follow Sweep"
+    plot_x_resolved: str = "Vtg"
     mode: str = "Grid"
     axis_fast: str = "Vtg"
     axis_slow: str = "None"
@@ -104,6 +107,7 @@ class LineSweepParams:
     raw_vds_stop: float = 0.0
 
     derived_ratio: float = 1.0
+    derived_ratio_target: str = "Vbg"
     derived_axis: str = "Doping"
     derived_start: float = 0.0
     derived_stop: float = 1.0
@@ -119,7 +123,8 @@ class LineSweepParams:
     delay: float = 0.5
     n_sample: int = 3
     plot_choice: str = "Ids_DC"
-    plot_x_axis: str = "Auto"
+    plot_x_axis: str = "Follow Sweep"
+    plot_x_resolved: str = "Vtg"
     sweep_both_ways: bool = False
 
 
