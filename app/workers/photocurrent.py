@@ -17,8 +17,9 @@ from app.constants import (
 )
 from app.models import Connections, PhotocurrentBiasCondition, PhotocurrentParams, SaveRoot
 from app.result_channels import KEITHLEY_CHANNEL
-from app.run_output import update_run_metadata_status, write_run_metadata
-from app.utils import _sanitize_base, safe_ramp
+from app.run_output import compose_output_stem, update_run_metadata_status, write_run_metadata
+from app.signal_chain import signal_chain_filename_parts
+from app.utils import safe_ramp
 from app.workers.base import RunStopped, RunWorker
 
 
@@ -36,6 +37,7 @@ class PhotocurrentWorker(RunWorker):
         self.plot_choice = kw.get("plot_choice")
         self.amp_rate = kw.get("amp_rate", 1e7)
         self.lkn_rate = kw.get("lkn_rate", 100.0)
+        self.signal_chain = dict(kw.get("signal_chain") or {})
 
     @staticmethod
     def condition_csv_path(
@@ -137,8 +139,15 @@ class PhotocurrentWorker(RunWorker):
                         tag_vds = "Keithley"
                 g1_tag = "Tg" if self.g1 else "NoTg"
                 g2_tag = "Bg" if self.g2 else "NoBg"
-                device_id = _sanitize_base(self.save.device_id)
-                stem = f"{device_id}_{_sanitize_base(self.p.base_name)}_{g1_tag}_{g2_tag}_pc_{tag_vds}_{len(conditions)}conditions_{ts}"
+                signal_tags = "_".join(signal_chain_filename_parts(self.signal_chain))
+                stem = compose_output_stem(
+                    self.save.device_id,
+                    "photocurrent",
+                    self.p.base_name,
+                    (g1_tag, g2_tag, tag_vds, f"{len(conditions)}conditions", signal_tags),
+                    ts,
+                    "PC",
+                )
                 csv_path = os.path.join(self.save.path(), stem + ".csv")
             os.makedirs(os.path.dirname(csv_path), exist_ok=True)
             condition_paths = self.condition_csv_paths(csv_path, conditions, self.p.use_vds)
@@ -153,6 +162,7 @@ class PhotocurrentWorker(RunWorker):
                         "save_root": self.save,
                         "connections": self.conns,
                         "params": self.p,
+                        "signal_chain": self.signal_chain,
                     },
                 )
 

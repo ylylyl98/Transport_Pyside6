@@ -16,8 +16,9 @@ from app.constants import (
 )
 from app.models import Connections, DualGateParams, SaveRoot
 from app.result_channels import KEITHLEY_CHANNEL
-from app.run_output import update_run_metadata_status, write_run_metadata
-from app.utils import _frange_inc, _sanitize_base, safe_ramp
+from app.run_output import compose_output_stem, update_run_metadata_status, write_run_metadata
+from app.signal_chain import signal_chain_filename_parts
+from app.utils import _frange_inc, safe_ramp
 from app.workers.base import RunStopped, RunWorker
 
 
@@ -34,6 +35,7 @@ class DualGateWorker(RunWorker):
         self.plot_choice = kw.get("plot_choice")
         self.amp_rate = kw.get("amp_rate", 1e7)
         self.lkn_rate = kw.get("lkn_rate", 100.0)
+        self.signal_chain = dict(kw.get("signal_chain") or {})
 
     @QtCore.pyqtSlot()
     def run(self):
@@ -62,11 +64,20 @@ class DualGateWorker(RunWorker):
                 tag_src = "VdsKeithley" if self.p.vds_source == "Keithley 2400" else f"VdsDAQ_ao{self.p.ao_channel}"
                 g1_tag = "Tg" if self.g1 else "NoTg"
                 g2_tag = "Bg" if self.g2 else "NoBg"
-                device_id = _sanitize_base(self.save.device_id)
-                stem = (
-                    f"{device_id}_{_sanitize_base(self.p.base_name)}"
-                    f"_{g1_tag}_{g2_tag}_{tag_src}"
-                    f"_Vtg{self.p.vtg_set:+.3f}V_Vbg{self.p.vbg_set:+.3f}V_{ts}"
+                signal_tags = "_".join(signal_chain_filename_parts(self.signal_chain))
+                stem = compose_output_stem(
+                    self.save.device_id,
+                    "vds_sweep",
+                    self.p.base_name,
+                    (
+                        g1_tag,
+                        g2_tag,
+                        tag_src,
+                        f"Vtg{self.p.vtg_set:+.3f}V",
+                        f"Vbg{self.p.vbg_set:+.3f}V",
+                        signal_tags,
+                    ),
+                    ts,
                 )
                 csv_path = os.path.join(self.save.path(), stem + ".csv")
             os.makedirs(os.path.dirname(csv_path), exist_ok=True)
@@ -80,6 +91,7 @@ class DualGateWorker(RunWorker):
                         "save_root": self.save,
                         "connections": self.conns,
                         "params": self.p,
+                        "signal_chain": self.signal_chain,
                     },
                 )
 

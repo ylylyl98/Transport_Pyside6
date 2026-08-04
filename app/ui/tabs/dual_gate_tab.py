@@ -10,9 +10,12 @@ from app.device_manager import DeviceManager
 from app.models import Connections, DualGateParams, SaveRoot
 from app.result_channels import compare_channel_options, plot_channel_options, plot_channel_value
 from app.run_output import build_planned_output, planned_output_warning
+from app.signal_chain import SignalChainSnapshot, signal_chain_filename_parts, signal_chain_metadata
 from app.ui.helpers import apply_tooltip, configure_volt_spinbox, set_standard_input_height, style_form_layout
 from app.ui.tabs.base_tab import BaseMeasurementTab
 from app.ui.widgets.collapsible_section import CollapsibleSection
+from app.ui.widgets.safe_combo import SafeComboBox
+from app.ui.widgets.safe_spinbox import SafeDoubleSpinBox, SafeSpinBox
 from app.ui.widgets.status_panel import SectionHeader, StatusPanel
 from app.utils import _safe
 from app.workers.dual_gate import DualGateWorker
@@ -21,11 +24,21 @@ SET_BUTTON_WIDTH = 48
 
 
 class DualGateTab(BaseMeasurementTab):
-    def __init__(self, save: SaveRoot, conns: Connections, device_manager: DeviceManager, get_global_rates_callable=None):
+    SETTINGS_PREFIX = "tabs/vds_sweep"
+
+    def __init__(
+        self,
+        save: SaveRoot,
+        conns: Connections,
+        device_manager: DeviceManager,
+        get_global_rates_callable=None,
+        get_signal_chain_callable=None,
+    ):
         self.save = save
         self.conns = conns
         self.device_manager = device_manager
         self.get_global_rates = get_global_rates_callable or (lambda: (1e7, 100.0))
+        self.get_signal_chain = get_signal_chain_callable or SignalChainSnapshot
         self.p = DualGateParams()
         self.s_g1 = self.s_g2 = self.s_g3 = self.s_daq = None
         self.worker_thread = None
@@ -39,6 +52,8 @@ class DualGateTab(BaseMeasurementTab):
         self.device_manager.status_changed.connect(self._on_device_status_changed)
         self.device_manager.operation_changed.connect(self._on_operation_changed)
         self._sync_sessions_from_manager()
+        self._load_tab_settings()
+        self._bind_tab_settings()
         self._update_manual_buttons()
 
     def get_ao_items_if_available(self) -> List[str]:
@@ -58,15 +73,15 @@ class DualGateTab(BaseMeasurementTab):
         grp_vds = QtWidgets.QGroupBox("Vds Sweep")
         form_vds = QtWidgets.QFormLayout(grp_vds)
         style_form_layout(form_vds)
-        self.sp_vds_start = QtWidgets.QDoubleSpinBox()
-        self.sp_vds_stop = QtWidgets.QDoubleSpinBox()
+        self.sp_vds_start = SafeDoubleSpinBox()
+        self.sp_vds_stop = SafeDoubleSpinBox()
         configure_volt_spinbox(self.sp_vds_start, 0.0)
         configure_volt_spinbox(self.sp_vds_stop, 0.5)
-        self.sp_vds_step = QtWidgets.QDoubleSpinBox()
+        self.sp_vds_step = SafeDoubleSpinBox()
         self.sp_vds_step.setDecimals(3)
         self.sp_vds_step.setRange(1e-3, 5.0)
         self.sp_vds_step.setValue(0.01)
-        self.sp_vds_ramp = QtWidgets.QDoubleSpinBox()
+        self.sp_vds_ramp = SafeDoubleSpinBox()
         self.sp_vds_ramp.setDecimals(3)
         self.sp_vds_ramp.setRange(1e-3, 5.0)
         self.sp_vds_ramp.setValue(0.05)
@@ -92,8 +107,8 @@ class DualGateTab(BaseMeasurementTab):
         grp_gate = QtWidgets.QGroupBox("Fixed Gate Voltages")
         form_gate = QtWidgets.QFormLayout(grp_gate)
         style_form_layout(form_gate)
-        self.sp_vtg = QtWidgets.QDoubleSpinBox()
-        self.sp_vbg = QtWidgets.QDoubleSpinBox()
+        self.sp_vtg = SafeDoubleSpinBox()
+        self.sp_vbg = SafeDoubleSpinBox()
         configure_volt_spinbox(self.sp_vtg, 0.0)
         configure_volt_spinbox(self.sp_vbg, 0.0)
         self.btn_set_vtg = QtWidgets.QPushButton("Set")
@@ -110,27 +125,28 @@ class DualGateTab(BaseMeasurementTab):
         grp_time = QtWidgets.QGroupBox("Timing")
         form_time = QtWidgets.QFormLayout(grp_time)
         style_form_layout(form_time)
-        self.sp_delay = QtWidgets.QDoubleSpinBox()
+        self.sp_delay = SafeDoubleSpinBox()
         self.sp_delay.setDecimals(3)
         self.sp_delay.setRange(0.0, 10.0)
         self.sp_delay.setValue(0.5)
-        self.sp_nsamp = QtWidgets.QSpinBox()
+        self.sp_nsamp = SafeSpinBox()
         self.sp_nsamp.setRange(1, 1000)
         self.sp_nsamp.setValue(3)
         lbl_delay = QtWidgets.QLabel("Delay (s):")
         lbl_nsamp = QtWidgets.QLabel("Averages:")
         form_time.addRow(lbl_delay, self.sp_delay)
         form_time.addRow(lbl_nsamp, self.sp_nsamp)
-        ctl_layout.addWidget(grp_time)
+        self.exp_timing = CollapsibleSection("Timing", grp_time, expanded=False)
+        ctl_layout.addWidget(self.exp_timing)
 
         ctl_layout.addWidget(SectionHeader("Output"))
         grp_output = QtWidgets.QGroupBox("Output Settings")
         form_output = QtWidgets.QFormLayout(grp_output)
         style_form_layout(form_output)
         self.ed_base = QtWidgets.QLineEdit(self.p.base_name)
-        self.cbo_source = QtWidgets.QComboBox()
+        self.cbo_source = SafeComboBox()
         self.cbo_source.addItems(["Keithley 2400"])
-        self.cbo_y = QtWidgets.QComboBox()
+        self.cbo_y = SafeComboBox()
         self.cbo_y.addItems(["Ids_DC", "Ids_X", "Ids_Y"])
         lbl_base = QtWidgets.QLabel("Filename Stem:")
         lbl_source = QtWidgets.QLabel("Vds Source:")
@@ -138,9 +154,14 @@ class DualGateTab(BaseMeasurementTab):
         form_output.addRow(lbl_base, self.ed_base)
         form_output.addRow(lbl_source, self.cbo_source)
         form_output.addRow(lbl_y, self.cbo_y)
-        self.exp_output = CollapsibleSection("Output and Plot Options", grp_output, expanded=True)
+        output_content = QtWidgets.QWidget()
+        output_layout = QtWidgets.QVBoxLayout(output_content)
+        output_layout.setContentsMargins(0, 0, 0, 0)
+        output_layout.setSpacing(4)
+        output_layout.addWidget(grp_output)
+        self._add_output_preview_section(output_layout)
+        self.exp_output = CollapsibleSection("Output, Plot, and Files", output_content, expanded=False)
         ctl_layout.addWidget(self.exp_output)
-        self._add_output_preview_section(ctl_layout)
 
         self.lbl_connection_hint = QtWidgets.QLabel()
         self.lbl_connection_hint.setWordWrap(True)
@@ -242,6 +263,7 @@ class DualGateTab(BaseMeasurementTab):
             f"Vbg_{self.sp_vbg.value():g}V",
             source,
             direction,
+            *signal_chain_filename_parts(self.get_signal_chain()),
         ]
 
     def refresh_output_preview(self, *_args):
@@ -255,6 +277,34 @@ class DualGateTab(BaseMeasurementTab):
         self._output_run_id = planned.run_id
         self._planned_output = planned
         self.set_output_preview_text(planned, planned_output_warning(planned, self.save))
+
+    def _settings_widgets(self):
+        return [
+            ("base_name", self.ed_base),
+            ("source", self.cbo_source),
+            ("plot_y", self.cbo_y),
+            ("vds_start", self.sp_vds_start),
+            ("vds_stop", self.sp_vds_stop),
+            ("vds_step", self.sp_vds_step),
+            ("vds_ramp", self.sp_vds_ramp),
+            ("vtg", self.sp_vtg),
+            ("vbg", self.sp_vbg),
+            ("delay", self.sp_delay),
+            ("averages", self.sp_nsamp),
+            ("sweep_bidirectional", self.chk_sweep_bidirectional),
+        ]
+
+    def _load_tab_settings(self):
+        self._load_tab_widget_settings(self.SETTINGS_PREFIX, self._settings_widgets())
+        self._update_plot_axis_choices()
+        self.set_plot_axis_source(self.cbo_y.currentText())
+        self.refresh_output_preview()
+
+    def _bind_tab_settings(self):
+        self._bind_tab_widget_settings(self.SETTINGS_PREFIX, self._settings_widgets())
+
+    def save_tab_settings(self):
+        self._save_tab_widget_settings(self.SETTINGS_PREFIX, self._settings_widgets())
 
     def _update_manual_buttons(self):
         self._sync_sessions_from_manager()
@@ -411,24 +461,43 @@ class DualGateTab(BaseMeasurementTab):
         mw = self.window()
         if hasattr(mw, "refresh_models_from_ui"):
             mw.refresh_models_from_ui()
+        calibration = self.verified_run_calibration()
+        if calibration is None:
+            return
+        amp_rate, lkn_rate, signal_chain = calibration
         self.refresh_output_preview()
         if not self.validate_output_ready(self.save):
             return
         if not self._validate_required_sessions():
             return
-        claimed, blocked = self.device_manager.mark_in_use(self._required_devices())
+        try:
+            self.collect_params()
+        except Exception as ex:
+            QtWidgets.QMessageBox.warning(self, "Invalid Parameters", str(ex))
+            return
+        claimed, blocked = self.claim_run_devices(self._required_devices())
         if not claimed:
             QtWidgets.QMessageBox.warning(self, "Busy", f"Devices already in use: {', '.join(blocked).upper()}")
             return
-        self.collect_params()
         self._plot_records = []
         self.plot.clear()
         self.plot.ax.set_xlabel("Vds (V)")
         self.set_plot_axis_source(self.p.plot_choice)
         try:
             self.begin_run_logging(self._planned_output, "Vds Sweep")
-            amp_rate, lkn_rate = self.get_global_rates()
-            self.worker = DualGateWorker(self.p, self.save, self.conns, g1=self.s_g1, g2=self.s_g2, g3=self.s_g3, daq=self.s_daq, plot_choice=self.p.plot_choice, amp_rate=amp_rate, lkn_rate=lkn_rate)
+            self.worker = DualGateWorker(
+                self.p,
+                self.save,
+                self.conns,
+                g1=self.s_g1,
+                g2=self.s_g2,
+                g3=self.s_g3,
+                daq=self.s_daq,
+                plot_choice=self.p.plot_choice,
+                amp_rate=amp_rate,
+                lkn_rate=lkn_rate,
+                signal_chain=signal_chain_metadata(signal_chain),
+            )
             self.worker_thread = QtCore.QThread()
             self.worker.moveToThread(self.worker_thread)
             self.worker_thread.started.connect(self.worker.run)
@@ -451,7 +520,7 @@ class DualGateTab(BaseMeasurementTab):
         except Exception as ex:
             self.append_log(f"[start] ERROR while creating/starting worker: {ex}")
             self.end_run_logging("error", str(ex))
-            self.device_manager.release(self._required_devices())
+            self.release_run_devices()
 
     def stop_run(self):
         if self.worker:
@@ -464,7 +533,7 @@ class DualGateTab(BaseMeasurementTab):
             self.worker.deleteLater()
             self.worker = None
         self.worker_thread = None
-        self.device_manager.release(self._required_devices())
+        self.release_run_devices()
         self.run_panel.set_running(False)
         self._update_manual_buttons()
 

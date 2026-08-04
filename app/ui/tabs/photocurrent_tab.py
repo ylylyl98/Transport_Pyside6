@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 
 from PyQt6 import QtCore, QtWidgets
@@ -9,9 +10,12 @@ from app.device_manager import DeviceManager
 from app.models import Connections, PhotocurrentBiasCondition, PhotocurrentParams, SaveRoot
 from app.result_channels import compare_channel_options, plot_channel_options, plot_channel_value
 from app.run_output import build_planned_output, planned_output_warning
+from app.signal_chain import SignalChainSnapshot, signal_chain_filename_parts, signal_chain_metadata
 from app.ui.helpers import apply_tooltip, configure_volt_spinbox, flash_button_success, set_standard_input_height, style_form_layout
 from app.ui.tabs.base_tab import BaseMeasurementTab
 from app.ui.widgets.collapsible_section import CollapsibleSection
+from app.ui.widgets.safe_combo import SafeComboBox
+from app.ui.widgets.safe_spinbox import SafeDoubleSpinBox, SafeSpinBox
 from app.ui.widgets.status_panel import SectionHeader, StatusPanel
 from app.workers.photocurrent import PhotocurrentWorker
 
@@ -19,11 +23,14 @@ SET_BUTTON_WIDTH = 48
 
 
 class PhotocurrentTab(BaseMeasurementTab):
-    def __init__(self, save: SaveRoot, conns: Connections, device_manager: DeviceManager, get_global_rates_callable=None, get_ao_items_callable=None):
+    SETTINGS_PREFIX = "tabs/photocurrent"
+
+    def __init__(self, save: SaveRoot, conns: Connections, device_manager: DeviceManager, get_global_rates_callable=None, get_ao_items_callable=None, get_signal_chain_callable=None):
         self.save = save
         self.conns = conns
         self.device_manager = device_manager
         self.get_global_rates = get_global_rates_callable or (lambda: (1e7, 100.0))
+        self.get_signal_chain = get_signal_chain_callable or SignalChainSnapshot
         self.get_ao_items = get_ao_items_callable or (lambda: ["ao0", "ao1"])
         self.p = PhotocurrentParams()
         self.s_g1 = self.s_g2 = self.s_g3 = self.s_daq = self.s_mono = None
@@ -32,12 +39,15 @@ class PhotocurrentTab(BaseMeasurementTab):
         self._plot_records = []
         self._output_run_id = None
         self._planned_output = None
+        self._loading_tab_settings = False
         super().__init__("START PHOTOCURRENT", "Wavelength (nm)", "Ids (A)", ["g1", "g2", "g3", "daq", "mono"])
         self._wire()
         self.btn_start.setToolTip("Connect instruments first")
         self.device_manager.status_changed.connect(self._on_device_status_changed)
         self.device_manager.operation_changed.connect(self._on_operation_changed)
         self._sync_sessions_from_manager()
+        self._load_tab_settings()
+        self._bind_tab_settings()
         self._update_manual_buttons()
 
     def _make_set_row(self, spinbox, button):
@@ -54,13 +64,13 @@ class PhotocurrentTab(BaseMeasurementTab):
         grp_wl = QtWidgets.QGroupBox("Wavelength Scan")
         form_wl = QtWidgets.QFormLayout(grp_wl)
         style_form_layout(form_wl)
-        self.sp_wls = QtWidgets.QDoubleSpinBox()
+        self.sp_wls = SafeDoubleSpinBox()
         self.sp_wls.setRange(200, 2000)
         self.sp_wls.setValue(550)
-        self.sp_wle = QtWidgets.QDoubleSpinBox()
+        self.sp_wle = SafeDoubleSpinBox()
         self.sp_wle.setRange(200, 2000)
         self.sp_wle.setValue(740)
-        self.sp_wld = QtWidgets.QDoubleSpinBox()
+        self.sp_wld = SafeDoubleSpinBox()
         self.sp_wld.setRange(0.001, 100)
         self.sp_wld.setValue(0.5)
         self.btn_go_wl = QtWidgets.QPushButton("Go")
@@ -78,11 +88,11 @@ class PhotocurrentTab(BaseMeasurementTab):
         form_vds = QtWidgets.QFormLayout(grp_vds)
         style_form_layout(form_vds)
         self.chk_use_vds = QtWidgets.QCheckBox("Apply Vds From Recipe")
-        self.sp_vds = QtWidgets.QDoubleSpinBox()
+        self.sp_vds = SafeDoubleSpinBox()
         configure_volt_spinbox(self.sp_vds, 0.0)
         self.btn_set_vds = QtWidgets.QPushButton("Set")
         self.btn_set_vds.setFixedWidth(SET_BUTTON_WIDTH)
-        self.sp_vds_ramp = QtWidgets.QDoubleSpinBox()
+        self.sp_vds_ramp = SafeDoubleSpinBox()
         self.sp_vds_ramp.setDecimals(3)
         self.sp_vds_ramp.setRange(1e-3, 5.0)
         self.sp_vds_ramp.setValue(0.01)
@@ -136,27 +146,28 @@ class PhotocurrentTab(BaseMeasurementTab):
         grp_time = QtWidgets.QGroupBox("Timing")
         form_time = QtWidgets.QFormLayout(grp_time)
         style_form_layout(form_time)
-        self.sp_delay = QtWidgets.QDoubleSpinBox()
+        self.sp_delay = SafeDoubleSpinBox()
         self.sp_delay.setDecimals(3)
         self.sp_delay.setRange(0.0, 30.0)
         self.sp_delay.setValue(0.01)
-        self.sp_nsamp = QtWidgets.QSpinBox()
+        self.sp_nsamp = SafeSpinBox()
         self.sp_nsamp.setRange(1, 1000)
         self.sp_nsamp.setValue(1)
         lbl_delay = QtWidgets.QLabel("Delay (s):")
         lbl_avg = QtWidgets.QLabel("Averages:")
         form_time.addRow(lbl_delay, self.sp_delay)
         form_time.addRow(lbl_avg, self.sp_nsamp)
-        ctl_layout.addWidget(grp_time)
+        self.exp_timing = CollapsibleSection("Timing", grp_time, expanded=False)
+        ctl_layout.addWidget(self.exp_timing)
 
         ctl_layout.addWidget(SectionHeader("Output"))
         grp_output = QtWidgets.QGroupBox("Output Settings")
         form_output = QtWidgets.QFormLayout(grp_output)
         style_form_layout(form_output)
         self.ed_base = QtWidgets.QLineEdit(self.p.base_name)
-        self.cbo_source = QtWidgets.QComboBox()
+        self.cbo_source = SafeComboBox()
         self.cbo_source.addItems(["None", "Keithley 2400"])
-        self.cbo_y = QtWidgets.QComboBox()
+        self.cbo_y = SafeComboBox()
         self.cbo_y.addItems(["Ids_DC", "Ids_X", "Ids_Y"])
         lbl_base = QtWidgets.QLabel("Filename Stem:")
         lbl_source = QtWidgets.QLabel("Vds Source:")
@@ -164,9 +175,14 @@ class PhotocurrentTab(BaseMeasurementTab):
         form_output.addRow(lbl_base, self.ed_base)
         form_output.addRow(lbl_source, self.cbo_source)
         form_output.addRow(lbl_y, self.cbo_y)
-        self.exp_output = CollapsibleSection("Output and Plot Options", grp_output, expanded=True)
+        output_content = QtWidgets.QWidget()
+        output_layout = QtWidgets.QVBoxLayout(output_content)
+        output_layout.setContentsMargins(0, 0, 0, 0)
+        output_layout.setSpacing(4)
+        output_layout.addWidget(grp_output)
+        self._add_output_preview_section(output_layout)
+        self.exp_output = CollapsibleSection("Output, Plot, and Files", output_content, expanded=False)
         ctl_layout.addWidget(self.exp_output)
-        self._add_output_preview_section(ctl_layout)
 
         self.lbl_connection_hint = QtWidgets.QLabel()
         self.lbl_connection_hint.setWordWrap(True)
@@ -361,6 +377,8 @@ class PhotocurrentTab(BaseMeasurementTab):
             return
         self._refresh_condition_preview()
         self.refresh_output_preview()
+        if not getattr(self, "_loading_tab_settings", False):
+            self._save_bias_conditions_settings()
 
     def _vds_sources(self) -> list[str]:
         sources: list[str] = []
@@ -405,6 +423,7 @@ class PhotocurrentTab(BaseMeasurementTab):
     def _output_summary_parts(self) -> list[str]:
         return [
             f"wl_{self.sp_wls.value():g}to{self.sp_wle.value():g}nm",
+            *signal_chain_filename_parts(self.get_signal_chain()),
         ]
 
     def refresh_output_preview(self, *_args):
@@ -421,8 +440,107 @@ class PhotocurrentTab(BaseMeasurementTab):
         self.set_output_preview_text(planned, planned_output_warning(planned, self.save))
         condition_paths = self._condition_csv_paths()
         if condition_paths:
-            self.lbl_filename_preview.setPlainText(f"{len(condition_paths)} CSV files (one per selected condition)")
+            condition_names = [os.path.basename(path) for path in condition_paths]
+            if len(condition_names) == 1:
+                preview_text = condition_names[0]
+            else:
+                preview_lines = [f"{len(condition_names)} CSV files:"]
+                preview_lines.extend(condition_names[:3])
+                if len(condition_names) > 3:
+                    preview_lines.append(f"... {len(condition_names) - 3} more")
+                preview_text = "\n".join(preview_lines)
+            self.lbl_filename_preview.setPlainText(preview_text)
             self.lbl_filename_preview.setToolTip("\n".join(condition_paths))
+
+    def _settings_widgets(self):
+        return [
+            ("base_name", self.ed_base),
+            ("source", self.cbo_source),
+            ("plot_y", self.cbo_y),
+            ("wl_start", self.sp_wls),
+            ("wl_stop", self.sp_wle),
+            ("wl_step", self.sp_wld),
+            ("use_vds", self.chk_use_vds),
+            ("manual_vds", self.sp_vds),
+            ("vds_ramp", self.sp_vds_ramp),
+            ("delay", self.sp_delay),
+            ("averages", self.sp_nsamp),
+        ]
+
+    def _load_tab_settings(self):
+        self._loading_tab_settings = True
+        try:
+            self._load_tab_widget_settings(self.SETTINGS_PREFIX, self._settings_widgets())
+            self._load_bias_conditions_settings()
+        finally:
+            self._loading_tab_settings = False
+        self._update_vds_bias_state()
+        self._update_plot_axis_choices()
+        self.set_plot_axis_source(self.cbo_y.currentText())
+        self._refresh_condition_preview()
+        self.refresh_output_preview()
+
+    def _bind_tab_settings(self):
+        self._bind_tab_widget_settings(self.SETTINGS_PREFIX, self._settings_widgets())
+
+    def save_tab_settings(self):
+        self._save_tab_widget_settings(self.SETTINGS_PREFIX, self._settings_widgets())
+        self._save_bias_conditions_settings()
+
+    def _save_bias_conditions_settings(self):
+        try:
+            conditions = self._bias_conditions(strict=False)
+        except Exception:
+            return
+        from app.settings import get_app_settings
+
+        payload = [
+            {
+                "enabled": condition.enabled,
+                "vtg": condition.vtg,
+                "vbg": condition.vbg,
+                "vds": condition.vds,
+                "settle_s": condition.settle_s,
+            }
+            for condition in conditions
+        ]
+        settings = get_app_settings()
+        settings.setValue(f"{self.SETTINGS_PREFIX}/bias_conditions", json.dumps(payload))
+        settings.sync()
+
+    def _load_bias_conditions_settings(self):
+        from app.settings import get_app_settings
+
+        raw = get_app_settings().value(f"{self.SETTINGS_PREFIX}/bias_conditions", "")
+        if not raw:
+            return
+        try:
+            rows = json.loads(str(raw))
+        except (TypeError, ValueError):
+            return
+        if not isinstance(rows, list):
+            return
+        conditions: list[PhotocurrentBiasCondition] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            try:
+                conditions.append(
+                    PhotocurrentBiasCondition(
+                        enabled=bool(row.get("enabled", True)),
+                        vtg=float(row.get("vtg", 0.0)),
+                        vbg=float(row.get("vbg", 0.0)),
+                        vds=float(row.get("vds", 0.0)),
+                        settle_s=float(row.get("settle_s", 2.0)),
+                    )
+                )
+            except (TypeError, ValueError):
+                continue
+        if not conditions:
+            return
+        self.tbl_bias_conditions.setRowCount(0)
+        for condition in conditions:
+            self._append_bias_condition(condition)
 
     def _condition_csv_paths(self) -> list[str]:
         if self._planned_output is None:
@@ -663,6 +781,8 @@ class PhotocurrentTab(BaseMeasurementTab):
         self.p.vds_set = self.sp_vds.value()
         self.p.vds_ramp = self.sp_vds_ramp.value()
         self.p.bias_conditions = self._active_bias_conditions(strict=True)
+        if not self.p.bias_conditions:
+            raise ValueError("Select at least one enabled bias condition to run.")
         first = self.p.bias_conditions[0]
         self.p.vtg_set = first.vtg
         self.p.vbg_set = first.vbg
@@ -681,26 +801,33 @@ class PhotocurrentTab(BaseMeasurementTab):
         mw = self.window()
         if hasattr(mw, "refresh_models_from_ui"):
             mw.refresh_models_from_ui()
+        calibration = self.verified_run_calibration()
+        if calibration is None:
+            return
+        amp, lkn, signal_chain = calibration
         self.refresh_output_preview()
         if not self.validate_output_ready(self.save):
             return
         if not self._validate_required_sessions():
             return
+        try:
+            self.collect_params()
+        except Exception as ex:
+            QtWidgets.QMessageBox.warning(self, "Invalid Parameters", str(ex))
+            return
         if not self._validate_condition_output_paths():
             return
-        claimed, blocked = self.device_manager.mark_in_use(self._required_devices())
+        claimed, blocked = self.claim_run_devices(self._required_devices())
         if not claimed:
             QtWidgets.QMessageBox.warning(self, "Busy", f"Devices already in use: {', '.join(blocked).upper()}")
             return
-        self.collect_params()
         self._plot_records = []
         self.plot.clear()
         self.plot.ax.set_xlabel("Wavelength (nm)")
         self.set_plot_axis_source(self.p.plot_choice)
         try:
             self.begin_run_logging(self._planned_output, "Photocurrent")
-            amp, lkn = self.get_global_rates()
-            self.worker = PhotocurrentWorker(self.p, self.save, self.conns, g1=self.s_g1, g2=self.s_g2, g3=self.s_g3, daq=self.s_daq, mono=self.s_mono, plot_choice=self.p.plot_choice, amp_rate=amp, lkn_rate=lkn)
+            self.worker = PhotocurrentWorker(self.p, self.save, self.conns, g1=self.s_g1, g2=self.s_g2, g3=self.s_g3, daq=self.s_daq, mono=self.s_mono, plot_choice=self.p.plot_choice, amp_rate=amp, lkn_rate=lkn, signal_chain=signal_chain_metadata(signal_chain))
             self.worker_thread = QtCore.QThread()
             self.worker.moveToThread(self.worker_thread)
             self.worker_thread.started.connect(self.worker.run)
@@ -721,7 +848,7 @@ class PhotocurrentTab(BaseMeasurementTab):
         except Exception as ex:
             self.append_log(str(ex))
             self.end_run_logging("error", str(ex))
-            self.device_manager.release(self._required_devices())
+            self.release_run_devices()
 
     def stop_run(self):
         if self.worker:
@@ -733,7 +860,7 @@ class PhotocurrentTab(BaseMeasurementTab):
             self.worker.deleteLater()
             self.worker = None
         self.worker_thread = None
-        self.device_manager.release(self._required_devices())
+        self.release_run_devices()
         self.run_panel.set_running(False)
         self._update_manual_buttons()
 

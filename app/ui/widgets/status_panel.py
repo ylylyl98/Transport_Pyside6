@@ -26,6 +26,7 @@ class DeviceStatusItem(QtWidgets.QWidget):
         self.name = name
         self.label_text = label_text
         self._detail = ""
+        self._state = "idle"
 
         layout = QtWidgets.QHBoxLayout(self)
         layout.setContentsMargins(8, 6, 8, 6)
@@ -39,7 +40,8 @@ class DeviceStatusItem(QtWidgets.QWidget):
         self.lbl_state.setProperty("role", "status-pill")
 
         self.btn_details = QtWidgets.QToolButton()
-        self.btn_details.setText("Details")
+        self.btn_details.setText("…")
+        self.btn_details.setFixedWidth(24)
         self.btn_details.setAutoRaise(True)
         self.btn_details.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_details.setProperty("role", "status-detail")
@@ -57,6 +59,7 @@ class DeviceStatusItem(QtWidgets.QWidget):
     def set_status(self, state: str, detail: Optional[str] = None):
         detail = (detail or "").strip()
         self._detail = detail
+        self._state = state
         summary = self.STATUS_TEXT.get(state, state.title())
         self.lbl_state.setText(summary)
         self.lbl_state.setProperty("status", state)
@@ -72,9 +75,16 @@ class DeviceStatusItem(QtWidgets.QWidget):
         self.lbl_name.setToolTip(tooltip)
         self.lbl_state.setToolTip(tooltip)
 
-        self.btn_details.setVisible(bool(detail))
+        # Successful connection details are already available as a tooltip
+        # and in the connection summary. Keep the narrow sidebar action only
+        # for states that need operator attention.
+        self.btn_details.setVisible(bool(detail) and state in {"err", "warn"})
         if detail:
-            self.btn_details.setToolTip("Open the full technical error details")
+            self.btn_details.setToolTip(
+                "Open the full technical error details"
+                if state == "err"
+                else "Open the full connection details"
+            )
         else:
             self.btn_details.setToolTip("")
 
@@ -83,8 +93,16 @@ class DeviceStatusItem(QtWidgets.QWidget):
             return
         dialog = QtWidgets.QMessageBox(self)
         dialog.setWindowTitle(f"{self.label_text} Details")
-        dialog.setIcon(QtWidgets.QMessageBox.Icon.Warning)
-        dialog.setText(f"{self.label_text} reported an error.")
+        dialog.setIcon(
+            QtWidgets.QMessageBox.Icon.Warning
+            if self._state in {"err", "warn"}
+            else QtWidgets.QMessageBox.Icon.Information
+        )
+        dialog.setText(
+            f"{self.label_text} reported an error."
+            if self._state == "err"
+            else f"{self.label_text} connection details."
+        )
         dialog.setInformativeText("Full technical details:")
         dialog.setDetailedText(self._detail)
         dialog.setStandardButtons(QtWidgets.QMessageBox.StandardButton.Ok)
@@ -98,6 +116,7 @@ class StatusPanel(QtWidgets.QGroupBox):
         "g3": "G3 / Vds",
         "daq": "DAQ",
         "mono": "Mono",
+        "lockin": "Lock-in",
     }
 
     def __init__(self, names: List[str], parent=None, columns: int | None = None):

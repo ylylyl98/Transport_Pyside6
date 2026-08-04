@@ -4,10 +4,12 @@ from typing import Iterable, List
 
 from PyQt6 import QtWidgets
 
+from app.ui.widgets.safe_combo import SafeComboBox
+
 SAVED_PREFIX = "[saved] "
 
 
-class ResourceComboBox(QtWidgets.QComboBox):
+class ResourceComboBox(SafeComboBox):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setEditable(True)

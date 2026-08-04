@@ -4,12 +4,30 @@ from PyQt6 import QtCore, QtWidgets
 
 from app.constants import GATE_BIAS_RAMP_STEP_T, GATE_BIAS_RAMP_STEP_V, SAFE_RAMP_STEP_T, SAFE_RAMP_STEP_V
 from app.device_manager import DeviceManager
+from app.gate_transform import (
+    RATIO_TARGET_VBG,
+    RATIO_TARGET_VTG,
+    gates_to_derived,
+    normalize_ratio_target,
+    ratio_formula_text,
+)
 from app.models import CoParams, Connections, SaveRoot
+from app.plot_x_axis import (
+    FOLLOW_SWEEP,
+    PLOT_X_AXES,
+    normalize_plot_x_selection,
+    plot_x_axis_label,
+    record_x_value,
+    resolve_map_x_axis,
+)
 from app.result_channels import compare_channel_options, plot_channel_options, plot_channel_value
 from app.run_output import build_planned_output, planned_output_warning
+from app.signal_chain import SignalChainSnapshot, signal_chain_filename_parts, signal_chain_metadata
 from app.ui.helpers import apply_tooltip, configure_volt_spinbox, flash_button_success, set_standard_input_height, style_form_layout
 from app.ui.tabs.base_tab import BaseMeasurementTab
 from app.ui.widgets.collapsible_section import CollapsibleSection
+from app.ui.widgets.safe_combo import SafeComboBox
+from app.ui.widgets.safe_spinbox import SafeDoubleSpinBox, SafeSpinBox
 from app.ui.widgets.status_panel import SectionHeader, StatusPanel
 from app.utils import _frange_inc, safe_ramp
 from app.workers.cosweep import CoSweepWorker
@@ -20,11 +38,14 @@ COSWEEP_PANEL_MAX_WIDTH = 560
 
 
 class CoSweepTab(BaseMeasurementTab):
-    def __init__(self, save: SaveRoot, conns: Connections, device_manager: DeviceManager, get_global_rates_callable=None, get_ao_items_callable=None):
+    SETTINGS_PREFIX = "tabs/map_2d"
+
+    def __init__(self, save: SaveRoot, conns: Connections, device_manager: DeviceManager, get_global_rates_callable=None, get_ao_items_callable=None, get_signal_chain_callable=None):
         self.save = save
         self.conns = conns
         self.device_manager = device_manager
         self.get_global_rates = get_global_rates_callable or (lambda: (1e7, 100.0))
+        self.get_signal_chain = get_signal_chain_callable or SignalChainSnapshot
         self.get_ao_items = get_ao_items_callable or (lambda: ["ao0", "ao1"])
         self.p = CoParams()
         self.s_g1 = self.s_g2 = self.s_g3 = self.s_daq = None
@@ -43,6 +64,8 @@ class CoSweepTab(BaseMeasurementTab):
         self.device_manager.status_changed.connect(self._on_device_status_changed)
         self.device_manager.operation_changed.connect(self._on_operation_changed)
         self._sync_sessions_from_manager()
+        self._load_tab_settings()
+        self._bind_tab_settings()
         self._update_manual_buttons()
         self.on_fast_combo_changed()
 
@@ -51,22 +74,25 @@ class CoSweepTab(BaseMeasurementTab):
         grp_setup = QtWidgets.QGroupBox("Sweep Setup")
         form_setup = QtWidgets.QFormLayout(grp_setup)
         style_form_layout(form_setup)
-        self.cbo_sweep_dim = QtWidgets.QComboBox()
+        self.cbo_sweep_dim = SafeComboBox()
         self.cbo_sweep_dim.addItems(["1D sweep", "2D map"])
         self.cbo_sweep_dim.setCurrentText("2D map")
         self.chk_link = QtWidgets.QCheckBox("Plot as Doping/E-field axes")
         self.chk_link.setToolTip("Changes only the preview and plotted x-axis labels. Hardware control still uses the raw Vtg/Vbg/Vds grid.")
-        self.cbo_fast = QtWidgets.QComboBox()
+        self.cbo_fast = SafeComboBox()
         self.cbo_fast.addItems(["Vtg", "Vbg", "Vds"])
-        self.cbo_slow = QtWidgets.QComboBox()
+        self.cbo_slow = SafeComboBox()
         self.cbo_slow.addItems(["None", "Vtg", "Vbg", "Vds"])
         self.cbo_slow.setCurrentText("Vbg")
-        self.cbo_source = QtWidgets.QComboBox()
+        self.cbo_source = SafeComboBox()
         self.cbo_source.addItems(["Keithley 2400"])
-        self.sp_ratio = QtWidgets.QDoubleSpinBox()
+        self.sp_ratio = SafeDoubleSpinBox()
         self.sp_ratio.setDecimals(4)
         self.sp_ratio.setRange(-1e4, 1e4)
         self.sp_ratio.setValue(1.0)
+        self.cbo_ratio_target = SafeComboBox()
+        self.cbo_ratio_target.addItem("Vbg (back gate)", RATIO_TARGET_VBG)
+        self.cbo_ratio_target.addItem("Vtg (top gate)", RATIO_TARGET_VTG)
         self.lbl_sweep_summary = QtWidgets.QLabel()
         self.lbl_sweep_summary.setWordWrap(True)
         self.lbl_sweep_summary.setProperty("role", "hint")
@@ -75,22 +101,24 @@ class CoSweepTab(BaseMeasurementTab):
             QtWidgets.QSizePolicy.Policy.Ignored,
             QtWidgets.QSizePolicy.Policy.Preferred,
         )
-        plot_note = QtWidgets.QLabel("(Plot-only: Doping = Vtg + r*Vbg; E-field = Vtg - r*Vbg.)")
-        plot_note.setWordWrap(True)
-        plot_note.setMinimumWidth(0)
-        plot_note.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Preferred)
+        self.lbl_ratio_formula = QtWidgets.QLabel()
+        self.lbl_ratio_formula.setWordWrap(True)
+        self.lbl_ratio_formula.setMinimumWidth(0)
+        self.lbl_ratio_formula.setProperty("role", "hint")
+        self.lbl_ratio_formula.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Preferred)
         lbl_mode = QtWidgets.QLabel("Sweep Type:")
         lbl_fast = QtWidgets.QLabel("Fast Axis:")
         lbl_slow = QtWidgets.QLabel("Slow Axis:")
         lbl_source = QtWidgets.QLabel("Vds Source:")
-        lbl_ratio = QtWidgets.QLabel("Back-gate ratio r:")
+        lbl_ratio = QtWidgets.QLabel("Ratio r:")
         form_setup.addRow(lbl_mode, self.cbo_sweep_dim)
         form_setup.addRow(lbl_fast, self.cbo_fast)
         form_setup.addRow(lbl_slow, self.cbo_slow)
         form_setup.addRow(lbl_source, self.cbo_source)
         form_setup.addRow(self.chk_link)
+        form_setup.addRow("Ratio multiplies:", self.cbo_ratio_target)
         form_setup.addRow(lbl_ratio, self.sp_ratio)
-        form_setup.addRow("", plot_note)
+        form_setup.addRow("", self.lbl_ratio_formula)
         form_setup.addRow(QtWidgets.QLabel("Summary:"), self.lbl_sweep_summary)
         ctl_layout.addWidget(grp_setup)
 
@@ -112,9 +140,9 @@ class CoSweepTab(BaseMeasurementTab):
         lay_vars.setColumnStretch(3, 1)
         lay_vars.setColumnStretch(4, 1)
 
-        self.sp_vtg_start = QtWidgets.QDoubleSpinBox()
-        self.sp_vtg_stop = QtWidgets.QDoubleSpinBox()
-        self.sp_vtg_step = QtWidgets.QDoubleSpinBox()
+        self.sp_vtg_start = SafeDoubleSpinBox()
+        self.sp_vtg_stop = SafeDoubleSpinBox()
+        self.sp_vtg_step = SafeDoubleSpinBox()
         configure_volt_spinbox(self.sp_vtg_start, 0.0)
         configure_volt_spinbox(self.sp_vtg_stop, 1.0)
         configure_volt_spinbox(self.sp_vtg_step, 0.1)
@@ -128,9 +156,9 @@ class CoSweepTab(BaseMeasurementTab):
         lay_vars.addWidget(self.sp_vtg_step, 1, 4)
         lay_vars.addWidget(self.btn_set_vtg, 1, 5)
 
-        self.sp_vbg_start = QtWidgets.QDoubleSpinBox()
-        self.sp_vbg_stop = QtWidgets.QDoubleSpinBox()
-        self.sp_vbg_step = QtWidgets.QDoubleSpinBox()
+        self.sp_vbg_start = SafeDoubleSpinBox()
+        self.sp_vbg_stop = SafeDoubleSpinBox()
+        self.sp_vbg_step = SafeDoubleSpinBox()
         configure_volt_spinbox(self.sp_vbg_start, 0.0)
         configure_volt_spinbox(self.sp_vbg_stop, 1.0)
         configure_volt_spinbox(self.sp_vbg_step, 0.1)
@@ -144,9 +172,9 @@ class CoSweepTab(BaseMeasurementTab):
         lay_vars.addWidget(self.sp_vbg_step, 2, 4)
         lay_vars.addWidget(self.btn_set_vbg, 2, 5)
 
-        self.sp_vds_start = QtWidgets.QDoubleSpinBox()
-        self.sp_vds_stop = QtWidgets.QDoubleSpinBox()
-        self.sp_vds_step = QtWidgets.QDoubleSpinBox()
+        self.sp_vds_start = SafeDoubleSpinBox()
+        self.sp_vds_stop = SafeDoubleSpinBox()
+        self.sp_vds_step = SafeDoubleSpinBox()
         configure_volt_spinbox(self.sp_vds_start, 0.0)
         configure_volt_spinbox(self.sp_vds_stop, 0.0)
         configure_volt_spinbox(self.sp_vds_step, 0.01)
@@ -170,39 +198,48 @@ class CoSweepTab(BaseMeasurementTab):
         grp_time = QtWidgets.QGroupBox("Timing")
         form_time = QtWidgets.QFormLayout(grp_time)
         style_form_layout(form_time)
-        self.sp_delay = QtWidgets.QDoubleSpinBox()
+        self.sp_delay = SafeDoubleSpinBox()
         self.sp_delay.setDecimals(3)
         self.sp_delay.setRange(0.0, 30.0)
         self.sp_delay.setValue(0.5)
-        self.sp_nsamp = QtWidgets.QSpinBox()
+        self.sp_nsamp = SafeSpinBox()
         self.sp_nsamp.setRange(1, 1000)
         self.sp_nsamp.setValue(3)
-        self.sp_vg_ramp = QtWidgets.QDoubleSpinBox()
-        self.sp_vg_ramp.setDecimals(3)
-        self.sp_vg_ramp.setRange(1e-3, 5.0)
-        self.sp_vg_ramp.setValue(0.2)
         lbl_delay = QtWidgets.QLabel("Delay (s):")
         lbl_avg = QtWidgets.QLabel("Averages:")
-        lbl_ramp = QtWidgets.QLabel("Gate Step (V):")
         form_time.addRow(lbl_delay, self.sp_delay)
         form_time.addRow(lbl_avg, self.sp_nsamp)
-        form_time.addRow(lbl_ramp, self.sp_vg_ramp)
-        ctl_layout.addWidget(grp_time)
+        self.exp_timing = CollapsibleSection("Timing", grp_time, expanded=False)
+        ctl_layout.addWidget(self.exp_timing)
 
         ctl_layout.addWidget(SectionHeader("Output"))
         grp_output = QtWidgets.QGroupBox("Output Settings")
         form_output = QtWidgets.QFormLayout(grp_output)
         style_form_layout(form_output)
         self.ed_base = QtWidgets.QLineEdit(self.p.base_name)
-        self.cbo_y = QtWidgets.QComboBox()
+        self.cbo_x = SafeComboBox()
+        for axis in PLOT_X_AXES:
+            self.cbo_x.addItem(axis, axis)
+        self.lbl_x_resolved = QtWidgets.QLabel()
+        self.lbl_x_resolved.setWordWrap(True)
+        self.lbl_x_resolved.setProperty("role", "hint")
+        self.cbo_y = SafeComboBox()
         self.cbo_y.addItems(["Ids_DC", "Ids_X", "Ids_Y"])
         lbl_base = QtWidgets.QLabel("Filename Stem:")
-        lbl_y = QtWidgets.QLabel("Plot Axis:")
+        lbl_x = QtWidgets.QLabel("Plot X Axis:")
+        lbl_y = QtWidgets.QLabel("Plot Y Axis:")
         form_output.addRow(lbl_base, self.ed_base)
+        form_output.addRow(lbl_x, self.cbo_x)
+        form_output.addRow("", self.lbl_x_resolved)
         form_output.addRow(lbl_y, self.cbo_y)
-        self.exp_output = CollapsibleSection("Output and Plot Options", grp_output, expanded=True)
+        output_content = QtWidgets.QWidget()
+        output_layout = QtWidgets.QVBoxLayout(output_content)
+        output_layout.setContentsMargins(0, 0, 0, 0)
+        output_layout.setSpacing(4)
+        output_layout.addWidget(grp_output)
+        self._add_output_preview_section(output_layout)
+        self.exp_output = CollapsibleSection("Output, Plot, and Files", output_content, expanded=False)
         ctl_layout.addWidget(self.exp_output)
-        self._add_output_preview_section(ctl_layout)
 
         self.lbl_connection_hint = QtWidgets.QLabel()
         self.lbl_connection_hint.setWordWrap(True)
@@ -221,8 +258,9 @@ class CoSweepTab(BaseMeasurementTab):
             self.sp_vtg_start, self.sp_vtg_stop, self.sp_vtg_step,
             self.sp_vbg_start, self.sp_vbg_stop, self.sp_vbg_step,
             self.sp_vds_start, self.sp_vds_stop, self.sp_vds_step,
-            self.sp_delay, self.sp_nsamp, self.sp_vg_ramp,
-            self.ed_base, self.cbo_source, self.cbo_y, self.cbo_fast, self.cbo_slow, self.cbo_sweep_dim, self.sp_ratio,
+            self.sp_delay, self.sp_nsamp,
+            self.ed_base, self.cbo_source, self.cbo_x, self.cbo_y, self.cbo_fast, self.cbo_slow, self.cbo_sweep_dim,
+            self.sp_ratio, self.cbo_ratio_target,
         ]:
             set_standard_input_height(widget)
 
@@ -250,12 +288,13 @@ class CoSweepTab(BaseMeasurementTab):
             self.btn_set_vbg,
             self.btn_set_vds,
         )
-        apply_tooltip("Back-gate weighting r used only when plotting the map as Doping/E-field.", lbl_ratio, self.sp_ratio)
+        apply_tooltip("Choose whether ratio r multiplies Vbg or Vtg in the Doping/E-field definitions.", self.cbo_ratio_target)
+        apply_tooltip("Gate weighting r used when calculating Doping/E-field.", lbl_ratio, self.sp_ratio)
         apply_tooltip("Wait time after each setpoint update before acquiring data.", lbl_delay, self.sp_delay)
         apply_tooltip("Number of DAQ reads averaged at each map point.", lbl_avg, self.sp_nsamp)
-        apply_tooltip("Voltage step size used for gate moves during the sweep.", lbl_ramp, self.sp_vg_ramp)
         apply_tooltip("Show the planned point order without running hardware acquisition.", self.btn_preview)
         apply_tooltip("Base filename for the output CSV.", lbl_base, self.ed_base)
+        apply_tooltip("Follow Sweep uses the fast sweep axis. Choose another recorded coordinate for a display-only override.", lbl_x, self.cbo_x, self.lbl_x_resolved)
         apply_tooltip("Select which current channel is drawn in the live plot.", lbl_y, self.cbo_y)
 
     def _wire(self):
@@ -267,11 +306,13 @@ class CoSweepTab(BaseMeasurementTab):
         self.btn_set_vds.clicked.connect(lambda: self.on_set_generic("Vds", self.btn_set_vds))
         self.cbo_sweep_dim.currentIndexChanged.connect(self.on_sweep_type_changed)
         self.chk_link.toggled.connect(self.update_field_states)
+        self.cbo_ratio_target.currentIndexChanged.connect(self._on_ratio_target_changed)
         self.cbo_fast.currentIndexChanged.connect(self.on_fast_combo_changed)
         self.cbo_slow.currentIndexChanged.connect(self.on_slow_combo_changed)
         self.cbo_source.currentIndexChanged.connect(self._update_connection_hint)
         self.cbo_source.currentIndexChanged.connect(self._update_manual_buttons)
         self.cbo_source.currentIndexChanged.connect(self._update_plot_axis_choices)
+        self.cbo_x.currentIndexChanged.connect(self._on_plot_x_axis_changed)
         self.cbo_y.currentTextChanged.connect(self.set_plot_axis_source)
         self._update_plot_axis_choices()
         self.plot.y_axis_changed.connect(self.set_plot_axis_source)
@@ -293,6 +334,7 @@ class CoSweepTab(BaseMeasurementTab):
             widget.valueChanged.connect(self.refresh_output_preview)
         for widget in (self.cbo_source, self.cbo_fast, self.cbo_slow, self.cbo_sweep_dim):
             widget.currentIndexChanged.connect(self.refresh_output_preview)
+        self.cbo_ratio_target.currentIndexChanged.connect(self.refresh_output_preview)
         self.chk_link.toggled.connect(self.refresh_output_preview)
         self.refresh_output_preview()
 
@@ -344,6 +386,9 @@ class CoSweepTab(BaseMeasurementTab):
                 parts.append(f"{axis}_{start:g}to{stop:g}V")
             else:
                 parts.append(f"fixed_{axis}_{start:g}V")
+        if self.chk_link.isChecked():
+            parts.append(f"ratio_on_{self._ratio_target()}_r_{self.sp_ratio.value():g}")
+        parts.extend(signal_chain_filename_parts(self.get_signal_chain()))
         return parts
 
     def refresh_output_preview(self, *_args):
@@ -358,6 +403,45 @@ class CoSweepTab(BaseMeasurementTab):
         self._output_run_id = planned.run_id
         self._planned_output = planned
         self.set_output_preview_text(planned, planned_output_warning(planned, self.save))
+
+    def _settings_widgets(self):
+        return [
+            ("base_name", self.ed_base),
+            ("source", self.cbo_source),
+            ("plot_x", self.cbo_x),
+            ("plot_y", self.cbo_y),
+            ("sweep_dim", self.cbo_sweep_dim),
+            ("fast_axis", self.cbo_fast),
+            ("slow_axis", self.cbo_slow),
+            ("link_doping_efield", self.chk_link),
+            ("ratio", self.sp_ratio),
+            ("ratio_target", self.cbo_ratio_target),
+            ("vtg_start", self.sp_vtg_start),
+            ("vtg_stop", self.sp_vtg_stop),
+            ("vtg_step", self.sp_vtg_step),
+            ("vbg_start", self.sp_vbg_start),
+            ("vbg_stop", self.sp_vbg_stop),
+            ("vbg_step", self.sp_vbg_step),
+            ("vds_start", self.sp_vds_start),
+            ("vds_stop", self.sp_vds_stop),
+            ("vds_step", self.sp_vds_step),
+            ("delay", self.sp_delay),
+            ("averages", self.sp_nsamp),
+        ]
+
+    def _load_tab_settings(self):
+        self._load_tab_widget_settings(self.SETTINGS_PREFIX, self._settings_widgets())
+        self.on_sweep_type_changed()
+        self._update_plot_axis_choices()
+        self.set_plot_axis_source(self.cbo_y.currentText())
+        self._update_sweep_summary()
+        self.refresh_output_preview()
+
+    def _bind_tab_settings(self):
+        self._bind_tab_widget_settings(self.SETTINGS_PREFIX, self._settings_widgets())
+
+    def save_tab_settings(self):
+        self._save_tab_widget_settings(self.SETTINGS_PREFIX, self._settings_widgets())
 
     def _update_manual_buttons(self):
         self._sync_sessions_from_manager()
@@ -471,9 +555,6 @@ class CoSweepTab(BaseMeasurementTab):
         if self.sp_nsamp.value() < 1:
             QtWidgets.QMessageBox.warning(self, "Invalid Averages", "Averages must be at least 1.")
             return False
-        if self.sp_vg_ramp.value() <= 0:
-            QtWidgets.QMessageBox.warning(self, "Invalid Ramp Step", "Gate Ramp Step must be greater than zero.")
-            return False
         if self.chk_link.isChecked() and not self._link_plot_available():
             QtWidgets.QMessageBox.warning(
                 self,
@@ -558,7 +639,8 @@ class CoSweepTab(BaseMeasurementTab):
         if self._updating_combos:
             return
         self._updating_combos = True
-        self.sp_ratio.setEnabled(self.chk_link.isChecked())
+        self.sp_ratio.setEnabled(True)
+        self.cbo_ratio_target.setEnabled(True)
         self.cbo_slow.setEnabled(self._is_2d_map())
         active_sweep = self._swept_axes()
         for axis in ("Vtg", "Vbg", "Vds"):
@@ -571,7 +653,43 @@ class CoSweepTab(BaseMeasurementTab):
             stop.setVisible(is_swept)
             step.setVisible(is_swept)
         self._updating_combos = False
+        self._update_ratio_formula()
         self._update_sweep_summary()
+        self.on_axis_change_label()
+
+    def _ratio_target(self) -> str:
+        return normalize_ratio_target(self.cbo_ratio_target.currentData() or RATIO_TARGET_VBG)
+
+    def _update_ratio_formula(self) -> None:
+        prefix = "CSV columns and plot axes:\n" if self.chk_link.isChecked() else "Doping/E-field CSV columns:\n"
+        self.lbl_ratio_formula.setText(prefix + ratio_formula_text(self._ratio_target()))
+
+    def _on_ratio_target_changed(self, *_args) -> None:
+        self._update_ratio_formula()
+        self._update_sweep_summary()
+        self.on_axis_change_label()
+
+    def _selected_plot_x_axis(self) -> str:
+        return normalize_plot_x_selection(self.cbo_x.currentData() or self.cbo_x.currentText())
+
+    def _resolved_plot_x_axis(self) -> str:
+        return resolve_map_x_axis(self._selected_plot_x_axis(), self.cbo_fast.currentText())
+
+    def _update_plot_x_resolution_hint(self, resolved_axis: str | None = None) -> None:
+        resolved_axis = resolved_axis or self._resolved_plot_x_axis()
+        prefix = "Following fast sweep" if self._selected_plot_x_axis() == FOLLOW_SWEEP else "Manual override"
+        self.lbl_x_resolved.setText(f"{prefix}: {resolved_axis}")
+
+    def _record_plot_x(self, record: dict) -> float:
+        return record_x_value(record, self._resolved_plot_x_axis())
+
+    def _plot_ratio_context(self) -> tuple[float, str]:
+        if self._plot_records:
+            record = self._plot_records[0]
+            return float(record.get("plot_ratio", self.sp_ratio.value())), str(record.get("plot_ratio_target", self._ratio_target()))
+        return self.sp_ratio.value(), self._ratio_target()
+
+    def _on_plot_x_axis_changed(self, *_args) -> None:
         self.on_axis_change_label()
 
     def _format_axis_summary(self, axis: str) -> str:
@@ -596,17 +714,18 @@ class CoSweepTab(BaseMeasurementTab):
         self.refresh_output_preview()
 
     def on_axis_change_label(self):
-        if self.plot.current_plot_mode() == "4-Channel Compare" and self._plot_records:
+        if self._plot_records:
             self._redraw_plot()
             return
-        fast = self.cbo_fast.currentText()
-        if self.chk_link.isChecked() and self._link_plot_available():
-            r = self.sp_ratio.value()
-            self.plot.ax.set_xlabel(f"Doping (Vtg + {r:.2f}*Vbg)")
-        else:
-            self.plot.ax.set_xlabel(f"{fast} (V)")
+        self._set_plot_x_label(self.plot.ax)
         self.plot.ax.set_ylabel(f"{self.cbo_y.currentText()} (A)")
         self.plot.canvas.draw_idle()
+
+    def _set_plot_x_label(self, axis) -> None:
+        resolved_axis = self._resolved_plot_x_axis()
+        self._update_plot_x_resolution_hint(resolved_axis)
+        ratio, ratio_target = self._plot_ratio_context()
+        axis.set_xlabel(plot_x_axis_label(resolved_axis, ratio, ratio_target))
 
     def _link_plot_available(self) -> bool:
         return bool({"Vtg", "Vbg"} & set(self._swept_axes()))
@@ -632,17 +751,23 @@ class CoSweepTab(BaseMeasurementTab):
                 curr_vtg = f_val if fast_axis == "Vtg" else (s_val if slow_axis == "Vtg" else self.sp_vtg_start.value())
                 curr_vbg = f_val if fast_axis == "Vbg" else (s_val if slow_axis == "Vbg" else self.sp_vbg_start.value())
                 if use_ratio:
-                    ratio = self.sp_ratio.value()
-                    xs.append(curr_vtg + ratio * curr_vbg)
-                    ys.append(curr_vtg - ratio * curr_vbg)
+                    doping, efield = gates_to_derived(
+                        curr_vtg,
+                        curr_vbg,
+                        self.sp_ratio.value(),
+                        self._ratio_target(),
+                    )
+                    xs.append(doping)
+                    ys.append(efield)
                 else:
                     xs.append(f_val)
                     ys.append(s_val if slow_axis != "None" else 0.0)
 
         self.plot.ax.plot(xs, ys, "o-", markersize=4, linewidth=1.0, color="blue", alpha=0.6 if use_ratio else 1.0)
         if use_ratio:
-            self.plot.ax.set_xlabel("Doping (Vtg + r*Vbg)")
-            self.plot.ax.set_ylabel("E-field (Vtg - r*Vbg)")
+            formula_lines = ratio_formula_text(self._ratio_target()).splitlines()
+            self.plot.ax.set_xlabel(formula_lines[0])
+            self.plot.ax.set_ylabel(formula_lines[1])
             self.plot.ax.set_title(f"{self.cbo_sweep_dim.currentText()} Preview: {len(xs)} pts")
         else:
             self.plot.ax.set_xlabel(f"{fast_axis} (V)")
@@ -709,10 +834,13 @@ class CoSweepTab(BaseMeasurementTab):
         self.p.axis_fast = self.cbo_fast.currentText()
         self.p.axis_slow = self.cbo_slow.currentText() if self._is_2d_map() else "None"
         self.p.ratio = self.sp_ratio.value()
+        self.p.ratio_target = self._ratio_target()
+        self.p.plot_x_axis = self._selected_plot_x_axis()
+        self.p.plot_x_resolved = self._resolved_plot_x_axis()
         self.p.delay = self.sp_delay.value()
         self.p.n_sample = self.sp_nsamp.value()
         self.p.plot_choice = self.cbo_y.currentText()
-        self.p.vg_ramp = self.sp_vg_ramp.value()
+        self.p.vg_ramp = GATE_BIAS_RAMP_STEP_V
 
     def start_run(self):
         if self.worker_thread:
@@ -720,6 +848,10 @@ class CoSweepTab(BaseMeasurementTab):
         mw = self.window()
         if hasattr(mw, "refresh_models_from_ui"):
             mw.refresh_models_from_ui()
+        calibration = self.verified_run_calibration()
+        if calibration is None:
+            return
+        amp, lkn, signal_chain = calibration
         self.refresh_output_preview()
         if not self.validate_output_ready(self.save):
             return
@@ -727,18 +859,21 @@ class CoSweepTab(BaseMeasurementTab):
             return
         if not self._validate_required_sessions():
             return
-        claimed, blocked = self.device_manager.mark_in_use(self._required_devices())
+        try:
+            self.collect_params()
+        except Exception as ex:
+            QtWidgets.QMessageBox.warning(self, "Invalid Parameters", str(ex))
+            return
+        claimed, blocked = self.claim_run_devices(self._required_devices())
         if not claimed:
             QtWidgets.QMessageBox.warning(self, "Busy", f"Devices already in use: {', '.join(blocked).upper()}")
             return
-        self.collect_params()
         self._plot_records = []
         self.plot.clear()
         self.set_plot_axis_source(self.p.plot_choice)
         try:
             self.begin_run_logging(self._planned_output, "2D Map" if self._is_2d_map() else "1D Sweep")
-            amp, lkn = self.get_global_rates()
-            self.worker = CoSweepWorker(self.p, self.save, self.conns, g1=self.s_g1, g2=self.s_g2, g3=self.s_g3, daq=self.s_daq, plot_choice=self.p.plot_choice, amp_rate=amp, lkn_rate=lkn)
+            self.worker = CoSweepWorker(self.p, self.save, self.conns, g1=self.s_g1, g2=self.s_g2, g3=self.s_g3, daq=self.s_daq, plot_choice=self.p.plot_choice, amp_rate=amp, lkn_rate=lkn, signal_chain=signal_chain_metadata(signal_chain))
             self.worker_thread = QtCore.QThread()
             self.worker.moveToThread(self.worker_thread)
             self.worker_thread.started.connect(self.worker.run)
@@ -760,7 +895,7 @@ class CoSweepTab(BaseMeasurementTab):
         except Exception as ex:
             self.append_log(str(ex))
             self.end_run_logging("error", str(ex))
-            self.device_manager.release(self._required_devices())
+            self.release_run_devices()
 
     def stop_run(self):
         if self.worker:
@@ -788,7 +923,7 @@ class CoSweepTab(BaseMeasurementTab):
         self._redraw_plot()
 
     def _redraw_plot(self):
-        xs = [record["x"] for record in self._plot_records]
+        xs = [self._record_plot_x(record) for record in self._plot_records]
         if self.plot.current_plot_mode() == "4-Channel Compare":
             axes = self.plot.get_axes()
             channels = self.plot.compare_channels()
@@ -802,12 +937,7 @@ class CoSweepTab(BaseMeasurementTab):
                 axis.set_ylabel(f"{channel} (A)")
                 axis.grid(True)
             if axes:
-                fast = self.cbo_fast.currentText()
-                if self.chk_link.isChecked() and self._link_plot_available():
-                    r = self.sp_ratio.value()
-                    axes[-1].set_xlabel(f"Doping (Vtg + {r:.2f}*Vbg)")
-                else:
-                    axes[-1].set_xlabel(f"{fast} (V)")
+                self._set_plot_x_label(axes[-1])
                 self.plot.canvas.draw_idle()
         else:
             source = self.cbo_y.currentText()
@@ -819,14 +949,16 @@ class CoSweepTab(BaseMeasurementTab):
                 ax.relim()
                 ax.autoscale_view()
             ax.grid(True)
-            self.on_axis_change_label()
+            self._set_plot_x_label(ax)
+            ax.set_ylabel(f"{self.cbo_y.currentText()} (A)")
+            self.plot.canvas.draw_idle()
 
     def _cleanup_thread(self):
         if self.worker:
             self.worker.deleteLater()
             self.worker = None
         self.worker_thread = None
-        self.device_manager.release(self._required_devices())
+        self.release_run_devices()
         self.run_panel.set_running(False)
         self._update_manual_buttons()
 

@@ -6,6 +6,11 @@ from threading import RLock
 from typing import Union, List, Dict, Any, Tuple
 from pyvisa.resources import GPIBInstrument, SerialInstrument
 
+from instruments.visa_resources import alternate_gpib_resources
+
+
+VISA_INTERFACE_NOT_CONFIGURED = -1073807195
+
 
 # base class for all the instruments. Other instruments inherit this class
 class Instrument:
@@ -111,13 +116,53 @@ class PyvisaInstrument(Instrument):
         self._rm: pyvisa.ResourceManager = pyvisa.ResourceManager()
         self._my_instr: Union[GPIBInstrument, SerialInstrument, None] = None
         self._init_timeout: Union[float, None] = timeout
+        self._requested_address = address
 
     def connect(self):
-        self._my_instr = self._rm.open_resource(self._address, timeout=self._init_timeout)
+        requested_address = self._address
+        try:
+            self._my_instr = self._rm.open_resource(requested_address, timeout=self._init_timeout)
+        except pyvisa.errors.VisaIOError as error:
+            if int(error.error_code) != VISA_INTERFACE_NOT_CONFIGURED:
+                raise
+
+            try:
+                resources = tuple(self._rm.list_resources())
+            except pyvisa.Error:
+                resources = ()
+            alternatives = alternate_gpib_resources(requested_address, resources)
+            if len(alternatives) != 1:
+                available = [resource for resource in resources if str(resource).upper().startswith("GPIB")]
+                if len(alternatives) > 1:
+                    detail = f"multiple matching resources were found: {', '.join(alternatives)}"
+                elif available:
+                    detail = f"available GPIB resources are: {', '.join(available)}"
+                else:
+                    detail = "no GPIB resources were detected"
+                raise InstrumentError(
+                    self.name,
+                    f"VISA interface in {requested_address!r} is not configured and {detail}. "
+                    "Select the detected address in Instrument Setup or configure the interface in NI MAX.",
+                ) from error
+
+            resolved_address = alternatives[0]
+            try:
+                self._my_instr = self._rm.open_resource(resolved_address, timeout=self._init_timeout)
+            except pyvisa.Error as retry_error:
+                raise InstrumentError(
+                    self.name,
+                    f"VISA interface in {requested_address!r} is not configured. "
+                    f"The matching resource {resolved_address!r} was detected, but opening it failed: {retry_error}",
+                ) from retry_error
+            self._address = resolved_address
         self._my_instr.read_termination = self.termination
         self._my_instr.write_termination = self.termination
         super().connect()
         return self
+
+    @ property
+    def requested_address(self) -> str:
+        return self._requested_address
 
     def close(self):
         self._my_instr.close()

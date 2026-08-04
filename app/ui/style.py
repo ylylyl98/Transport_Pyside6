@@ -153,6 +153,49 @@ QLabel[role="warning-hint"] {
     font-size: 9pt;
     font-weight: 600;
 }
+QComboBox[sweepLocked="true"], QDoubleSpinBox[sweepLocked="true"], QSpinBox[sweepLocked="true"] {
+    color: #374151;
+    background: #F3F4F6;
+    border-color: #CBD5E1;
+}
+QLabel[role="success-hint"] {
+    color: #15803D;
+    font-size: 9pt;
+    font-weight: 600;
+}
+QDoubleSpinBox[accepted="true"] {
+    border-color: #22C55E;
+    background-color: #F0FDF4;
+}
+QLabel[role="digital-readout"] {
+    background: #111827;
+    color: #D1FAE5;
+    border: 1px solid #374151;
+    border-radius: 6px;
+    padding: 7px 9px;
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 13pt;
+    font-weight: 700;
+}
+QLabel[role="lamp"] {
+    background: #F3F4F6;
+    color: #6B7280;
+    border: 1px solid #D1D5DB;
+    border-radius: 8px;
+    padding: 5px 8px;
+    font-size: 9pt;
+    font-weight: 700;
+}
+QLabel[role="lamp"][state="on"] {
+    background: #FDECEC;
+    color: #9F1239;
+    border-color: #F5C2C7;
+}
+QLabel[role="lamp"][state="off"] {
+    background: #E8F5EE;
+    color: #166534;
+    border-color: #CDE9D7;
+}
 QLabel[role="run-status"] {
     font-size: 12px;
     font-weight: bold;

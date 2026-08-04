@@ -48,6 +48,29 @@ def save_directory(save: SaveRoot, measurement_type: str, create: bool = False) 
     return output_dir
 
 
+def compose_output_stem(
+    device_id: str,
+    measurement_type: str,
+    filename_stem: str,
+    summary_parts: Iterable[str] = (),
+    run_id: str | None = None,
+    filename_measurement_type: str | None = None,
+) -> str:
+    """Build a filename with the user stem as its authoritative run label."""
+    clean_device_id = sanitize_segment(device_id, "device")
+    clean_measurement_type = sanitize_segment(measurement_type, "measurement")
+    clean_user_stem = _sanitize_base(str(filename_stem or ""))
+    fallback_label = sanitize_segment(
+        filename_measurement_type or clean_measurement_type,
+        clean_measurement_type,
+    )
+    filename_label = clean_user_stem or fallback_label
+    clean_parts = [sanitize_segment(part, "") for part in summary_parts]
+    clean_parts = [part for part in clean_parts if part]
+    clean_run_id = sanitize_segment(run_id or new_run_id(), new_run_id())
+    return "_".join([clean_device_id, filename_label, *clean_parts, clean_run_id])
+
+
 def build_planned_output(
     save: SaveRoot,
     measurement_type: str,
@@ -59,17 +82,14 @@ def build_planned_output(
 ) -> PlannedOutput:
     run_id = sanitize_segment(run_id or new_run_id(), new_run_id())
     measurement_type = sanitize_segment(measurement_type, "measurement")
-    device_id = sanitize_segment(save.device_id, "device")
-    clean_stem = _sanitize_base(str(filename_stem or ""))
-    clean_parts = [sanitize_segment(part, "") for part in summary_parts]
-    clean_parts = [part for part in clean_parts if part]
-    filename_measurement_type = sanitize_segment(filename_measurement_type or measurement_type, measurement_type)
-    stem_parts = [device_id, filename_measurement_type]
-    if clean_stem:
-        stem_parts.append(clean_stem)
-    stem_parts.extend(clean_parts)
-    stem_parts.append(run_id)
-    stem = "_".join(stem_parts)
+    stem = compose_output_stem(
+        save.device_id,
+        measurement_type,
+        filename_stem,
+        summary_parts,
+        run_id,
+        filename_measurement_type,
+    )
     output_dir = save_directory(save, measurement_type, create=create_dir)
     return PlannedOutput(
         run_id=run_id,

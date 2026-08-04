@@ -8,7 +8,9 @@ from PyQt6.QtCore import Qt
 from app.app_identity import APP_NAME, configure_qapp, set_windows_app_id
 from app.device_manager import DeviceManager
 from app.settings import get_app_settings
+from app.signal_chain import SignalChainSnapshot
 from app.ui.dock import ConnDock
+from app.ui.lockin_panel import LockinPanel
 from app.ui.style import APP_STYLE
 from app.ui.tabs.cosweep_tab import CoSweepTab
 from app.ui.tabs.dual_gate_tab import DualGateTab
@@ -28,6 +30,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if app is not None and not app.windowIcon().isNull():
             self.setWindowIcon(app.windowIcon())
         self.resize(1400, 860)
+        self.view_menu = self.menuBar().addMenu("View")
 
         self.conn_dock = ConnDock()
         self.conn_dock.load_settings()
@@ -48,14 +51,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.conn_dock.setMinimumHeight(0)
         self.instrument_scroll.setWidget(self.conn_dock)
         self.instrument_dock.setWidget(self.instrument_scroll)
-        self.instrument_dock.setMinimumWidth(240)
+        self.instrument_dock.setMinimumWidth(430)
         self.instrument_dock.setMinimumHeight(0)
         self.instrument_dock.setFeatures(
             QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetClosable
             | QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetMovable
         )
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.instrument_dock)
-        self.menuBar().addMenu("View").addAction(self.instrument_dock.toggleViewAction())
+        self.view_menu.addAction(self.instrument_dock.toggleViewAction())
 
         self.save_root = self.conn_dock.save_root
         self.connections = self.conn_dock.conns
@@ -63,17 +66,38 @@ class MainWindow(QtWidgets.QMainWindow):
         self.conn_dock.set_device_manager(self.device_manager)
         self.refresh_models_from_ui()
 
+        self.lockin_panel = LockinPanel(self.device_manager)
+        self.lockin_panel.sensitivity_read.connect(self.conn_dock.set_lockin_sensitivity_from_sr830)
+        self.conn_dock.lockin_sensitivity_verified.connect(self.lockin_panel.set_verified_sensitivity)
+        self.lockin_panel.stop_sweep_requested.connect(self._stop_active_sweep_for_lockin_settings)
+        self.lockin_dock = QtWidgets.QDockWidget("SRS Lock-in", self)
+        self.lockin_scroll = QtWidgets.QScrollArea()
+        self.lockin_scroll.setWidgetResizable(True)
+        self.lockin_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        self.lockin_scroll.setWidget(self.lockin_panel)
+        self.lockin_dock.setWidget(self.lockin_scroll)
+        self.lockin_dock.setMinimumWidth(360)
+        self.lockin_dock.setFeatures(
+            QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetClosable
+            | QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetMovable
+            | QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetFloatable
+        )
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.lockin_dock)
+        self.view_menu.addAction(self.lockin_dock.toggleViewAction())
+
         self.tabs = QtWidgets.QTabWidget()
         self.setCentralWidget(self.tabs)
-        self.tab_dual = DualGateTab(self.save_root, self.connections, self.device_manager, get_global_rates_callable=self.conn_dock.get_rates)
-        self.tab_cosweep = CoSweepTab(self.save_root, self.connections, self.device_manager, get_global_rates_callable=self.conn_dock.get_rates, get_ao_items_callable=self.tab_dual.get_ao_items_if_available)
-        self.tab_gate_scan = GateScanTab(self.save_root, self.connections, self.device_manager, get_global_rates_callable=self.conn_dock.get_rates, get_ao_items_callable=self.tab_dual.get_ao_items_if_available)
-        self.tab_photocurrent = PhotocurrentTab(self.save_root, self.connections, self.device_manager, get_global_rates_callable=self.conn_dock.get_rates, get_ao_items_callable=self.tab_dual.get_ao_items_if_available)
+        self.tab_dual = DualGateTab(self.save_root, self.connections, self.device_manager, get_global_rates_callable=self.conn_dock.get_rates, get_signal_chain_callable=self.signal_chain_snapshot)
+        self.tab_cosweep = CoSweepTab(self.save_root, self.connections, self.device_manager, get_global_rates_callable=self.conn_dock.get_rates, get_ao_items_callable=self.tab_dual.get_ao_items_if_available, get_signal_chain_callable=self.signal_chain_snapshot)
+        self.tab_gate_scan = GateScanTab(self.save_root, self.connections, self.device_manager, get_global_rates_callable=self.conn_dock.get_rates, get_ao_items_callable=self.tab_dual.get_ao_items_if_available, get_signal_chain_callable=self.signal_chain_snapshot)
+        self.tab_photocurrent = PhotocurrentTab(self.save_root, self.connections, self.device_manager, get_global_rates_callable=self.conn_dock.get_rates, get_ao_items_callable=self.tab_dual.get_ao_items_if_available, get_signal_chain_callable=self.signal_chain_snapshot)
         self.tabs.addTab(self.tab_dual, "Vds Sweep")
         self.tabs.addTab(self.tab_gate_scan, "Gate Scan")
         self.tabs.addTab(self.tab_cosweep, "2D Map")
         self.tabs.addTab(self.tab_photocurrent, "Photocurrent")
         self._bind_save_preview_updates()
+        self.conn_dock.signal_chain_changed.connect(self._on_signal_chain_changed)
+        self.lockin_panel.settings_changed.connect(self._on_signal_chain_changed)
         self._bind_plot_mode_settings()
         self._load_plot_mode_settings()
 
@@ -88,8 +112,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.connections.gate1_mode = c.gate1_mode
         self.connections.gate2_mode = c.gate2_mode
         self.connections.gate3_mode = c.gate3_mode
+        self.connections.gate1_max_voltage_v = c.gate1_max_voltage_v
+        self.connections.gate2_max_voltage_v = c.gate2_max_voltage_v
+        self.connections.gate3_max_voltage_v = c.gate3_max_voltage_v
+        self.connections.gate1_current_compliance_a = c.gate1_current_compliance_a
+        self.connections.gate2_current_compliance_a = c.gate2_current_compliance_a
+        self.connections.gate3_current_compliance_a = c.gate3_current_compliance_a
         self.connections.daq_dev = c.daq_dev
         self.connections.mono = c.mono
+        self.connections.lockin = c.lockin
         self.device_manager.sync_addresses()
 
     def _bind_save_preview_updates(self):
@@ -102,8 +133,34 @@ class MainWindow(QtWidgets.QMainWindow):
             if hasattr(tab, "refresh_output_preview"):
                 tab.refresh_output_preview()
 
+    def signal_chain_snapshot(self) -> SignalChainSnapshot:
+        values = self.conn_dock.signal_chain_values()
+        lockin_connected = self.device_manager.is_connected("lockin")
+        return SignalChainSnapshot(
+            frequency_hz=float(self.lockin_panel.sp_frequency.value()),
+            lockin_sensitivity_v=float(values["lockin_sensitivity_v"]),
+            preamp_sensitivity_a=float(values["preamp_sensitivity_a"]),
+            frequency_source="connected lock-in" if lockin_connected else "saved/manual",
+            lockin_sensitivity_source=str(values["lockin_sensitivity_source"]),
+            preamp_sensitivity_source=str(values["preamp_sensitivity_source"]),
+        )
+
+    def _on_signal_chain_changed(self):
+        for tab in (self.tab_dual, self.tab_gate_scan, self.tab_cosweep, self.tab_photocurrent):
+            tab.refresh_output_preview()
+
+    def _stop_active_sweep_for_lockin_settings(self):
+        for tab in (self.tab_dual, self.tab_gate_scan, self.tab_cosweep, self.tab_photocurrent):
+            if getattr(tab, "worker", None) is not None:
+                tab.stop_run()
+                return
+
     def closeEvent(self, event):
         self._save_plot_mode_settings()
+        for tab in (self.tab_dual, self.tab_gate_scan, self.tab_cosweep, self.tab_photocurrent):
+            if hasattr(tab, "save_tab_settings"):
+                tab.save_tab_settings()
+        self.lockin_panel.save_panel_settings()
         self.conn_dock.save_settings()
         self.device_manager.shutdown()
         event.accept()
@@ -151,33 +208,20 @@ class MainWindow(QtWidgets.QMainWindow):
                 tab.worker.request_stop()
                 tab.log.appendPlainText("!!! EMERGENCY STOP REQUESTED !!!")
 
-        daq_zeroed_log = []
         for tab in tabs:
-            vds_source_text = tab.cbo_source.currentText()
-            if "NI DAQ" in vds_source_text:
-                try:
-                    chan_idx = int(vds_source_text.split()[-1].replace("ao", ""))
-                    daq_zeroed_log.append(f"Zeroed ao{chan_idx} (Vds)")
-                except Exception:
-                    pass
             if hasattr(tab, "run_panel"):
                 tab.run_panel.set_running(False)
 
-        daq_channels = []
-        for entry in daq_zeroed_log:
-            try:
-                daq_channels.append(int(entry.split("ao")[1].split(" ")[0]))
-            except Exception:
-                pass
-        self.device_manager.emergency_stop(daq_channels)
+        daq_channels = self.device_manager.daq_output_channels()
+        self.device_manager.emergency_stop()
 
         msg = "Stop signal sent to all workers.\n\n"
         msg += "Safe ramp started:\n"
         msg += "- Keithley outputs G1, G2, and G3 are being ramped toward 0 V where connected.\n"
-        if daq_zeroed_log:
-            msg += f"- DAQ Vds source requested: {', '.join(set(daq_zeroed_log))}\n"
+        if daq_channels:
+            msg += "- DAQ AO outputs requested: " + ", ".join(f"ao{channel}" for channel in daq_channels) + "\n"
         else:
-            msg += "- DAQ AO channels were not requested because no tab had DAQ selected as Vds source.\n"
+            msg += "- No connected DAQ AO outputs were available to request.\n"
         msg += "\nWatch Instrument Setup status for safe-ramp completion."
         QtWidgets.QMessageBox.critical(self, "Emergency Stop", msg)
 

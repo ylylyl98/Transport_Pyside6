@@ -1,2 +1,6 @@
 # Project-local Python environment created by Transport_App.bat
 .venv/
+
+# Python bytecode and local caches
+__pycache__/
+*.py[cod]

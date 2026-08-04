@@ -1,3 +1,5 @@
+import math
+
 import numpy as np
 import pyvisa
 
@@ -11,20 +13,34 @@ class Keithley2400Base(PyvisaInstrument):
     VOLT_OUTPUT = "voltage"
     CURR_INPUT = "current"
     RES_INPUT = "resistance"
+    MIN_CURRENT_COMPLIANCE_A = 1e-9
+    MAX_CURRENT_COMPLIANCE_A = 1.0
+    CURRENT_RANGES_A = (1e-6, 10e-6, 100e-6, 1e-3, 10e-3, 100e-3, 1.0)
+    DEFAULT_CURRENT_COMPLIANCE_A = 1e-6
+    DEFAULT_SOURCE_VOLTAGE_LIMIT_V = 20.0
+    MIN_SOURCE_VOLTAGE_LIMIT_V = 1e-3
+    MAX_SOURCE_VOLTAGE_LIMIT_V = 200.0
 
     def __init__(
         self,
         name: str = "Keithley",
         address: str = "GPIB1::6",
         curr_comp: float = 1e-8,
-        volt_comp: float = 10.0,
+        max_source_voltage: float = 20.0,
         source_delay: float = 0.2,
         test_mode=False,
+        volt_comp: float | None = None,
     ):
-        self._init_curr_comp = curr_comp
-        self._init_volt_comp = volt_comp
+        # ``volt_comp`` was historically passed as a voltage range. Keep it as
+        # a compatibility alias while using an accurate name internally.
+        if volt_comp is not None:
+            max_source_voltage = volt_comp
+        self._init_curr_comp = self._validated_current_compliance(curr_comp)
+        self._max_source_voltage = self._validated_source_voltage_limit(max_source_voltage)
         self._init_source_delay = source_delay
         self._operating_mode = KEITHLEY_MODE_VOLTAGE_2W
+        self._identity = ""
+        self._connection_start_voltage: float | None = None
         super().__init__(
             name=name,
             address=address,
@@ -37,13 +53,47 @@ class Keithley2400Base(PyvisaInstrument):
     def connect(self):
         try:
             super().connect()
-            self.get_identity()
+            self._identity = self.get_identity().strip()
+            self._connection_start_voltage = self._ramp_existing_voltage_source_to_zero()
             self._write("*CLS")
             self._write(":FORM:ELEM VOLT,CURR")
-        except pyvisa.Error as e:
+        except Exception:
+            if self.connected:
+                try:
+                    super().close()
+                except Exception:
+                    pass
             print(f"Keithley {self.address} connection failed.")
-            raise e
+            raise
         return self
+
+    def _ramp_existing_voltage_source_to_zero(self) -> float | None:
+        """Read and safely zero an existing voltage-source setpoint on connect."""
+        source_function = str(self._query(":SOUR:FUNC?")).strip().upper().replace('"', "").replace("'", "")
+        if "VOLT" not in source_function:
+            return None
+        start = float(self._query(":SOUR:VOLT:LEV?"))
+        if not math.isfinite(start):
+            raise InstrumentError(self.name, "Existing voltage setpoint is not finite; connection was aborted.")
+        if math.isclose(start, 0.0, abs_tol=1e-9):
+            self._output_values[self.VOLT_OUTPUT] = 0.0
+            return start
+
+        from app.constants import SAFE_RAMP_STEP_T, SAFE_RAMP_STEP_V
+        from app.utils import safe_ramp
+
+        def write_existing_voltage(value: float):
+            self._write(":SOUR:VOLT:LEV %.9g" % float(value))
+
+        safe_ramp(
+            write_existing_voltage,
+            start,
+            0.0,
+            SAFE_RAMP_STEP_V,
+            SAFE_RAMP_STEP_T,
+        )
+        self._output_values[self.VOLT_OUTPUT] = 0.0
+        return start
 
     def close(self):
         try:
@@ -55,6 +105,24 @@ class Keithley2400Base(PyvisaInstrument):
     @property
     def operating_mode(self) -> str:
         return self._operating_mode
+
+    @property
+    def identity(self) -> str:
+        return self._identity
+
+    @property
+    def connection_start_voltage(self) -> float | None:
+        return self._connection_start_voltage
+
+    @property
+    def max_source_voltage(self) -> float:
+        return self._max_source_voltage
+
+    @property
+    def current_compliance(self) -> float:
+        if not self.connected:
+            return float(self._init_curr_comp)
+        return float(self._query(":SENS:CURR:PROT?"))
 
     @property
     def source_function(self):
@@ -91,7 +159,6 @@ class Keithley2400Base(PyvisaInstrument):
 
     def set_2wire_voltage_source_mode(self):
         with self.lock:
-            self.turn_off_output()
             self._write("*CLS")
             self._write(":SYST:RSEN OFF")
             self._write(":SOUR:FUNC VOLT")
@@ -100,12 +167,14 @@ class Keithley2400Base(PyvisaInstrument):
             self._write(":SENS:FUNC:CONC ON")
             self._write(":FORM:ELEM VOLT,CURR")
             self._write("TRIG:COUN 1")
-            self._write(":SENS:CURR:RANG %.6e" % self._init_curr_comp)
-            self._write(":SENS:CURR:PROT %.6e" % self._init_curr_comp)
-            self._write(":SOUR:VOLT:RANG %.6e" % self._init_volt_comp)
+            self.set_current_compliance(self._init_curr_comp)
+            self._write(":SOUR:VOLT:RANG %.6e" % self._max_source_voltage)
             self._write("SOUR:DEL %.6e" % self._init_source_delay)
-            self.turn_on_output()
+            self._write(":SOUR:VOLT:LEV 0")
+            self._output_values[self.VOLT_OUTPUT] = 0.0
             self._operating_mode = KEITHLEY_MODE_VOLTAGE_2W
+            self.verify_protection_settings()
+            self.turn_on_output()
 
     def set_4wire_ohm_mode(self):
         with self.lock:
@@ -193,8 +262,143 @@ class Keithley2400Base(PyvisaInstrument):
             return float(self._query(":SOUR:VOLT:LEV?"))
 
     def _write_voltage(self, volt: float):
+        volt = float(volt)
+        if not math.isfinite(volt):
+            raise InstrumentError(self.name, "Voltage setpoint must be finite.")
+        if abs(volt) > self._max_source_voltage + 1e-12:
+            raise InstrumentError(
+                self.name,
+                f"Requested {volt:g} V exceeds the configured ±{self._max_source_voltage:g} V limit.",
+            )
         with self.lock:
             self._write(":SOUR:VOLT:LEV %.6e" % volt)
+
+    def set_current_compliance(self, current_a: float):
+        current_a = self._validated_current_compliance(current_a)
+        with self.lock:
+            # A Keithley 2400 maintains a separate compliance range. Writing
+            # the measurement range first can conflict with the old
+            # compliance range and enqueue +824 ("Cannot exceed compliance
+            # range"). Let the instrument move both ranges together.
+            self._write(":SENS:CURR:RANG:AUTO OFF")
+            self._write(":SENS:CURR:PROT:RSYN ON")
+            self._write(":SENS:CURR:PROT %.6e" % current_a)
+            self._init_curr_comp = current_a
+
+    def apply_protection_settings(
+        self,
+        current_compliance_a: float,
+        max_source_voltage_v: float,
+    ) -> dict[str, object]:
+        """Apply and verify live voltage-source limits without changing output."""
+        current_compliance_a = self._validated_current_compliance(current_compliance_a)
+        max_source_voltage_v = self._validated_source_voltage_limit(max_source_voltage_v)
+        self.recommended_current_range(current_compliance_a)
+        with self.lock:
+            old_compliance = self._init_curr_comp
+            old_voltage_limit = self._max_source_voltage
+            try:
+                self._write("*CLS")
+                self.set_current_compliance(current_compliance_a)
+                self._write(":SOUR:VOLT:RANG %.6e" % max_source_voltage_v)
+                self._max_source_voltage = max_source_voltage_v
+                return self.verify_protection_settings()
+            except Exception:
+                # Keep the software guard conservative and consistent with
+                # the last verified profile after any partial instrument error.
+                self._init_curr_comp = old_compliance
+                self._max_source_voltage = old_voltage_limit
+                raise
+
+    def read_protection_settings(self, include_trip: bool = True) -> dict[str, object]:
+        with self.lock:
+            current_compliance = float(self._query(":SENS:CURR:PROT?"))
+            current_autorange = bool(int(float(self._query(":SENS:CURR:RANG:AUTO?"))))
+            current_range = float(self._query(":SENS:CURR:RANG?"))
+            source_voltage_range = float(self._query(":SOUR:VOLT:RANG?"))
+            tripped = None
+            if include_trip:
+                try:
+                    tripped = bool(int(float(self._query(":SENS:CURR:PROT:TRIP?"))))
+                except Exception:
+                    tripped = None
+            return {
+                "max_source_voltage_v": float(self._max_source_voltage),
+                "source_voltage_range_v": source_voltage_range,
+                "current_range_a": current_range,
+                "current_autorange": current_autorange,
+                "current_compliance_a": current_compliance,
+                "current_compliance_tripped": tripped,
+            }
+
+    def verify_protection_settings(self) -> dict[str, object]:
+        errors = self.read_instrument_errors()
+        if errors:
+            raise InstrumentError(self.name, "Keithley error queue: " + "; ".join(errors))
+        settings = self.read_protection_settings(include_trip=False)
+        actual_compliance = float(settings["current_compliance_a"])
+        actual_range = abs(float(settings["source_voltage_range_v"]))
+        if not math.isclose(actual_compliance, self._init_curr_comp, rel_tol=0.02, abs_tol=1e-15):
+            raise InstrumentError(
+                self.name,
+                f"Current compliance verification failed: requested {self._init_curr_comp:.6g} A, "
+                f"instrument reports {actual_compliance:.6g} A.",
+            )
+        if actual_range + 1e-12 < self._max_source_voltage:
+            raise InstrumentError(
+                self.name,
+                f"Voltage range verification failed: ±{self._max_source_voltage:g} V requested, "
+                f"instrument reports ±{actual_range:g} V.",
+            )
+        return settings
+
+    def read_instrument_errors(self, maximum: int = 32) -> list[str]:
+        """Drain and return nonzero entries from the Keithley error queue."""
+        errors: list[str] = []
+        with self.lock:
+            for _ in range(maximum):
+                response = str(self._query(":SYST:ERR?")).strip()
+                code_text = response.split(",", 1)[0].strip()
+                try:
+                    code = int(float(code_text))
+                except ValueError:
+                    errors.append(response or "Unparseable empty error response")
+                    break
+                if code == 0:
+                    break
+                errors.append(response)
+            else:
+                errors.append("Error queue did not clear")
+        return errors
+
+    @classmethod
+    def recommended_current_range(cls, current_a: float) -> float:
+        """Return the smallest 2400 range compatible with a compliance value."""
+        value = cls._validated_current_compliance(current_a)
+        for current_range in cls.CURRENT_RANGES_A:
+            if current_range * 0.001 <= value <= current_range * 1.05:
+                return float(current_range)
+        raise ValueError(f"No Keithley current range supports {value:g} A compliance.")
+
+    @classmethod
+    def _validated_current_compliance(cls, current_a: float) -> float:
+        value = float(current_a)
+        if not math.isfinite(value) or not cls.MIN_CURRENT_COMPLIANCE_A <= value <= cls.MAX_CURRENT_COMPLIANCE_A:
+            raise ValueError(
+                f"Current compliance must be between {cls.MIN_CURRENT_COMPLIANCE_A:g} A "
+                f"and {cls.MAX_CURRENT_COMPLIANCE_A:g} A."
+            )
+        return value
+
+    @classmethod
+    def _validated_source_voltage_limit(cls, voltage_v: float) -> float:
+        value = float(voltage_v)
+        if not math.isfinite(value) or not cls.MIN_SOURCE_VOLTAGE_LIMIT_V <= value <= cls.MAX_SOURCE_VOLTAGE_LIMIT_V:
+            raise ValueError(
+                f"Maximum source voltage must be between {cls.MIN_SOURCE_VOLTAGE_LIMIT_V:g} V "
+                f"and {cls.MAX_SOURCE_VOLTAGE_LIMIT_V:g} V."
+            )
+        return value
 
     def ramp_voltage(self, target: float, step: float):
         if self._operating_mode != KEITHLEY_MODE_VOLTAGE_2W:
@@ -210,15 +414,25 @@ class Keithley2400Base(PyvisaInstrument):
 
 class Keithley2400VoltMode(Keithley2400Base):
     def connect(self):
-        super().connect()
-        self.configure_mode(KEITHLEY_MODE_VOLTAGE_2W)
+        try:
+            super().connect()
+            self.configure_mode(KEITHLEY_MODE_VOLTAGE_2W)
+        except Exception:
+            if self.connected:
+                self.close()
+            raise
         return self
 
 
 class Keithley2400OhmMode(Keithley2400Base):
     def connect(self):
-        super().connect()
-        self.configure_mode(KEITHLEY_MODE_OHM_4W)
+        try:
+            super().connect()
+            self.configure_mode(KEITHLEY_MODE_OHM_4W)
+        except Exception:
+            if self.connected:
+                self.close()
+            raise
         return self
 
 
