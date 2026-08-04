@@ -1,3 +1,5 @@
+import math
+
 import numpy as np
 import pyvisa
 
@@ -11,20 +13,30 @@ class Keithley2400Base(PyvisaInstrument):
     VOLT_OUTPUT = "voltage"
     CURR_INPUT = "current"
     RES_INPUT = "resistance"
+    MIN_CURRENT_COMPLIANCE_A = 1e-9
+    MAX_CURRENT_COMPLIANCE_A = 1.0
+    MIN_SOURCE_VOLTAGE_LIMIT_V = 1e-3
+    MAX_SOURCE_VOLTAGE_LIMIT_V = 200.0
 
     def __init__(
         self,
         name: str = "Keithley",
         address: str = "GPIB1::6",
         curr_comp: float = 1e-8,
-        volt_comp: float = 10.0,
+        max_source_voltage: float = 20.0,
         source_delay: float = 0.2,
         test_mode=False,
+        volt_comp: float | None = None,
     ):
-        self._init_curr_comp = curr_comp
-        self._init_volt_comp = volt_comp
+        # ``volt_comp`` was historically passed as a voltage range. Keep it as
+        # a compatibility alias while using an accurate name internally.
+        if volt_comp is not None:
+            max_source_voltage = volt_comp
+        self._init_curr_comp = self._validated_current_compliance(curr_comp)
+        self._max_source_voltage = self._validated_source_voltage_limit(max_source_voltage)
         self._init_source_delay = source_delay
         self._operating_mode = KEITHLEY_MODE_VOLTAGE_2W
+        self._identity = ""
         super().__init__(
             name=name,
             address=address,
@@ -37,12 +49,18 @@ class Keithley2400Base(PyvisaInstrument):
     def connect(self):
         try:
             super().connect()
-            self.get_identity()
+            self.turn_off_output()
+            self._identity = self.get_identity().strip()
             self._write("*CLS")
             self._write(":FORM:ELEM VOLT,CURR")
-        except pyvisa.Error as e:
+        except Exception:
+            if self.connected:
+                try:
+                    super().close()
+                except Exception:
+                    pass
             print(f"Keithley {self.address} connection failed.")
-            raise e
+            raise
         return self
 
     def close(self):
@@ -55,6 +73,20 @@ class Keithley2400Base(PyvisaInstrument):
     @property
     def operating_mode(self) -> str:
         return self._operating_mode
+
+    @property
+    def identity(self) -> str:
+        return self._identity
+
+    @property
+    def max_source_voltage(self) -> float:
+        return self._max_source_voltage
+
+    @property
+    def current_compliance(self) -> float:
+        if not self.connected:
+            return float(self._init_curr_comp)
+        return float(self._query(":SENS:CURR:PROT?"))
 
     @property
     def source_function(self):
@@ -100,14 +132,14 @@ class Keithley2400Base(PyvisaInstrument):
             self._write(":SENS:FUNC:CONC ON")
             self._write(":FORM:ELEM VOLT,CURR")
             self._write("TRIG:COUN 1")
-            self._write(":SENS:CURR:RANG %.6e" % self._init_curr_comp)
-            self._write(":SENS:CURR:PROT %.6e" % self._init_curr_comp)
-            self._write(":SOUR:VOLT:RANG %.6e" % self._init_volt_comp)
+            self._write(":SOUR:VOLT:RANG %.6e" % self._max_source_voltage)
+            self.set_current_compliance(self._init_curr_comp)
             self._write("SOUR:DEL %.6e" % self._init_source_delay)
             self._write(":SOUR:VOLT:LEV 0")
             self._output_values[self.VOLT_OUTPUT] = 0.0
-            self.turn_on_output()
             self._operating_mode = KEITHLEY_MODE_VOLTAGE_2W
+            self.verify_protection_settings()
+            self.turn_on_output()
 
     def set_4wire_ohm_mode(self):
         with self.lock:
@@ -195,8 +227,78 @@ class Keithley2400Base(PyvisaInstrument):
             return float(self._query(":SOUR:VOLT:LEV?"))
 
     def _write_voltage(self, volt: float):
+        volt = float(volt)
+        if not math.isfinite(volt):
+            raise InstrumentError(self.name, "Voltage setpoint must be finite.")
+        if abs(volt) > self._max_source_voltage + 1e-12:
+            raise InstrumentError(
+                self.name,
+                f"Requested {volt:g} V exceeds the configured ±{self._max_source_voltage:g} V limit.",
+            )
         with self.lock:
             self._write(":SOUR:VOLT:LEV %.6e" % volt)
+
+    def set_current_compliance(self, current_a: float):
+        current_a = self._validated_current_compliance(current_a)
+        with self.lock:
+            self._write(":SENS:CURR:RANG %.6e" % current_a)
+            self._write(":SENS:CURR:PROT %.6e" % current_a)
+            self._init_curr_comp = current_a
+
+    def read_protection_settings(self, include_trip: bool = True) -> dict[str, object]:
+        with self.lock:
+            current_compliance = float(self._query(":SENS:CURR:PROT?"))
+            source_voltage_range = float(self._query(":SOUR:VOLT:RANG?"))
+            tripped = None
+            if include_trip:
+                try:
+                    tripped = bool(int(float(self._query(":SENS:CURR:PROT:TRIP?"))))
+                except Exception:
+                    tripped = None
+            return {
+                "max_source_voltage_v": float(self._max_source_voltage),
+                "source_voltage_range_v": source_voltage_range,
+                "current_compliance_a": current_compliance,
+                "current_compliance_tripped": tripped,
+            }
+
+    def verify_protection_settings(self) -> dict[str, object]:
+        settings = self.read_protection_settings(include_trip=False)
+        actual_compliance = float(settings["current_compliance_a"])
+        actual_range = abs(float(settings["source_voltage_range_v"]))
+        if not math.isclose(actual_compliance, self._init_curr_comp, rel_tol=0.02, abs_tol=1e-15):
+            raise InstrumentError(
+                self.name,
+                f"Current compliance verification failed: requested {self._init_curr_comp:.6g} A, "
+                f"instrument reports {actual_compliance:.6g} A.",
+            )
+        if actual_range + 1e-12 < self._max_source_voltage:
+            raise InstrumentError(
+                self.name,
+                f"Voltage range verification failed: ±{self._max_source_voltage:g} V requested, "
+                f"instrument reports ±{actual_range:g} V.",
+            )
+        return settings
+
+    @classmethod
+    def _validated_current_compliance(cls, current_a: float) -> float:
+        value = float(current_a)
+        if not math.isfinite(value) or not cls.MIN_CURRENT_COMPLIANCE_A <= value <= cls.MAX_CURRENT_COMPLIANCE_A:
+            raise ValueError(
+                f"Current compliance must be between {cls.MIN_CURRENT_COMPLIANCE_A:g} A "
+                f"and {cls.MAX_CURRENT_COMPLIANCE_A:g} A."
+            )
+        return value
+
+    @classmethod
+    def _validated_source_voltage_limit(cls, voltage_v: float) -> float:
+        value = float(voltage_v)
+        if not math.isfinite(value) or not cls.MIN_SOURCE_VOLTAGE_LIMIT_V <= value <= cls.MAX_SOURCE_VOLTAGE_LIMIT_V:
+            raise ValueError(
+                f"Maximum source voltage must be between {cls.MIN_SOURCE_VOLTAGE_LIMIT_V:g} V "
+                f"and {cls.MAX_SOURCE_VOLTAGE_LIMIT_V:g} V."
+            )
+        return value
 
     def ramp_voltage(self, target: float, step: float):
         if self._operating_mode != KEITHLEY_MODE_VOLTAGE_2W:
@@ -212,15 +314,25 @@ class Keithley2400Base(PyvisaInstrument):
 
 class Keithley2400VoltMode(Keithley2400Base):
     def connect(self):
-        super().connect()
-        self.configure_mode(KEITHLEY_MODE_VOLTAGE_2W)
+        try:
+            super().connect()
+            self.configure_mode(KEITHLEY_MODE_VOLTAGE_2W)
+        except Exception:
+            if self.connected:
+                self.close()
+            raise
         return self
 
 
 class Keithley2400OhmMode(Keithley2400Base):
     def connect(self):
-        super().connect()
-        self.configure_mode(KEITHLEY_MODE_OHM_4W)
+        try:
+            super().connect()
+            self.configure_mode(KEITHLEY_MODE_OHM_4W)
+        except Exception:
+            if self.connected:
+                self.close()
+            raise
         return self
 
 

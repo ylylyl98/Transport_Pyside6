@@ -35,6 +35,7 @@ class ConnDock(QtWidgets.QWidget):
 
     AMP_MIN_A = 1e-12
     LIA_MIN_V = 1e-6
+    MAX_GATE_VOLTAGE_V = 20.0
 
     def __init__(self, device_manager: DeviceManager | None = None):
         super().__init__()
@@ -116,6 +117,49 @@ class ConnDock(QtWidgets.QWidget):
         form_hw.addRow("", self.lbl_scan_status)
         self.exp_hw = CollapsibleSection("Hardware Addresses", grp_hw, expanded=False)
         layout.addWidget(self.exp_hw)
+
+        grp_protection = QtWidgets.QGroupBox("Keithley Protection Limits")
+        protection_layout = QtWidgets.QVBoxLayout(grp_protection)
+        protection_layout.setContentsMargins(8, 14, 8, 8)
+        protection_layout.setSpacing(6)
+        self._protection_controls: dict[str, tuple[ScientificDoubleSpinBox, ScientificDoubleSpinBox]] = {}
+        self._protection_status_labels: dict[str, QtWidgets.QLabel] = {}
+        protection_defaults = {
+            "g1": (self.conns.gate1_max_voltage_v, self.conns.gate1_current_compliance_a, "G1 / Vtg"),
+            "g2": (self.conns.gate2_max_voltage_v, self.conns.gate2_current_compliance_a, "G2 / Vbg"),
+            "g3": (self.conns.gate3_max_voltage_v, self.conns.gate3_current_compliance_a, "G3 / Vds"),
+        }
+        for name, (max_voltage, current_compliance, title) in protection_defaults.items():
+            box = QtWidgets.QGroupBox(title)
+            form = QtWidgets.QFormLayout(box)
+            style_form_layout(form)
+            voltage = ScientificDoubleSpinBox()
+            voltage.setDecimals(9)
+            voltage.setRange(1e-3, self.MAX_GATE_VOLTAGE_V)
+            voltage.setValue(max_voltage)
+            current = ScientificDoubleSpinBox()
+            current.setDecimals(12)
+            current.setRange(1e-9, 1.0)
+            current.setValue(current_compliance)
+            status = QtWidgets.QLabel("Applied on next connection")
+            status.setWordWrap(True)
+            status.setProperty("role", "hint")
+            form.addRow("Max |source| (V):", voltage)
+            form.addRow("Current compliance (A):", current)
+            form.addRow("", status)
+            protection_layout.addWidget(box)
+            self._protection_controls[name] = (voltage, current)
+            self._protection_status_labels[name] = status
+            voltage.editingFinished.connect(self._save_protection_settings)
+            current.editingFinished.connect(self._save_protection_settings)
+        self.lbl_protection_hint = QtWidgets.QLabel(
+            "These limits apply to 2-wire voltage-source mode. Protection controls are locked while connected."
+        )
+        self.lbl_protection_hint.setWordWrap(True)
+        self.lbl_protection_hint.setProperty("role", "hint")
+        protection_layout.addWidget(self.lbl_protection_hint)
+        self.exp_protection = CollapsibleSection("Keithley Protection", grp_protection, expanded=False)
+        layout.addWidget(self.exp_protection)
 
         grp_save = QtWidgets.QGroupBox("Save Settings")
         form_save = QtWidgets.QFormLayout(grp_save)
@@ -223,13 +267,42 @@ class ConnDock(QtWidgets.QWidget):
         form_manual.addRow(lbl_manual_g1, self._make_manual_control_row(*self._manual_gate_controls["g1"]))
         form_manual.addRow(lbl_manual_g2, self._make_manual_control_row(*self._manual_gate_controls["g2"]))
         form_manual.addRow(lbl_manual_g3, self._make_manual_control_row(*self._manual_gate_controls["g3"]))
+        self._manual_daq_controls: dict[int, tuple[SafeDoubleSpinBox, QtWidgets.QPushButton, QtWidgets.QPushButton, QtWidgets.QLabel]] = {}
+        for ao_index in (0, 1):
+            spinbox = SafeDoubleSpinBox()
+            spinbox.setDecimals(6)
+            spinbox.setRange(-10.0, 10.0)
+            spinbox.setSingleStep(0.05)
+            ramp_button = QtWidgets.QPushButton("Ramp")
+            zero_button = QtWidgets.QPushButton("Zero")
+            state_label = QtWidgets.QLabel("Disconnected")
+            state_label.setWordWrap(True)
+            state_label.setProperty("role", "hint")
+            ramp_button.clicked.connect(
+                lambda _checked=False, index=ao_index: self._on_manual_daq_ramp(index)
+            )
+            zero_button.clicked.connect(
+                lambda _checked=False, index=ao_index: self._on_manual_daq_zero(index)
+            )
+            self._manual_daq_controls[ao_index] = (spinbox, ramp_button, zero_button, state_label)
+            form_manual.addRow(
+                f"DAQ AO{ao_index} (V):",
+                self._make_manual_control_row(spinbox, ramp_button, zero_button),
+            )
+            form_manual.addRow("", state_label)
+        self.lbl_daq_manual_hint = QtWidgets.QLabel(
+            "Connecting reads and preserves existing AO voltages. Use Ramp or Zero for controlled changes."
+        )
+        self.lbl_daq_manual_hint.setWordWrap(True)
+        self.lbl_daq_manual_hint.setProperty("role", "hint")
+        form_manual.addRow("DAQ Safety:", self.lbl_daq_manual_hint)
         form_manual.addRow(lbl_manual_wavelength, self._make_manual_control_row(self.sp_manual_wavelength, self.btn_manual_wavelength))
         readback_wrap = QtWidgets.QWidget()
         readback_layout = QtWidgets.QGridLayout(readback_wrap)
         readback_layout.setContentsMargins(0, 0, 0, 0)
         readback_layout.setHorizontalSpacing(8)
         readback_layout.setVerticalSpacing(3)
-        headers = ("Gate", "Set V", "Meas V", "Current", "Mode")
+        headers = ("Gate", "Set V", "Meas V", "Current", "Limit", "Mode")
         for col, text in enumerate(headers):
             label = QtWidgets.QLabel(text)
             label.setProperty("role", "hint")
@@ -242,7 +315,7 @@ class ConnDock(QtWidgets.QWidget):
             gate_label.setProperty("role", "status-name")
             readback_layout.addWidget(gate_label, row, 0)
             self.gate_readback_labels[name] = {}
-            for col, key in enumerate(("set_voltage", "measured_voltage", "current", "mode"), start=1):
+            for col, key in enumerate(("set_voltage", "measured_voltage", "current", "compliance", "mode"), start=1):
                 label = QtWidgets.QLabel("--")
                 label.setProperty("role", "hint")
                 label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
@@ -278,7 +351,9 @@ class ConnDock(QtWidgets.QWidget):
             widget.setMinimumWidth(0)
             widget.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
 
-        for widget in (self.sp_amp, self.sp_lkn, self.sp_manual_g1, self.sp_manual_g2, self.sp_manual_g3, self.sp_manual_wavelength):
+        protection_widgets = [widget for controls in self._protection_controls.values() for widget in controls]
+        daq_widgets = [controls[0] for controls in self._manual_daq_controls.values()]
+        for widget in (self.sp_amp, self.sp_lkn, self.sp_manual_g1, self.sp_manual_g2, self.sp_manual_g3, self.sp_manual_wavelength, *protection_widgets, *daq_widgets):
             widget.setMinimumWidth(0)
             widget.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
 
@@ -287,6 +362,9 @@ class ConnDock(QtWidgets.QWidget):
         apply_tooltip("Address used for the back-gate instrument session.", lbl_g2, self.cbo_g2)
         apply_tooltip("Address used when a tab drives Vds from a Keithley source.", lbl_g3, self.cbo_g3)
         apply_tooltip("Choose whether this Keithley should be configured as a 2-wire voltage source or a 4-wire ohms meter after connection.", self.cbo_g1_mode, self.cbo_g2_mode, self.cbo_g3_mode)
+        for voltage, current in self._protection_controls.values():
+            apply_tooltip("Maximum absolute voltage the app may program on this Keithley.", voltage)
+            apply_tooltip("Hardware current compliance used while this Keithley sources voltage.", current)
         apply_tooltip("DAQ device used for current acquisition and any NI AO-based Vds output.", lbl_daq, self.cbo_daq)
         apply_tooltip("Monochromator / serial resource used by the Photocurrent tab.", lbl_mono, self.cbo_mono)
         apply_tooltip("GPIB resource for the SR830 or SR850 lock-in amplifier control panel.", lbl_lockin, self.cbo_lockin)
@@ -301,9 +379,16 @@ class ConnDock(QtWidgets.QWidget):
         apply_tooltip("Ramp this gate from its current source setpoint to the requested voltage.", lbl_manual_g2, self.sp_manual_g2, self.btn_manual_g2_set)
         apply_tooltip("Ramp this gate from its current source setpoint to the requested voltage.", lbl_manual_g3, self.sp_manual_g3, self.btn_manual_g3_set)
         apply_tooltip("Safely ramp this gate from its current source setpoint to 0 V.", self.btn_manual_g1_zero, self.btn_manual_g2_zero, self.btn_manual_g3_zero)
+        for ao_index, (spinbox, ramp_button, zero_button, state_label) in self._manual_daq_controls.items():
+            apply_tooltip(f"Safely ramp only DAQ AO{ao_index}; other AO channels remain unchanged.", spinbox, ramp_button)
+            apply_tooltip(f"Safely ramp DAQ AO{ao_index} to 0 V.", zero_button)
+            apply_tooltip("Last held command and independently measured AO readback.", state_label)
         apply_tooltip("Move the connected monochromator to this wavelength.", lbl_manual_wavelength, self.sp_manual_wavelength, self.btn_manual_wavelength)
         apply_tooltip("Refresh connected gate voltage and current readback once.", self.btn_read_gate_currents)
         apply_tooltip("Immediately request stop and ramp outputs back to 0 V where supported.", self.btn_stop)
+        for combo in (self.cbo_g1_mode, self.cbo_g2_mode, self.cbo_g3_mode):
+            combo.currentIndexChanged.connect(self._update_protection_controls)
+        self._update_protection_controls()
         self._update_manual_controls()
 
     def get_rates(self):
@@ -416,6 +501,12 @@ class ConnDock(QtWidgets.QWidget):
             gate1_mode=self.cbo_g1_mode.currentData(),
             gate2_mode=self.cbo_g2_mode.currentData(),
             gate3_mode=self.cbo_g3_mode.currentData(),
+            gate1_max_voltage_v=float(self._protection_controls["g1"][0].value()),
+            gate2_max_voltage_v=float(self._protection_controls["g2"][0].value()),
+            gate3_max_voltage_v=float(self._protection_controls["g3"][0].value()),
+            gate1_current_compliance_a=float(self._protection_controls["g1"][1].value()),
+            gate2_current_compliance_a=float(self._protection_controls["g2"][1].value()),
+            gate3_current_compliance_a=float(self._protection_controls["g3"][1].value()),
             daq_dev=self.cbo_daq.current_address(),
             mono=self.cbo_mono.current_address(),
             lockin=self.cbo_lockin.current_address(),
@@ -431,6 +522,9 @@ class ConnDock(QtWidgets.QWidget):
         s.setValue("mode/g1", self.cbo_g1_mode.currentData())
         s.setValue("mode/g2", self.cbo_g2_mode.currentData())
         s.setValue("mode/g3", self.cbo_g3_mode.currentData())
+        for name, (voltage, current) in self._protection_controls.items():
+            s.setValue(f"protection/{name}/max_voltage_v", float(voltage.value()))
+            s.setValue(f"protection/{name}/current_compliance_a", float(current.value()))
         s.setValue("addr/daq", self.cbo_daq.current_address())
         s.setValue("addr/mono", self.cbo_mono.current_address())
         s.setValue("addr/lockin", self.cbo_lockin.current_address())
@@ -439,6 +533,15 @@ class ConnDock(QtWidgets.QWidget):
         s.setValue("path/base", self.ed_base.text())
         s.setValue("rates/amp", float(self.sp_amp.value()))
         s.setValue("rates/lkn", float(self.sp_lkn.value()))
+        s.sync()
+
+    def _save_protection_settings(self, *_args):
+        if not hasattr(self, "_protection_controls"):
+            return
+        s = get_app_settings()
+        for name, (voltage, current) in self._protection_controls.items():
+            s.setValue(f"protection/{name}/max_voltage_v", float(voltage.value()))
+            s.setValue(f"protection/{name}/current_compliance_a", float(current.value()))
         s.sync()
 
     def _save_signal_chain_settings(self, *_args):
@@ -456,6 +559,19 @@ class ConnDock(QtWidgets.QWidget):
         self._set_combo_data(self.cbo_g1_mode, str(s.value("mode/g1", self.conns.gate1_mode)))
         self._set_combo_data(self.cbo_g2_mode, str(s.value("mode/g2", self.conns.gate2_mode)))
         self._set_combo_data(self.cbo_g3_mode, str(s.value("mode/g3", self.conns.gate3_mode)))
+        for index, name in enumerate(("g1", "g2", "g3"), start=1):
+            voltage, current = self._protection_controls[name]
+            voltage.setValue(
+                float(s.value(f"protection/{name}/max_voltage_v", getattr(self.conns, f"gate{index}_max_voltage_v")))
+            )
+            current.setValue(
+                float(
+                    s.value(
+                        f"protection/{name}/current_compliance_a",
+                        getattr(self.conns, f"gate{index}_current_compliance_a"),
+                    )
+                )
+            )
         self.cbo_daq.setCurrentText(str(s.value("addr/daq", self.conns.daq_dev)))
         self.cbo_mono.setCurrentText(str(s.value("addr/mono", self.conns.mono)))
         self.cbo_lockin.setCurrentText(str(s.value("addr/lockin", self.conns.lockin)))
@@ -472,6 +588,7 @@ class ConnDock(QtWidgets.QWidget):
         display_lkn = (saved_lkn / 1000.0) if saved_lkn > 10.0 else saved_lkn
         self.sp_amp.setValue(max(display_amp, self.AMP_MIN_A))
         self.sp_lkn.setValue(max(display_lkn, self.LIA_MIN_V))
+        self._update_protection_controls()
 
     def set_device_manager(self, device_manager: DeviceManager):
         self.device_manager = device_manager
@@ -486,6 +603,7 @@ class ConnDock(QtWidgets.QWidget):
         self.device_manager.operation_changed.connect(self._on_operation_changed)
         self.device_manager.manual_control_finished.connect(self._on_manual_control_finished)
         self.device_manager.gate_currents_read.connect(self._on_gate_currents_read)
+        self.device_manager.daq_output_finished.connect(self._on_daq_output_finished)
         for name in ("g1", "g2", "g3", "daq", "mono", "lockin"):
             self._on_device_status_changed(name, self.device_manager.state(name), self.device_manager.detail(name))
         self._update_reconnect_indicators()
@@ -500,7 +618,9 @@ class ConnDock(QtWidgets.QWidget):
         self.device_manager.disconnect_all()
 
     def _on_device_status_changed(self, name: str, state: str, detail: str):
-        self.dock_status_panel.set_status(name, state, detail if state == "err" else None)
+        self.dock_status_panel.set_status(name, state, detail or None)
+        if name in getattr(self, "_protection_status_labels", {}):
+            self._update_protection_status(name, state, detail)
         if name in getattr(self, "gate_readback_labels", {}) and state != "ok":
             self._set_gate_readback_row(name, {})
         if name == "lockin":
@@ -508,7 +628,13 @@ class ConnDock(QtWidgets.QWidget):
                 QtCore.QTimer.singleShot(0, self.refresh_lockin_sensitivity_from_session)
             elif self._lockin_sensitivity_from_sr830:
                 self._set_lockin_sensitivity_source("Last lock-in value; reconnect to update")
+        if name == "daq":
+            if state == "ok":
+                self._sync_daq_controls_from_session(detail)
+            else:
+                self._clear_daq_controls(detail or "DAQ disconnected")
         self._update_reconnect_indicators()
+        self._update_protection_controls()
         self._update_manual_controls()
 
     def _on_operation_changed(self, busy: bool, message: str):
@@ -537,6 +663,7 @@ class ConnDock(QtWidgets.QWidget):
         self.lbl_connection_status.setToolTip(message)
         self.btn_connection_details.setVisible(bool(message))
         self._update_reconnect_indicators()
+        self._update_protection_controls()
         self._update_manual_controls()
 
     def _on_manual_gate_ramp(self, spinbox: QtWidgets.QDoubleSpinBox):
@@ -546,6 +673,13 @@ class ConnDock(QtWidgets.QWidget):
     def _on_manual_gate_zero(self, spinbox: QtWidgets.QDoubleSpinBox):
         name = next(name for name, (control, _set, _zero) in self._manual_gate_controls.items() if control is spinbox)
         self.device_manager.ramp_gate(name, 0.0)
+
+    def _on_manual_daq_ramp(self, ao_index: int):
+        target = self._manual_daq_controls[ao_index][0].value()
+        self.device_manager.ramp_daq_output(ao_index, target)
+
+    def _on_manual_daq_zero(self, ao_index: int):
+        self.device_manager.ramp_daq_output(ao_index, 0.0)
 
     def _on_manual_wavelength_move(self):
         self.device_manager.set_monochromator_wavelength(self.sp_manual_wavelength.value())
@@ -576,10 +710,29 @@ class ConnDock(QtWidgets.QWidget):
             if isinstance(readback, dict):
                 self._sync_gate_target_from_readback(name, readback)
         self.lbl_manual_hint.setText(message)
-        self.lbl_manual_hint.setProperty("role", "warning-hint" if "unavailable" in message.lower() else "hint")
+        warning = "unavailable" in message.lower() or "compliance" in message.lower()
+        self.lbl_manual_hint.setProperty("role", "warning-hint" if warning else "hint")
         self.lbl_manual_hint.style().unpolish(self.lbl_manual_hint)
         self.lbl_manual_hint.style().polish(self.lbl_manual_hint)
         return
+
+    def _on_daq_output_finished(self, ao_index: int, success: bool, message: str, state: dict):
+        controls = self._manual_daq_controls.get(int(ao_index))
+        if controls is None:
+            return
+        spinbox, ramp_button, zero_button, _state_label = controls
+        self._set_daq_control_state(ao_index, state, message if not success else "")
+        self.lbl_daq_manual_hint.setText(message)
+        self.lbl_daq_manual_hint.setProperty("role", "hint" if success else "warning-hint")
+        self.lbl_daq_manual_hint.style().unpolish(self.lbl_daq_manual_hint)
+        self.lbl_daq_manual_hint.style().polish(self.lbl_daq_manual_hint)
+        if success:
+            commanded = state.get("commanded_v")
+            if commanded is not None:
+                previous = spinbox.blockSignals(True)
+                spinbox.setValue(float(commanded))
+                spinbox.blockSignals(previous)
+            flash_button_success(zero_button if abs(float(commanded or 0.0)) < 1e-9 else ramp_button)
 
     def _set_gate_readback_row(self, name: str, readback: dict):
         labels = self.gate_readback_labels.get(name)
@@ -592,9 +745,18 @@ class ConnDock(QtWidgets.QWidget):
         labels["set_voltage"].setText(self._format_voltage(readback.get("set_voltage")))
         labels["measured_voltage"].setText(self._format_voltage(readback.get("measured_voltage")))
         labels["current"].setText(self._format_current(readback.get("current")))
+        tripped = readback.get("current_compliance_tripped")
+        labels["compliance"].setText("TRIPPED" if tripped is True else "OK" if tripped is False else "--")
+        labels["compliance"].setProperty("role", "warning-hint" if tripped is True else "hint")
+        labels["compliance"].style().unpolish(labels["compliance"])
+        labels["compliance"].style().polish(labels["compliance"])
         labels["mode"].setText(self._short_gate_mode(mode) if connected else "--")
 
         tooltip = error or ("Connected" if connected else "Disconnected")
+        if connected and readback.get("current_compliance_a") is not None:
+            tooltip += f"\nCurrent compliance: {float(readback['current_compliance_a']):.3g} A"
+        if connected and readback.get("max_source_voltage_v") is not None:
+            tooltip += f"\nMaximum source voltage: ±{float(readback['max_source_voltage_v']):g} V"
         for label in labels.values():
             label.setToolTip(tooltip)
 
@@ -646,6 +808,10 @@ class ConnDock(QtWidgets.QWidget):
             self.sp_manual_wavelength.setEnabled(False)
             self.btn_manual_wavelength.setEnabled(False)
             self.btn_read_gate_currents.setEnabled(False)
+            for spinbox, ramp_button, zero_button, _label in self._manual_daq_controls.values():
+                spinbox.setEnabled(False)
+                ramp_button.setEnabled(False)
+                zero_button.setEnabled(False)
             return
         enabled = not self.device_manager.is_busy() and not self.device_manager.current_in_use()
         for name, (spinbox, set_button, zero_button) in self._manual_gate_controls.items():
@@ -663,6 +829,103 @@ class ConnDock(QtWidgets.QWidget):
                 for name in ("g1", "g2", "g3")
             )
         )
+        daq = self.device_manager.get_session("daq") if self.device_manager.is_connected("daq") else None
+        available_ao = set(getattr(daq, "ao_channel_indexes", [])) if daq is not None else set()
+        for ao_index, (spinbox, ramp_button, zero_button, _label) in self._manual_daq_controls.items():
+            ao_enabled = enabled and ao_index in available_ao
+            spinbox.setEnabled(ao_enabled)
+            ramp_button.setEnabled(ao_enabled)
+            zero_button.setEnabled(ao_enabled)
+
+    def _sync_daq_controls_from_session(self, detail: str = ""):
+        session = self.device_manager.get_session("daq") if self.device_manager is not None else None
+        if session is None:
+            return
+        for ao_index, controls in self._manual_daq_controls.items():
+            if ao_index not in getattr(session, "ao_channel_indexes", []):
+                self._set_daq_control_state(ao_index, {}, "Channel unavailable")
+                continue
+            state = session.get_ao_state(ao_index)
+            spinbox = controls[0]
+            if hasattr(session, "get_max_output"):
+                limit = abs(float(session.get_max_output(ao_index)))
+                spinbox.setRange(-limit, limit)
+            previous = spinbox.blockSignals(True)
+            spinbox.setValue(float(state["commanded_v"]))
+            spinbox.blockSignals(previous)
+            self._set_daq_control_state(ao_index, state)
+        nonzero = "Existing DAQ output detected" in detail
+        self.lbl_daq_manual_hint.setText(detail or "DAQ outputs connected and preserved.")
+        self.lbl_daq_manual_hint.setProperty("role", "warning-hint" if nonzero else "hint")
+        self.lbl_daq_manual_hint.style().unpolish(self.lbl_daq_manual_hint)
+        self.lbl_daq_manual_hint.style().polish(self.lbl_daq_manual_hint)
+
+    def _clear_daq_controls(self, message: str):
+        for ao_index in self._manual_daq_controls:
+            self._set_daq_control_state(ao_index, {}, message)
+        self.lbl_daq_manual_hint.setText(message)
+        self.lbl_daq_manual_hint.setProperty("role", "hint")
+
+    def _set_daq_control_state(self, ao_index: int, state: dict, error: str = ""):
+        controls = self._manual_daq_controls.get(int(ao_index))
+        if controls is None:
+            return
+        label = controls[3]
+        if error:
+            text = error
+            warning = True
+        elif state:
+            commanded = float(state.get("commanded_v", float("nan")))
+            measured = float(state.get("measured_v", float("nan")))
+            text = f"Held {commanded:+.6f} V | measured {measured:+.6f} V"
+            warning = abs(commanded) > 0.005
+        else:
+            text = "Disconnected"
+            warning = False
+        label.setText(text)
+        label.setProperty("role", "warning-hint" if warning else "hint")
+        label.style().unpolish(label)
+        label.style().polish(label)
+
+    def _update_protection_status(self, name: str, state: str, detail: str):
+        label = self._protection_status_labels[name]
+        if state == "ok":
+            text = detail or "Protection applied and verified."
+            warning = False
+        elif state == "err":
+            text = detail or "Protection could not be applied."
+            warning = True
+        else:
+            text = "Applied on next connection"
+            warning = False
+        label.setText(text)
+        label.setProperty("role", "warning-hint" if warning else "hint")
+        label.style().unpolish(label)
+        label.style().polish(label)
+
+    def _update_protection_controls(self):
+        if not hasattr(self, "_protection_controls"):
+            return
+        modes = {
+            "g1": self.cbo_g1_mode.currentData(),
+            "g2": self.cbo_g2_mode.currentData(),
+            "g3": self.cbo_g3_mode.currentData(),
+        }
+        busy = bool(self.device_manager and self.device_manager.is_busy())
+        for name, controls in self._protection_controls.items():
+            voltage_mode = modes[name] == "voltage_2w"
+            connected = bool(self.device_manager and self.device_manager.get_session(name) is not None)
+            active_mode = self.device_manager.connected_mode(name) if connected else modes[name]
+            editable = voltage_mode and not connected and not busy
+            for widget in controls:
+                widget.setEnabled(editable)
+            if name in getattr(self, "_manual_gate_controls", {}):
+                limit = float(controls[0].value())
+                self._manual_gate_controls[name][0].setRange(-limit, limit)
+            if active_mode != "voltage_2w":
+                label = self._protection_status_labels[name]
+                label.setText("Inactive in 4-wire Ohms mode")
+                label.setProperty("role", "hint")
 
     def _show_connection_details(self):
         if not self._connection_detail:
@@ -706,13 +969,13 @@ class ConnDock(QtWidgets.QWidget):
                 tooltip = (
                     f"Live session still uses {self.device_manager.connected_address(name)}"
                     f" in {keithley_mode_label(self.device_manager.connected_mode(name)) if name in {'g1','g2','g3'} else 'its current mode'}. "
-                    "Reconnect from Instrument Setup to apply the edited address or mode."
+                    "Reconnect from Instrument Setup to apply the edited address, mode, or protection limits."
                 )
             self._set_reconnect_state(widget, needs, tooltip)
             if name in mode_widgets:
                 self._set_reconnect_state(mode_widgets[name], needs, tooltip)
         self.lbl_reconnect_hint.setText(
-            f"Reconnect required to apply edited address or mode for: {', '.join(changed)}" if changed else ""
+            f"Reconnect required to apply edited address, mode, or protection limits for: {', '.join(changed)}" if changed else ""
         )
 
     def _start_scan(self):

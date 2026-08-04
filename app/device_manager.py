@@ -10,6 +10,13 @@ from app.utils import _safe
 from instruments import DaqCard, Keithley2400OhmMode, Keithley2400VoltMode, SP2300, SRSLockin
 
 
+def _read_keithley_protection(session: object) -> dict[str, object]:
+    if not hasattr(session, "read_protection_settings"):
+        return {}
+    result = session.read_protection_settings()
+    return dict(result) if isinstance(result, dict) else {}
+
+
 class ConnectWorker(QtCore.QThread):
     status_changed = QtCore.pyqtSignal(str, str, str)
     finished_ok = QtCore.pyqtSignal()
@@ -55,6 +62,7 @@ class ManualControlWorker(QtCore.QThread):
         self.success = False
         self.message = ""
         self.gate_readback: dict[str, object] | None = None
+        self.daq_readback: dict[str, float] | None = None
         self._cancel_requested = False
 
     def request_cancel(self):
@@ -95,6 +103,8 @@ class ManualControlWorker(QtCore.QThread):
                 readback_warning = ""
                 try:
                     self.gate_readback = self._read_gate_readback()
+                    if self.gate_readback.get("current_compliance_tripped") is True:
+                        readback_warning = " Warning: current compliance reached."
                 except Exception as ex:
                     self.gate_readback = {
                         "connected": True,
@@ -107,6 +117,29 @@ class ManualControlWorker(QtCore.QThread):
                     readback_warning = f" Readback unavailable: {ex}"
                 action = "safely ramped to 0 V" if zeroing else f"ramped to {self.target:g} V"
                 self.message = f"{self.name.upper()} {action} from {start:g} V.{readback_warning}"
+            elif self.name.startswith("daq_ao"):
+                from app.constants import SAFE_RAMP_STEP_T, SAFE_RAMP_STEP_V
+                from app.utils import safe_ramp
+
+                ao_index = int(self.name.removeprefix("daq_ao"))
+                if hasattr(self.session, "adopt_measured_output_as_ramp_start"):
+                    start = float(self.session.adopt_measured_output_as_ramp_start(ao_index))
+                else:
+                    start = float(self.session.get_ao_value(ao_index))
+                safe_ramp(
+                    lambda value: self.session.set_voltage(ao_index, value),
+                    start,
+                    self.target,
+                    SAFE_RAMP_STEP_V,
+                    SAFE_RAMP_STEP_T,
+                    check_fn=self._check_cancelled,
+                )
+                self.session.acquire()
+                self.daq_readback = self.session.get_ao_state(ao_index)
+                action = "safely ramped to 0 V" if abs(self.target) < 1e-9 else f"ramped to {self.target:g} V"
+                self.message = (
+                    f"DAQ AO{ao_index} {action} from {start:g} V; other AO channels were unchanged."
+                )
             else:
                 self._check_cancelled()
                 self.session.set_wavelength(self.target)
@@ -124,7 +157,7 @@ class ManualControlWorker(QtCore.QThread):
             measured_voltage = getattr(self.session, "voltage", None)
         if current is None:
             current = getattr(self.session, "current", None)
-        return {
+        result = {
             "connected": True,
             "mode": KEITHLEY_MODE_VOLTAGE_2W,
             "set_voltage": None if set_voltage is None else float(set_voltage),
@@ -132,6 +165,8 @@ class ManualControlWorker(QtCore.QThread):
             "current": None if current is None else float(current),
             "error": "",
         }
+        result.update(_read_keithley_protection(self.session))
+        return result
 
 
 class GateCurrentReadWorker(QtCore.QThread):
@@ -146,6 +181,7 @@ class GateCurrentReadWorker(QtCore.QThread):
 
     def run(self):
         failures: list[str] = []
+        warnings: list[str] = []
         for name in ("g1", "g2", "g3"):
             session = self.sessions.get(name)
             mode = self.modes.get(name, "")
@@ -186,6 +222,9 @@ class GateCurrentReadWorker(QtCore.QThread):
                     "current": None if current is None else float(current),
                     "error": "",
                 }
+                self.readbacks[name].update(_read_keithley_protection(session))
+                if self.readbacks[name].get("current_compliance_tripped") is True:
+                    warnings.append(f"{name.upper()}: current compliance reached")
             except Exception as ex:
                 self.readbacks[name] = {
                     "connected": True,
@@ -199,6 +238,8 @@ class GateCurrentReadWorker(QtCore.QThread):
         self.message = "Gate readback refresh complete."
         if failures:
             self.message += " Unavailable: " + "; ".join(failures)
+        if warnings:
+            self.message += " Warning: " + "; ".join(warnings)
 
 
 class EmergencyRampWorker(QtCore.QThread):
@@ -251,6 +292,7 @@ class DeviceManager(QtCore.QObject):
     operation_changed = QtCore.pyqtSignal(bool, str)
     manual_control_finished = QtCore.pyqtSignal(str, bool, str)
     gate_currents_read = QtCore.pyqtSignal(dict, str)
+    daq_output_finished = QtCore.pyqtSignal(int, bool, str, dict)
 
     def __init__(self, connections: Connections):
         super().__init__()
@@ -260,6 +302,9 @@ class DeviceManager(QtCore.QObject):
         self.details: Dict[str, str] = {name: "" for name in self.sessions}
         self._connected_addresses: Dict[str, str] = {name: self._address_for(name) for name in self.sessions}
         self._connected_modes: Dict[str, str] = {name: self._mode_for(name) for name in self.sessions}
+        self._connected_protections: Dict[str, tuple[float, float]] = {
+            name: self._protection_for(name) for name in self.sessions
+        }
         self._in_use: Set[str] = set()
         self._operation_thread: Optional[QtCore.QThread] = None
         self._manual_worker: Optional[ManualControlWorker] = None
@@ -287,6 +332,15 @@ class DeviceManager(QtCore.QObject):
             "lockin": "",
         }[name]
 
+    def _protection_for(self, name: str) -> tuple[float, float]:
+        if name not in {"g1", "g2", "g3"}:
+            return (0.0, 0.0)
+        number = name[-1]
+        return (
+            float(getattr(self.connections, f"gate{number}_max_voltage_v")),
+            float(getattr(self.connections, f"gate{number}_current_compliance_a")),
+        )
+
     def _emit_status(self, name: str, state: str, detail: str = ""):
         self.states[name] = state
         self.details[name] = detail
@@ -311,6 +365,7 @@ class DeviceManager(QtCore.QObject):
         return (
             self._address_for(name) != self._connected_addresses.get(name, "")
             or self._mode_for(name) != self._connected_modes.get(name, "")
+            or self._protection_for(name) != self._connected_protections.get(name, (0.0, 0.0))
         )
 
     def is_voltage_source_mode(self, name: str) -> bool:
@@ -376,7 +431,12 @@ class DeviceManager(QtCore.QObject):
         for name in self.sessions:
             new_addr = self._address_for(name)
             new_mode = self._mode_for(name)
-            if self.sessions[name] is not None and (new_addr != self._connected_addresses.get(name) or new_mode != self._connected_modes.get(name)):
+            new_protection = self._protection_for(name)
+            if self.sessions[name] is not None and (
+                new_addr != self._connected_addresses.get(name)
+                or new_mode != self._connected_modes.get(name)
+                or new_protection != self._connected_protections.get(name)
+            ):
                 changed.append(name)
         for name in changed:
             try:
@@ -385,9 +445,10 @@ class DeviceManager(QtCore.QObject):
                 self._emit_status(name, "err", f"Zero before reconnect failed: {ex}")
                 continue
             self._close_device(name)
-            self._emit_status(name, "idle", "Address changed")
+            self._emit_status(name, "idle", "Connection settings changed")
             self._connected_addresses[name] = self._address_for(name)
             self._connected_modes[name] = self._mode_for(name)
+            self._connected_protections[name] = self._protection_for(name)
 
     def connect_all(self) -> bool:
         if self.is_busy():
@@ -428,6 +489,24 @@ class DeviceManager(QtCore.QObject):
         if not self._manual_control_available(name):
             return False
         self._start_manual_worker(name, self.sessions[name], target)
+        return True
+
+    def ramp_daq_output(self, ao_index: int, target: float) -> bool:
+        ao_index = int(ao_index)
+        if self.is_busy():
+            self.operation_changed.emit(False, "Wait for the current hardware operation to finish.")
+            return False
+        if self._in_use:
+            self.operation_changed.emit(False, "DAQ manual control is unavailable while a measurement is running.")
+            return False
+        if not self.is_connected("daq"):
+            self.operation_changed.emit(False, "Connect the DAQ before using AO manual control.")
+            return False
+        session = self.sessions["daq"]
+        if ao_index not in getattr(session, "ao_channel_indexes", []):
+            self.operation_changed.emit(False, f"DAQ AO{ao_index} is unavailable.")
+            return False
+        self._start_manual_worker(f"daq_ao{ao_index}", session, float(target))
         return True
 
     def set_monochromator_wavelength(self, wavelength_nm: float) -> bool:
@@ -482,6 +561,10 @@ class DeviceManager(QtCore.QObject):
         if name in {"g1", "g2", "g3"}:
             action = "safely ramping to 0 V" if abs(target) < 1e-9 else f"ramping to {target:g} V"
             message = f"{name.upper()} {action}..."
+        elif name.startswith("daq_ao"):
+            ao_index = int(name.removeprefix("daq_ao"))
+            action = "safely ramping to 0 V" if abs(target) < 1e-9 else f"ramping to {target:g} V"
+            message = f"DAQ AO{ao_index} {action}..."
         else:
             message = f"Moving monochromator to {target:g} nm..."
         self.operation_changed.emit(True, message)
@@ -495,6 +578,14 @@ class DeviceManager(QtCore.QObject):
         worker.deleteLater()
         if worker.success and worker.name in {"g1", "g2", "g3"} and worker.gate_readback:
             self.gate_currents_read.emit({worker.name: worker.gate_readback}, worker.message)
+        if worker.name.startswith("daq_ao"):
+            ao_index = int(worker.name.removeprefix("daq_ao"))
+            self.daq_output_finished.emit(
+                ao_index,
+                worker.success,
+                worker.message,
+                dict(worker.daq_readback or {}),
+            )
         self.manual_control_finished.emit(worker.name, worker.success, worker.message)
         if self._pending_emergency_daq_channels is not None:
             daq_channels = self._pending_emergency_daq_channels
@@ -518,9 +609,9 @@ class DeviceManager(QtCore.QObject):
             self._operation_thread = None
 
     def _connect_all_in_thread(self, emitter):
-        self._connect_keithley("g1", curr_comp=1e-7, volt_comp=40, emitter=emitter)
-        self._connect_keithley("g2", curr_comp=1e-7, volt_comp=40, emitter=emitter)
-        self._connect_keithley("g3", curr_comp=1e-6, volt_comp=20, emitter=emitter)
+        self._connect_keithley("g1", emitter=emitter)
+        self._connect_keithley("g2", emitter=emitter)
+        self._connect_keithley("g3", emitter=emitter)
         self._connect_daq(emitter=emitter)
         self._connect_mono(emitter=emitter)
         self._connect_lockin(emitter=emitter)
@@ -531,14 +622,17 @@ class DeviceManager(QtCore.QObject):
                 self._safe_zero_keithley_before_close(session_name)
             except Exception:
                 pass
-        self._close_daq_outputs()
+        # Do not change DAQ AO on a normal disconnect. The last held values
+        # may belong to equipment outside this run; only explicit Ramp/Zero
+        # controls or Emergency Stop are allowed to modify them.
         for name in ("g1", "g2", "g3", "daq", "mono", "lockin"):
             self._close_device(name)
             emitter.emit(name, "idle", "")
 
-    def _connect_keithley(self, name: str, curr_comp: float, volt_comp: float, emitter):
+    def _connect_keithley(self, name: str, emitter):
         address = self._address_for(name)
         mode = self._mode_for(name)
+        max_voltage, current_compliance = self._protection_for(name)
         if not address:
             try:
                 self._safe_zero_keithley_before_close(name)
@@ -548,22 +642,52 @@ class DeviceManager(QtCore.QObject):
             self._close_device(name)
             emitter.emit(name, "idle", "")
             return
-        if self.sessions[name] is not None and self._connected_addresses.get(name) == address and self._connected_modes.get(name) == mode:
-            emitter.emit(name, "ok", keithley_mode_label(mode))
+        if (
+            self.sessions[name] is not None
+            and self._connected_addresses.get(name) == address
+            and self._connected_modes.get(name) == mode
+            and self._connected_protections.get(name) == (max_voltage, current_compliance)
+        ):
+            emitter.emit(name, "ok", self._keithley_detail(name, self.sessions[name], readback=False))
             return
+        session = None
         try:
             self._safe_zero_keithley_before_close(name)
             self._close_device(name)
             session_cls = Keithley2400OhmMode if mode == KEITHLEY_MODE_OHM_4W else Keithley2400VoltMode
-            session = session_cls(name, address, curr_comp=curr_comp, volt_comp=volt_comp)
+            session = session_cls(
+                name,
+                address,
+                curr_comp=current_compliance,
+                max_source_voltage=max_voltage,
+            )
             session.connect()
             self.sessions[name] = session
             self._connected_addresses[name] = address
             self._connected_modes[name] = mode
-            emitter.emit(name, "ok", keithley_mode_label(mode))
+            self._connected_protections[name] = (max_voltage, current_compliance)
+            emitter.emit(name, "ok", self._keithley_detail(name, session))
         except Exception as ex:
+            if session is not None:
+                _safe(session, "close")
             self.sessions[name] = None
             emitter.emit(name, "err", str(ex))
+
+    def _keithley_detail(self, name: str, session: object, readback: bool = True) -> str:
+        mode = self._mode_for(name)
+        mode_text = keithley_mode_label(mode)
+        if mode != KEITHLEY_MODE_VOLTAGE_2W:
+            return f"{mode_text}; voltage-source protection settings are inactive."
+        if readback:
+            protection = session.read_protection_settings(include_trip=False)
+            max_voltage = float(protection["max_source_voltage_v"])
+            current_compliance = float(protection["current_compliance_a"])
+        else:
+            max_voltage, current_compliance = self._connected_protections[name]
+        return (
+            f"{mode_text}; ±{max_voltage:g} V maximum; "
+            f"{current_compliance:.3g} A current compliance."
+        )
 
     def _connect_daq(self, emitter):
         address = self._address_for("daq")
@@ -572,9 +696,10 @@ class DeviceManager(QtCore.QObject):
             emitter.emit("daq", "idle", "")
             return
         if self.sessions["daq"] is not None and self._connected_addresses.get("daq") == address:
-            emitter.emit("daq", "ok", "")
+            emitter.emit("daq", "ok", self._daq_detail(self.sessions["daq"]))
             return
         self._close_device("daq")
+        session = None
         try:
             ao_items = self.get_ao_items()
             ao_indexes = [int(i[2:]) for i in ao_items if i.startswith("ao")]
@@ -582,10 +707,29 @@ class DeviceManager(QtCore.QObject):
             session.connect()
             self.sessions["daq"] = session
             self._connected_addresses["daq"] = address
-            emitter.emit("daq", "ok", "")
+            emitter.emit("daq", "ok", self._daq_detail(session))
         except Exception as ex:
+            if session is not None:
+                _safe(session, "close")
             self.sessions["daq"] = None
             emitter.emit("daq", "err", str(ex))
+
+    @staticmethod
+    def _daq_detail(session: object) -> str:
+        parts = []
+        nonzero = False
+        for ao_index in getattr(session, "ao_channel_indexes", []):
+            state = session.get_ao_state(ao_index)
+            voltage = float(state["commanded_v"])
+            nonzero = nonzero or abs(voltage) > 0.005
+            parts.append(f"AO{ao_index}={voltage:+.6g} V")
+        values = ", ".join(parts) if parts else "no AO channels"
+        if nonzero:
+            return (
+                f"Existing DAQ output detected and preserved: {values}. "
+                "Use Manual Controls to ramp safely to zero or a new value."
+            )
+        return f"DAQ outputs preserved on connection: {values}."
 
     def _connect_mono(self, emitter):
         address = self._address_for("mono")
@@ -635,6 +779,7 @@ class DeviceManager(QtCore.QObject):
         self.sessions[name] = None
         self._connected_addresses[name] = self._address_for(name)
         self._connected_modes[name] = self._mode_for(name)
+        self._connected_protections[name] = self._protection_for(name)
 
     def _safe_zero_keithley_before_close(self, name: str):
         if name not in {"g1", "g2", "g3"}:
@@ -673,25 +818,6 @@ class DeviceManager(QtCore.QObject):
             if index not in unique:
                 unique.append(index)
         return sorted(unique)
-
-    def _close_daq_outputs(self):
-        from app.constants import SAFE_RAMP_STEP_T, SAFE_RAMP_STEP_V
-        from app.utils import safe_ramp
-
-        daq = self.sessions.get("daq")
-        if daq is None:
-            return
-        for idx in self._daq_output_channels():
-            try:
-                safe_ramp(
-                    lambda v, i=idx: daq.set_voltage(i, v),
-                    daq.get_ao_value(idx),
-                    0.0,
-                    SAFE_RAMP_STEP_V,
-                    SAFE_RAMP_STEP_T,
-                )
-            except Exception:
-                pass
 
     def emergency_stop(self, daq_channels: Optional[Iterable[int]] = None):
         daq_channels = self._daq_output_channels(daq_channels)

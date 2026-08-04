@@ -13,6 +13,12 @@ class Connections:
     gate1_mode: str = "voltage_2w"
     gate2_mode: str = "voltage_2w"
     gate3_mode: str = "voltage_2w"
+    gate1_max_voltage_v: float = 20.0
+    gate2_max_voltage_v: float = 20.0
+    gate3_max_voltage_v: float = 20.0
+    gate1_current_compliance_a: float = 1e-7
+    gate2_current_compliance_a: float = 1e-7
+    gate3_current_compliance_a: float = 1e-6
     daq_dev: str = "Dev1"
     mono: str = "ASRL13::INSTR"
     lockin: str = "GPIB1::08::INSTR"

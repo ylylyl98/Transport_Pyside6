@@ -63,7 +63,7 @@ python transport_UI.py
 2. Select the GPIB/serial/DAQ addresses and the operating mode for each Keithley. Use **Scan Hardware** to populate detected resources.
 3. Set the save location, operator name, device ID, amplifier gain, and lock-in gain as appropriate for the experiment.
 4. Click **Connect All** and confirm that the required instruments report an OK status.
-5. Use **Manual Controls** in Instrument Setup when needed: set G1, G2, or G3 individually, safely ramp any gate back to 0 V, or move the monochromator to a wavelength. Gate controls are available only in 2-wire voltage-source mode and while no measurement is active.
+5. Use **Manual Controls** in Instrument Setup when needed: set G1, G2, or G3 individually, safely ramp a gate or DAQ AO back to 0 V, ramp one DAQ AO to a requested value, or move the monochromator to a wavelength. Gate controls are available only in 2-wire voltage-source mode and while no measurement is active.
 6. Select a measurement tab, set its sweep bounds, timing, averaging, source, and file name, then review any preview or estimated sweep information. The Photocurrent tab supports an editable bias recipe: unchecked rows are retained but skipped, every enabled condition creates its own CSV file, and Vds values are available only when a compatible Vds source is connected and explicitly enabled.
 7. Start the measurement and monitor the live plot and status messages. Use the run-level **STOP** or dock-level **STOP / ZERO ALL** if needed.
 8. Review the resulting CSV in the selected save directory.
@@ -85,9 +85,13 @@ CSV writes are flushed during acquisition, which helps preserve data already col
 ## Safety behavior
 
 - The UI limits requested bias values to ±20 V.
+- Instrument Setup provides independent maximum source-voltage and current-compliance profiles for G1, G2, and G3. The app verifies the active Keithley voltage range and current compliance before enabling a voltage-source output.
 - Manual gate moves read the Keithley's present programmed source level, then ramp rather than stepping abruptly. The per-gate **Zero** controls use the stricter safe-ramp step to return that source to 0 V.
-- On normal completion, stop, or disconnect, active outputs are ramped back to 0 V while sessions remain open where possible.
-- **STOP / ZERO ALL** requests all workers to stop, ramps connected Keithley outputs to 0 V, and zeros the selected DAQ Vds channels.
+- Connecting a DAQ reads each AO's existing voltage and adopts it as the ramp starting point without issuing an AO write. A nonzero output is highlighted in Instrument Setup.
+- DAQ AO writes are isolated by channel: changing AO0 does not rewrite AO1. Measured AO readback is kept separate from the held command so readback noise cannot become a new output command.
+- Every DAQ AO write is limited to a maximum 50 mV change. Larger moves must use the per-channel **Ramp** or **Zero** controls, which advance in controlled steps; unused AO channels remain untouched.
+- Normal DAQ disconnect does not zero or rewrite its AO channels. Normal sweep cleanup ramps only the DAQ channel selected by that sweep; Keithley outputs continue to use their existing safe-zero behavior.
+- **STOP / ZERO ALL** requests all workers to stop and safely ramps connected Keithley and requested DAQ AO outputs to 0 V.
 
 Always confirm actual instrument state independently after an error, interrupted connection, or emergency stop.
 

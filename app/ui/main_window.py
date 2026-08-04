@@ -107,6 +107,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.connections.gate1_mode = c.gate1_mode
         self.connections.gate2_mode = c.gate2_mode
         self.connections.gate3_mode = c.gate3_mode
+        self.connections.gate1_max_voltage_v = c.gate1_max_voltage_v
+        self.connections.gate2_max_voltage_v = c.gate2_max_voltage_v
+        self.connections.gate3_max_voltage_v = c.gate3_max_voltage_v
+        self.connections.gate1_current_compliance_a = c.gate1_current_compliance_a
+        self.connections.gate2_current_compliance_a = c.gate2_current_compliance_a
+        self.connections.gate3_current_compliance_a = c.gate3_current_compliance_a
         self.connections.daq_dev = c.daq_dev
         self.connections.mono = c.mono
         self.connections.lockin = c.lockin
