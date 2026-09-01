@@ -1,4 +1,6 @@
 import math
+import time
+from threading import Lock
 from typing import Union, Dict
 import nidaqmx
 import numpy as np
@@ -12,6 +14,8 @@ from instruments import Instrument, InstrumentError
 class DaqCard(Instrument):
 
     MAX_SINGLE_STEP_V = 0.05
+    MAX_RAMP_STEP_V = 0.049
+    DEFAULT_RAMP_DELAY_S = 0.01
 
     def __init__(self,
                  name: str = 'Daq1',
@@ -26,6 +30,7 @@ class DaqCard(Instrument):
         self._ao_task: Union[nidaqmx.Task, None] = None
         self._ao_tasks: Dict[str, nidaqmx.Task] = {}
         self._ai_task: Union[nidaqmx.Task, None] = None
+        self._ramp_lock = Lock()
 
         self._ao_channels: Dict[str, AOChannel] = {}
         self._ai_channels: Dict[str, AIChannel] = {}
@@ -260,7 +265,7 @@ class DaqCard(Instrument):
         self.set_outputs({'ao{}'.format(ao_index): value})
         self.acquire()
 
-    def ramp_voltage(self, ao_index: int, target: float, step: float):
+    def ramp_voltage(self, ao_index: int, target: float, step: float, delay: float = None, check_fn=None):
         target = float(target)
         requested_step = abs(float(step))
         if not math.isfinite(target):
@@ -270,14 +275,27 @@ class DaqCard(Instrument):
         max_output = abs(float(self.get_max_output(int(ao_index))))
         if abs(target) > max_output + 1e-12:
             raise InstrumentError(self.name, f'ao{ao_index} target {target:g} V exceeds its ±{max_output:g} V range.')
-        step = min(requested_step, self.MAX_SINGLE_STEP_V)
-        start = self.adopt_measured_output_as_ramp_start(ao_index)
-        current = start
-        while not np.isclose(current, target, rtol=0.0, atol=1e-12):
-            direction = 1.0 if target > current else -1.0
-            next_value = current + direction * min(step, abs(target - current))
-            self.set_voltage(ao_index, next_value)
-            current = next_value
+        step = min(requested_step, self.MAX_RAMP_STEP_V)
+        delay_s = self.DEFAULT_RAMP_DELAY_S if delay is None else float(delay)
+        if not math.isfinite(delay_s) or delay_s < 0:
+            raise InstrumentError(self.name, 'ramp delay must be finite and non-negative.')
+
+        # Serialize complete ramps separately from the per-I/O instrument lock.
+        # NI reads and writes still take self.lock individually; avoiding a
+        # recursively-held I/O lock prevents driver calls from stalling while
+        # measurement, manual, and emergency ramps remain non-interleaved.
+        with self._ramp_lock:
+            start = self.adopt_measured_output_as_ramp_start(ao_index)
+            current = start
+            while not np.isclose(current, target, rtol=0.0, atol=1e-12):
+                if check_fn is not None:
+                    check_fn()
+                direction = 1.0 if target > current else -1.0
+                next_value = current + direction * min(step, abs(target - current))
+                self.set_voltage(ao_index, next_value)
+                current = next_value
+                if delay_s:
+                    time.sleep(delay_s)
 
     def acquire(self):
         with self.lock:

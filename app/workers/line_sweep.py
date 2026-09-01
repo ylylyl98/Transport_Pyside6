@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import datetime
+import math
 import os
 import time
 
@@ -45,6 +46,9 @@ class LineSweepWorker(RunWorker):
         self.amp_rate = kw.get("amp_rate", 1e7)
         self.lkn_rate = kw.get("lkn_rate", 100.0)
         self.signal_chain = dict(kw.get("signal_chain") or {})
+        self._last_vtg = None
+        self._last_vbg = None
+        self._last_vds = None
 
     @QtCore.pyqtSlot()
     def run(self):
@@ -106,6 +110,7 @@ class LineSweepWorker(RunWorker):
                 GATE_BIAS_RAMP_STEP_T,
                 self.check_abort_pause,
             )
+            self.log.emit(f"G1/Vtg ready at {first['vtg']:.3f} V")
             self.log.emit(
                 f"Ramping G2/Vbg to {first['vbg']:.3f} V "
                 f"({GATE_BIAS_RAMP_STEP_V:g} V/step, {GATE_BIAS_RAMP_STEP_T:g} s/step)"
@@ -118,7 +123,25 @@ class LineSweepWorker(RunWorker):
                 GATE_BIAS_RAMP_STEP_T,
                 self.check_abort_pause,
             )
+            self.log.emit(f"G2/Vbg ready at {first['vbg']:.3f} V")
+            source_label = (
+                f"NI DAQ ao{self.p.ao_channel}"
+                if self.p.vds_source != "Keithley 2400"
+                else "Keithley G3"
+            )
+            self.log.emit(
+                f"Ramping Vds/{source_label} to {first['vds']:.3f} V "
+                f"({SAFE_RAMP_STEP_V:g} V/step, {SAFE_RAMP_STEP_T:g} s/step)"
+            )
             self._safe_ramp_vds(first["vds"], allow_stop=True)
+            self.log.emit(f"Vds/{source_label} ready at {first['vds']:.3f} V")
+            self._last_vtg = float(first["vtg"])
+            self._last_vbg = float(first["vbg"])
+            self._last_vds = float(first["vds"])
+            self.log.emit(
+                "NOTICE: Keithley current compliance remains active as protection. "
+                "A compliance trip does not stop this scan, but requested and actual gate voltage may differ."
+            )
             self.check_abort_pause()
 
             forward_traj = trajectory
@@ -130,8 +153,9 @@ class LineSweepWorker(RunWorker):
 
             with open(csv_path, "x", newline="", buffering=1, encoding="utf-8") as f:
                 w = csv.writer(f)
-                w.writerow(["Index", "Vtg", "Vbg", "Vds", "raw_X", "raw_Y", "raw_DC", "Ids_X", "Ids_Y", "Ids_DC", KEITHLEY_CHANNEL, "Doping", "E-field", "Direction"])
-                w.writerow(["#", "V", "V", "V", "A", "A", "A", "A", "A", "A", "A", "V", "V", ""])
+                w.writerow(["Index", "Vtg", "Vbg", "Vds", "Vds_measured", "raw_X", "raw_Y", "raw_DC", "Ids_X", "Ids_Y", "Ids_DC", KEITHLEY_CHANNEL, "Doping", "E-field", "Direction"])
+                w.writerow(["#", "V", "V", "V", "V", "A", "A", "A", "A", "A", "A", "A", "V", "V", ""])
+                self.log.emit(f"Trajectory acquisition started: {grand_total} points")
                 self._run_trajectory_pass(f, w, forward_traj, "forward", 0, grand_total)
                 if backward_traj:
                     self.check_abort_pause()
@@ -179,13 +203,12 @@ class LineSweepWorker(RunWorker):
                 self.check_abort_pause if allow_stop else None,
             )
         else:
-            safe_ramp(
-                lambda v: self.daq.set_voltage(self.p.ao_channel, v),
-                self.daq.get_ao_value(self.p.ao_channel),
+            self.daq.ramp_voltage(
+                self.p.ao_channel,
                 target,
                 SAFE_RAMP_STEP_V,
                 SAFE_RAMP_STEP_T,
-                self.check_abort_pause if allow_stop else None,
+                check_fn=self.check_abort_pause if allow_stop else None,
             )
 
     def _run_trajectory_pass(self, f, w, trajectory: list, direction: str, idx_offset: int, grand_total: int) -> None:
@@ -210,12 +233,18 @@ class LineSweepWorker(RunWorker):
             ids_y = raw_y / (self.amp_rate * self.lkn_rate)
             ids_dc = raw_dc / self.amp_rate
             ids_keithley = self._read_keithley_current()
+            vds_measured = (
+                self.daq.get_ao_vs_gnd_value(self.p.ao_channel)
+                if self.p.vds_source != "Keithley 2400"
+                else None
+            )
 
             w.writerow([
                 idx_offset + idx - 1,
                 point["vtg"],
                 point["vbg"],
                 point["vds"],
+                vds_measured,
                 raw_x,
                 raw_y,
                 raw_dc,
@@ -243,6 +272,7 @@ class LineSweepWorker(RunWorker):
                 "vtg": point["vtg"],
                 "vbg": point["vbg"],
                 "vds": point["vds"],
+                "vds_measured": vds_measured,
                 "doping": point["doping"],
                 "efield": point["efield"],
                 "plot_ratio": float(self.p.derived_ratio),
@@ -333,12 +363,21 @@ class LineSweepWorker(RunWorker):
         return points
 
     def _apply_point(self, point: dict[str, float]):
-        self.g1.ramp_voltage(point["vtg"], self.p.vg_ramp)
-        self.g2.ramp_voltage(point["vbg"], self.p.vg_ramp)
-        if self.p.vds_source == "Keithley 2400":
-            self.g3.ramp_voltage(point["vds"], self.p.vds_ramp)
-        else:
-            self.daq.ramp_voltage(self.p.ao_channel, point["vds"], self.p.vds_ramp)
+        vtg = float(point["vtg"])
+        vbg = float(point["vbg"])
+        vds = float(point["vds"])
+        if self._last_vtg is None or not math.isclose(self._last_vtg, vtg, abs_tol=1e-12):
+            safe_ramp(self.g1.set_voltage, self._last_vtg or 0.0, vtg, self.p.vg_ramp, GATE_BIAS_RAMP_STEP_T, self.check_abort_pause)
+            self._last_vtg = vtg
+        if self._last_vbg is None or not math.isclose(self._last_vbg, vbg, abs_tol=1e-12):
+            safe_ramp(self.g2.set_voltage, self._last_vbg or 0.0, vbg, self.p.vg_ramp, GATE_BIAS_RAMP_STEP_T, self.check_abort_pause)
+            self._last_vbg = vbg
+        if self._last_vds is None or not math.isclose(self._last_vds, vds, abs_tol=1e-12):
+            if self.p.vds_source == "Keithley 2400":
+                safe_ramp(self.g3.set_voltage, self._last_vds or 0.0, vds, self.p.vds_ramp, SAFE_RAMP_STEP_T, self.check_abort_pause)
+            else:
+                self.daq.ramp_voltage(self.p.ao_channel, vds, self.p.vds_ramp, SAFE_RAMP_STEP_T, check_fn=self.check_abort_pause)
+            self._last_vds = vds
 
     def _read_keithley_current(self):
         if self.p.vds_source != "Keithley 2400" or self.g3 is None:

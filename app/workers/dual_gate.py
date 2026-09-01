@@ -184,13 +184,12 @@ class DualGateWorker(RunWorker):
                 self.check_abort_pause if allow_stop else None,
             )
         else:
-            safe_ramp(
-                lambda v: self.daq.set_voltage(self.p.ao_channel, v),
-                self.daq.get_ao_value(self.p.ao_channel),
+            self.daq.ramp_voltage(
+                self.p.ao_channel,
                 target,
                 SAFE_RAMP_STEP_V,
                 SAFE_RAMP_STEP_T,
-                self.check_abort_pause if allow_stop else None,
+                check_fn=self.check_abort_pause if allow_stop else None,
             )
 
     def _run_vds_pass(self, f, w, vseq: list, direction: str, idx_offset: int, grand_total: int) -> None:

@@ -270,13 +270,7 @@ class PhotocurrentWorker(RunWorker):
                         if self.g3 is not None:
                             safe_ramp(self.g3.set_voltage, self._source_voltage(self.g3), 0.0, SAFE_RAMP_STEP_V, SAFE_RAMP_STEP_T)
                     elif self.p.vds_source.startswith("NI DAQ"):
-                        safe_ramp(
-                            lambda v: self.daq.set_voltage(self.p.ao_channel, v),
-                            self.daq.get_ao_value(self.p.ao_channel),
-                            0.0,
-                            SAFE_RAMP_STEP_V,
-                            SAFE_RAMP_STEP_T,
-                        )
+                        self.daq.ramp_voltage(self.p.ao_channel, 0.0, SAFE_RAMP_STEP_V, SAFE_RAMP_STEP_T)
             except Exception as ex:
                 failures.append(f"Vds zero failed: {ex}")
             self.emit_safe_state_report(failures)
@@ -348,13 +342,12 @@ class PhotocurrentWorker(RunWorker):
                 self.check_abort_pause,
             )
         elif self.p.vds_source.startswith("NI DAQ"):
-            safe_ramp(
-                lambda value: self.daq.set_voltage(self.p.ao_channel, value),
-                self.daq.get_ao_value(self.p.ao_channel),
+            self.daq.ramp_voltage(
+                self.p.ao_channel,
                 target,
                 self.p.vds_ramp,
                 SAFE_RAMP_STEP_T,
-                self.check_abort_pause,
+                check_fn=self.check_abort_pause,
             )
         return target
 

@@ -78,7 +78,7 @@ Files are written under:
 <save base>/<user>/<device ID>/
 ```
 
-The default base directory is `D:\photocurrent\data`; it is configurable in Instrument Setup. CSV files include the applied biases, raw DAQ channels, converted current channels, and—when Vds is driven by Keithley—the measured Keithley current. Gate scans additionally include derived `Doping`, `Efield`, and sweep `Direction` columns; photocurrent scans include `Wavelength`.
+The default base directory is `D:\photocurrent\data`; it is configurable in Instrument Setup. CSV files include the requested biases, raw DAQ channels, converted current channels, and—when Vds is driven by Keithley—the measured Keithley current. Gate Scan and 2D Map also save `Vds_measured` when an NI DAQ AO channel supplies Vds, so the requested trajectory can be compared with the physical AO monitor. Gate scans additionally include derived `Doping`, `Efield`, and sweep `Direction` columns; photocurrent scans include `Wavelength`.
 
 CSV writes are flushed during acquisition, which helps preserve data already collected if a run is interrupted.
 

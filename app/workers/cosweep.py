@@ -112,8 +112,8 @@ class CoSweepWorker(RunWorker):
 
             with open(csv_path, "x", newline="", buffering=1, encoding="utf-8") as f:
                 w = csv.writer(f)
-                w.writerow(["Vtg", "Vbg", "Vds", "raw_X", "raw_Y", "raw_DC", "Ids_X", "Ids_Y", "Ids_DC", KEITHLEY_CHANNEL, "Doping", "E-field", "PassIndex", "FastDirection"])
-                w.writerow(["V", "V", "V", "A", "A", "A", "A", "A", "A", "A", "V", "V", "#", ""])
+                w.writerow(["Vtg", "Vbg", "Vds", "Vds_measured", "raw_X", "raw_Y", "raw_DC", "Ids_X", "Ids_Y", "Ids_DC", KEITHLEY_CHANNEL, "Doping", "E-field", "PassIndex", "FastDirection"])
+                w.writerow(["V", "V", "V", "V", "A", "A", "A", "A", "A", "A", "A", "V", "V", "#", ""])
 
                 if "Vtg" not in active_axes:
                     if self.g1 is not None:
@@ -184,6 +184,11 @@ class CoSweepWorker(RunWorker):
                         ids_y = raw_y / (self.amp_rate * self.lkn_rate)
                         ids_dc = raw_dc / self.amp_rate
                         ids_keithley = self._read_keithley_current()
+                        vds_measured = (
+                            self.daq.get_ao_vs_gnd_value(self.p.ao_channel)
+                            if self.p.vds_source.startswith("NI DAQ")
+                            else None
+                        )
 
                         curr_vtg = f_val if fast_axis == "Vtg" else (s_val if slow_axis == "Vtg" else self.p.vtg_start)
                         curr_vbg = f_val if fast_axis == "Vbg" else (s_val if slow_axis == "Vbg" else self.p.vbg_start)
@@ -195,7 +200,7 @@ class CoSweepWorker(RunWorker):
                             self.p.ratio_target,
                         )
 
-                        w.writerow([curr_vtg, curr_vbg, curr_vds, raw_x, raw_y, raw_dc, ids_x, ids_y, ids_dc, ids_keithley, doping, efield, pass_idx, fast_direction])
+                        w.writerow([curr_vtg, curr_vbg, curr_vds, vds_measured, raw_x, raw_y, raw_dc, ids_x, ids_y, ids_dc, ids_keithley, doping, efield, pass_idx, fast_direction])
                         try:
                             f.flush()
                             os.fsync(f.fileno())
@@ -216,6 +221,7 @@ class CoSweepWorker(RunWorker):
                         self.point_data.emit({
                             "x": x_plot,
                             **point_record,
+                            "vds_measured": vds_measured,
                             "plot_ratio": float(self.p.ratio),
                             "plot_ratio_target": self.p.ratio_target,
                             "Ids_DC": ids_dc,
@@ -253,13 +259,7 @@ class CoSweepWorker(RunWorker):
             try:
                 if self.p.vds_source.startswith("NI DAQ"):
                     if self.daq is not None:
-                        safe_ramp(
-                            lambda v: self.daq.set_voltage(self.p.ao_channel, v),
-                            self.daq.get_ao_value(self.p.ao_channel),
-                            0.0,
-                            SAFE_RAMP_STEP_V,
-                            SAFE_RAMP_STEP_T,
-                        )
+                        self.daq.ramp_voltage(self.p.ao_channel, 0.0, SAFE_RAMP_STEP_V, SAFE_RAMP_STEP_T)
                 elif self.g3 is not None:
                     safe_ramp(self.g3.set_voltage, getattr(self.g3, "voltage", None) or 0.0, 0.0, SAFE_RAMP_STEP_V, SAFE_RAMP_STEP_T)
             except Exception as ex:

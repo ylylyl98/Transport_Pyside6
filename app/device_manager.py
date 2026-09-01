@@ -168,16 +168,12 @@ class ManualControlWorker(QtCore.QThread):
                 self.message = f"{self.name.upper()} {action} from {start:g} V."
             elif self.name.startswith("daq_ao"):
                 from app.constants import SAFE_RAMP_STEP_T, SAFE_RAMP_STEP_V
-                from app.utils import safe_ramp
 
                 ao_index = int(self.name.removeprefix("daq_ao"))
-                if hasattr(self.session, "adopt_measured_output_as_ramp_start"):
-                    start = float(self.session.adopt_measured_output_as_ramp_start(ao_index))
-                else:
-                    start = float(self.session.get_ao_value(ao_index))
-                safe_ramp(
-                    lambda value: self.session.set_voltage(ao_index, value),
-                    start,
+                self._check_cancelled()
+                start = float(self.session.get_ao_value(ao_index))
+                self.session.ramp_voltage(
+                    ao_index,
                     self.target,
                     SAFE_RAMP_STEP_V,
                     SAFE_RAMP_STEP_T,
@@ -353,13 +349,7 @@ class EmergencyRampWorker(QtCore.QThread):
         if daq is not None:
             for chan in self._daq_channels:
                 try:
-                    safe_ramp(
-                        lambda v, c=chan: daq.set_voltage(c, v),
-                        daq.get_ao_value(chan),
-                        0.0,
-                        SAFE_RAMP_STEP_V,
-                        SAFE_RAMP_STEP_T,
-                    )
+                    daq.ramp_voltage(chan, 0.0, SAFE_RAMP_STEP_V, SAFE_RAMP_STEP_T)
                 except Exception as ex:
                     failures.append(f"DAQ ao{chan} zero failed: {ex}")
         if failures:

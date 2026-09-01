@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import math
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -10,8 +11,10 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PyQt6 import QtWidgets
 
 from app.device_manager import DeviceManager, ManualControlWorker
-from app.models import Connections
+from app.models import CoParams, Connections, LineSweepParams, SaveRoot
 from app.ui.dock import ConnDock
+from app.workers.cosweep import CoSweepWorker
+from app.workers.line_sweep import LineSweepWorker
 from instruments.DaqCard import DaqCard
 from instruments.instrument import InstrumentError
 
@@ -152,10 +155,23 @@ class DaqOutputSafetyTests(unittest.TestCase):
         self.daq.ramp_voltage(0, 0.50, step=0.05)
 
         writes = self.factory.tasks[1].writes
-        self.assertEqual(len(writes), 2)
-        self.assertAlmostEqual(writes[0], 0.55)
-        self.assertAlmostEqual(writes[1], 0.50)
+        self.assertEqual(len(writes), 3)
+        self.assertAlmostEqual(writes[0], 0.551)
+        self.assertAlmostEqual(writes[1], 0.502)
+        self.assertAlmostEqual(writes[-1], 0.50)
         self.assertEqual(self.factory.tasks[2].writes, [])
+
+    def test_noisy_readback_at_fifty_mv_boundary_does_not_trip_guard(self):
+        self.daq.connect()
+        self.factory.readback[-2:] = [0.349237, -0.40]
+
+        with patch("instruments.DaqCard.time.sleep"):
+            self.daq.ramp_voltage(0, 0.40, step=0.05)
+
+        writes = self.factory.tasks[1].writes
+        self.assertAlmostEqual(writes[-1], 0.40)
+        points = [0.349237, *writes]
+        self.assertTrue(all(abs(b - a) < 0.05 for a, b in zip(points, points[1:])))
 
 
 class FakeDaqSession:
@@ -172,6 +188,16 @@ class FakeDaqSession:
     def set_voltage(self, index, value):
         self.writes.append((index, float(value)))
         self.values[index] = float(value)
+
+    def ramp_voltage(self, index, target, step, delay=0.0, check_fn=None):
+        current = self.values[index]
+        step = min(abs(float(step)), 0.049)
+        while not math.isclose(current, target, abs_tol=1e-12):
+            if check_fn is not None:
+                check_fn()
+            direction = 1.0 if target > current else -1.0
+            current += direction * min(step, abs(target - current))
+            self.set_voltage(index, current)
 
     def acquire(self):
         return {}
@@ -206,6 +232,27 @@ class DaqOutputIntegrationTests(unittest.TestCase):
         points = [0.20, *(value for _index, value in session.writes)]
         self.assertTrue(all(abs(b - a) <= 0.050000001 for a, b in zip(points, points[1:])))
         self.assertIn("other AO channels were unchanged", worker.message)
+
+    def test_gate_scan_routes_vds_to_selected_daq_channel(self):
+        params = LineSweepParams(vds_source="NI DAQ AO", ao_channel=1)
+        daq = FakeDaqSession()
+        gate = SimpleNamespace(ramp_voltage=lambda *_args: None, set_voltage=lambda *_args: None)
+        worker = LineSweepWorker(params, SaveRoot(), Connections(), g1=gate, g2=gate, daq=daq)
+
+        worker._apply_point({"vtg": 0.0, "vbg": 0.0, "vds": 0.4})
+
+        self.assertAlmostEqual(daq.values[1], 0.4)
+        self.assertAlmostEqual(daq.values[0], 0.2)
+
+    def test_2d_map_routes_vds_axis_to_selected_daq_channel(self):
+        params = CoParams(vds_source="NI DAQ AO", ao_channel=1)
+        daq = FakeDaqSession()
+        worker = CoSweepWorker(params, SaveRoot(), Connections(), daq=daq)
+
+        worker.set_volt("Vds", -0.4)
+
+        self.assertAlmostEqual(daq.values[1], -0.4)
+        self.assertAlmostEqual(daq.values[0], 0.2)
 
     def test_connection_detail_warns_that_existing_output_was_preserved(self):
         session = FakeDaqSession()

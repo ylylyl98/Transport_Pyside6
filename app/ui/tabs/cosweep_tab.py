@@ -794,13 +794,7 @@ class CoSweepTab(BaseMeasurementTab):
             try:
                 self.log.appendPlainText(f"Ramping {name} -> {val} ({SAFE_RAMP_STEP_V:g} V/step)")
                 idx = int(self.cbo_source.currentText().split()[-1].replace("ao", ""))
-                safe_ramp(
-                    lambda v: sess.set_voltage(idx, v),
-                    sess.get_ao_value(idx),
-                    val,
-                    SAFE_RAMP_STEP_V,
-                    SAFE_RAMP_STEP_T,
-                )
+                sess.ramp_voltage(idx, val, SAFE_RAMP_STEP_V, SAFE_RAMP_STEP_T)
                 self.log.appendPlainText(f"Set {name} -> {val} ({SAFE_RAMP_STEP_V:g} V/step)")
                 flash_button_success(button)
             except Exception as ex:
