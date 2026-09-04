@@ -10,6 +10,7 @@ Desktop application for automated electrical transport and photocurrent measurem
 | --- | --- |
 | **Vds Sweep** | Sweep drain-source bias while holding top- and back-gate biases. Vds can come from Keithley G3 or an NI-DAQ analog-output channel. |
 | **Gate Scan** | Run a one-dimensional raw-voltage trajectory or a derived doping/electric-field trajectory, with an optional reverse pass. |
+| **B-field Sweep** | Sweep APS100 between editable B-field endpoints while holding one or more fixed Doping/E-field/Vds rows; round trip is enabled by default. |
 | **2D Map** | Acquire a 1D or 2D grid across `Vtg`, `Vbg`, and/or `Vds`; select fast and slow axes and preview the planned sweep. |
 | **Photocurrent** | Sweep monochromator wavelength for one or more enabled Vtg/Vbg recipe conditions, with optional per-condition Vds. |
 
@@ -90,7 +91,7 @@ CSV writes are flushed during acquisition, which helps preserve data already col
 - Connecting a DAQ reads each AO's existing voltage and adopts it as the ramp starting point without issuing an AO write. A nonzero output is highlighted in Instrument Setup.
 - DAQ AO writes are isolated by channel: changing AO0 does not rewrite AO1. Measured AO readback is kept separate from the held command so readback noise cannot become a new output command.
 - Every DAQ AO write is limited to a maximum 50 mV change. Larger moves must use the per-channel **Ramp** or **Zero** controls, which advance in controlled steps; unused AO channels remain untouched.
-- Normal DAQ disconnect does not zero or rewrite its AO channels. Normal sweep cleanup ramps only the DAQ channel selected by that sweep; Keithley outputs continue to use their existing safe-zero behavior.
+- Normal DAQ disconnect does not zero or rewrite its AO channels. Normal sweep cleanup ramps only the DAQ channel selected by that sweep. Normal Keithley disconnect and application shutdown ramp voltage-source channels to 0 V, verify the ramp, leave their outputs ON to clamp the sample, and release only the VISA session; they never issue `OUTP OFF` automatically.
 - **STOP / ZERO ALL** requests all workers to stop and safely ramps connected Keithley and requested DAQ AO outputs to 0 V.
 
 Always confirm actual instrument state independently after an error, interrupted connection, or emergency stop.

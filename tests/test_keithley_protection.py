@@ -37,6 +37,7 @@ class FakeKeithley(Keithley2400Base):
         self.current_autorange = False
         self.error_queue: list[str] = []
         self.trip = False
+        self.output_enabled = False
 
     def _write(self, command: str, print_command=False):
         self.commands.append(command)
@@ -45,6 +46,10 @@ class FakeKeithley(Keithley2400Base):
             self.reported_current_range = self.recommended_current_range(self.reported_compliance)
         elif command.startswith(":SOUR:VOLT:RANG "):
             self.reported_voltage_range = float(command.split()[-1])
+        elif command == ":OUTP ON":
+            self.output_enabled = True
+        elif command == ":OUTP OFF":
+            self.output_enabled = False
 
     def _query(self, command: str, print_command=False, print_response=False):
         if command == ":SYST:ERR?":
@@ -56,6 +61,7 @@ class FakeKeithley(Keithley2400Base):
             ":SOUR:VOLT:RANG?": str(self.reported_voltage_range),
             ":SENS:CURR:PROT:TRIP?": "1" if self.trip else "0",
             ":SOUR:VOLT:LEV?": "0",
+            ":OUTP?": "1" if self.output_enabled else "0",
         }[command]
 
 
@@ -154,6 +160,7 @@ class KeithleyProtectionDriverTests(unittest.TestCase):
 
         self.assertNotIn(":OUTP OFF", driver.commands)
         self.assertEqual(driver.commands[-1], ":OUTP ON")
+        self.assertTrue(driver.output_enabled)
         self.assertLess(
             driver.commands.index(":SENS:CURR:PROT 2.000000e-07"),
             driver.commands.index(":OUTP ON"),
@@ -177,6 +184,35 @@ class KeithleyProtectionDriverTests(unittest.TestCase):
         with self.assertRaisesRegex(InstrumentError, "verification failed"):
             driver.set_2wire_voltage_source_mode()
         self.assertNotIn(":OUTP ON", driver.commands)
+
+    def test_close_releases_transport_without_turning_output_off(self):
+        driver = ConnectionSafetyKeithley(existing_voltage=0.0)
+        driver.output_enabled = True
+        with (
+            patch.object(PyvisaInstrument, "connect", autospec=True, side_effect=self._open_fake_visa),
+            patch.object(PyvisaInstrument, "close", autospec=True, side_effect=self._close_fake_visa),
+        ):
+            driver.connect()
+            driver.close()
+
+        self.assertIsNone(driver._my_instr)
+        self.assertNotIn(("write", ":OUTP OFF"), driver.events)
+        self.assertTrue(driver.output_enabled)
+
+    def test_failed_output_on_verification_does_not_turn_output_off(self):
+        driver = FakeKeithley(current_compliance=1e-7, max_voltage=10.0)
+        original_query = driver._query
+
+        def report_output_off(command: str, print_command=False, print_response=False):
+            if command == ":OUTP?":
+                return "0"
+            return original_query(command, print_command, print_response)
+
+        driver._query = report_output_off
+        with self.assertRaisesRegex(InstrumentError, "Output ON verification failed"):
+            driver.set_2wire_voltage_source_mode()
+        self.assertIn(":OUTP ON", driver.commands)
+        self.assertNotIn(":OUTP OFF", driver.commands)
 
     def test_programmed_voltage_cannot_exceed_profile(self):
         driver = FakeKeithley(max_voltage=5.0)
@@ -251,6 +287,7 @@ class ConnectedKeithleyStub:
         self.curr_comp = curr_comp
         self.max_source_voltage = max_source_voltage
         self.setpoint = 0.0
+        self.writes = []
         self.closed = False
         self.__class__.instances.append(self)
 
@@ -272,6 +309,14 @@ class ConnectedKeithleyStub:
 
     def get_voltage_setpoint(self):
         return self.setpoint
+
+    def set_voltage(self, value):
+        self.setpoint = float(value)
+        self.writes.append(self.setpoint)
+
+    @staticmethod
+    def is_output_enabled():
+        return True
 
     def apply_protection_settings(self, current_compliance, max_voltage):
         self.curr_comp = float(current_compliance)
@@ -317,6 +362,11 @@ class ProfileFailingKeithleyStub(ConnectedKeithleyStub):
         ):
             raise RuntimeError("simulated profile failure")
         return super().apply_protection_settings(current_compliance, max_voltage)
+
+
+class ZeroFailingKeithleyStub(ConnectedKeithleyStub):
+    def set_voltage(self, value):
+        raise RuntimeError("simulated zero failure")
 
 
 class KeithleyProtectionIntegrationTests(unittest.TestCase):
@@ -418,6 +468,40 @@ class KeithleyProtectionIntegrationTests(unittest.TestCase):
         self.assertEqual(manager._protection_for("g1"), (5.0, 10e-9))
         self.assertEqual(manager._protection_for("g2"), (10.0, 100e-9))
         self.assertEqual(manager._protection_for("g3"), (15.0, 1e-6))
+
+    def test_normal_disconnect_zeros_and_releases_keithley_session(self):
+        manager = DeviceManager(Connections(gate1="GPIB::1"))
+        session = ConnectedKeithleyStub("g1", "GPIB::1", 1e-7, 5.0)
+        session.setpoint = 0.12
+        manager.sessions["g1"] = session
+        manager.states["g1"] = "ok"
+        manager._connected_modes["g1"] = KEITHLEY_MODE_VOLTAGE_2W
+
+        with patch("app.utils.time.sleep"):
+            manager._disconnect_all_in_thread(CaptureEmitter())
+
+        self.assertTrue(session.closed)
+        self.assertAlmostEqual(session.writes[-1], 0.0)
+        self.assertIsNone(manager.sessions["g1"])
+
+    def test_normal_disconnect_preserves_sessions_when_zero_fails(self):
+        manager = DeviceManager(Connections(gate1="GPIB::1"))
+        session = ZeroFailingKeithleyStub("g1", "GPIB::1", 1e-7, 5.0)
+        session.setpoint = 0.12
+        manager.sessions["g1"] = session
+        manager.states["g1"] = "ok"
+        manager._connected_modes["g1"] = KEITHLEY_MODE_VOLTAGE_2W
+        emitter = CaptureEmitter()
+
+        with (
+            patch("app.utils.time.sleep"),
+            self.assertRaisesRegex(RuntimeError, "Disconnect aborted"),
+        ):
+            manager._disconnect_all_in_thread(emitter)
+
+        self.assertFalse(session.closed)
+        self.assertIs(manager.sessions["g1"], session)
+        self.assertTrue(any(event[:2] == ("g1", "err") for event in emitter.events))
 
     def test_device_manager_applies_saved_profile_after_default_connection(self):
         ConnectedKeithleyStub.instances.clear()

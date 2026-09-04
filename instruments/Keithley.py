@@ -96,10 +96,14 @@ class Keithley2400Base(PyvisaInstrument):
         return start
 
     def close(self):
-        try:
-            self.turn_off_output()
-        except Exception:
-            pass
+        """Release the VISA session without changing the physical output state.
+
+        Gate outputs are intentionally left enabled.  The device manager ramps
+        voltage-source channels to 0 V before closing the transport so the
+        sample remains clamped instead of being disconnected by ``OUTP OFF``.
+        Output disable remains an explicit operator action via
+        :meth:`turn_off_output`.
+        """
         super().close()
 
     @property
@@ -157,6 +161,15 @@ class Keithley2400Base(PyvisaInstrument):
         with self.lock:
             self._write(":OUTP OFF")
 
+    def is_output_enabled(self) -> bool:
+        """Return the instrument's confirmed output state."""
+        response = str(self._query(":OUTP?")).strip().upper()
+        if response in {"1", "ON"}:
+            return True
+        if response in {"0", "OFF"}:
+            return False
+        raise InstrumentError(self.name, f"Unrecognized Keithley output-state response: {response!r}")
+
     def set_2wire_voltage_source_mode(self):
         with self.lock:
             self._write("*CLS")
@@ -175,6 +188,8 @@ class Keithley2400Base(PyvisaInstrument):
             self._operating_mode = KEITHLEY_MODE_VOLTAGE_2W
             self.verify_protection_settings()
             self.turn_on_output()
+            if not self.is_output_enabled():
+                raise InstrumentError(self.name, "Output ON verification failed after configuring 0 V.")
 
     def set_4wire_ohm_mode(self):
         with self.lock:

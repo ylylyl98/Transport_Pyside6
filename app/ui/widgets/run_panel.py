@@ -7,6 +7,9 @@ from PyQt6.QtCore import Qt
 class RunPanel(QtWidgets.QWidget):
     def __init__(self, start_text: str, parent=None):
         super().__init__(parent)
+        self._running = False
+        self._start_available = True
+        self._external_start_blocks: set[str] = set()
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(6)
@@ -49,8 +52,32 @@ class RunPanel(QtWidgets.QWidget):
         self.set_status_text("Idle", "idle")
 
     def set_running(self, running: bool):
-        self.btn_start.setEnabled(not running)
-        self.btn_stop.setEnabled(running)
+        self._running = bool(running)
+        self._refresh_start_enabled()
+        self.btn_stop.setEnabled(self._running)
+
+    def set_start_available(self, available: bool):
+        """Set the tab-owned start condition without overriding external gates."""
+        self._start_available = bool(available)
+        self._refresh_start_enabled()
+
+    def set_start_blocked(self, source: str, blocked: bool):
+        """Add or remove one independent start block."""
+        key = str(source).strip()
+        if not key:
+            raise ValueError("Start-block source must not be empty")
+        if blocked:
+            self._external_start_blocks.add(key)
+        else:
+            self._external_start_blocks.discard(key)
+        self._refresh_start_enabled()
+
+    def _refresh_start_enabled(self):
+        self.btn_start.setEnabled(
+            not self._running
+            and self._start_available
+            and not self._external_start_blocks
+        )
 
     def set_progress_fraction(self, fraction: float):
         self.progress.setValue(int(max(0.0, min(1.0, fraction)) * 100))

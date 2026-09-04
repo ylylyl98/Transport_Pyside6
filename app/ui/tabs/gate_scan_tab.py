@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from copy import deepcopy
+
 from PyQt6 import QtCore, QtWidgets
 
 from app.constants import V_LIMIT
@@ -40,7 +42,10 @@ class GateScanTab(BaseMeasurementTab):
     PANEL_MAX_WIDTH = 500
     PANEL_DEFAULT_WIDTH = 420
 
-    def __init__(self, save: SaveRoot, conns: Connections, device_manager: DeviceManager, get_global_rates_callable=None, get_ao_items_callable=None, get_signal_chain_callable=None):
+    batch_run_started = QtCore.pyqtSignal()
+    batch_run_terminal = QtCore.pyqtSignal(str, str)
+
+    def __init__(self, save: SaveRoot, conns: Connections, device_manager: DeviceManager, get_global_rates_callable=None, get_ao_items_callable=None, get_signal_chain_callable=None, include_field_batch: bool = False, start_text: str = "START SWEEP"):
         self.save = save
         self.conns = conns
         self.device_manager = device_manager
@@ -54,7 +59,21 @@ class GateScanTab(BaseMeasurementTab):
         self._plot_records = []
         self._output_run_id = None
         self._planned_output = None
-        super().__init__("START SWEEP", "Sweep Axis", "Ids (A)", ["g1", "g2", "g3", "daq"])
+        self._batch_orchestrator = None
+        self._batch_magnet_backend = "1000"
+        self._batch_locked = False
+        self._batch_params = None
+        self._batch_devices_claimed = False
+        self._batch_output_override = None
+        self._batch_metadata = {}
+        self._batch_terminal = None
+        self._batch_starting = False
+        self._batch_calibration = None
+        # The normal Gate Scan is intentionally a single-run experiment.  The
+        # dedicated B-field tab opts into the legacy batch widgets only when
+        # explicitly requested (it currently supplies its own editor).
+        self.include_field_batch = bool(include_field_batch)
+        super().__init__(start_text, "Sweep Axis", "Ids (A)", ["g1", "g2", "g3", "daq"])
         self.control_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.control_scroll.setMinimumWidth(self.PANEL_MIN_WIDTH)
         self.control_scroll.setMaximumWidth(self.PANEL_MAX_WIDTH)
@@ -184,6 +203,50 @@ class GateScanTab(BaseMeasurementTab):
         self._add_output_preview_section(output_layout)
         self.exp_output = CollapsibleSection("Output, Plot, and Files", output_content, expanded=False)
         ctl_layout.addWidget(self.exp_output)
+
+        if not self.include_field_batch:
+            self._batch_container = None
+            self.exp_bfield_batch = None
+        else:
+            batch_content = QtWidgets.QWidget()
+            self._batch_container = batch_content
+            batch_layout = QtWidgets.QVBoxLayout(batch_content)
+            batch_layout.setContentsMargins(8, 4, 8, 4)
+            batch_layout.setSpacing(5)
+            self.batch_enabled = QtWidgets.QCheckBox(
+                "Run this Gate Scan at several persistent B fields using attoDRY1000 (APS100)"
+            )
+            self.batch_system_label = QtWidgets.QLabel("Magnet system: attoDRY1000 (APS100)")
+            self.batch_system_label.setWordWrap(True)
+            self.batch_system_label.setProperty("role", "hint")
+            self.batch_fields = QtWidgets.QPlainTextEdit()
+            self.batch_fields.setPlaceholderText("One field in tesla per line, for example:\n-2\n-0.5\n0\n0.125")
+            self.batch_fields.setMaximumHeight(92)
+            self.batch_validate_button = QtWidgets.QPushButton("Validate fields")
+            self.batch_start_button = QtWidgets.QPushButton("Start B-field batch")
+            self.batch_stop_button = QtWidgets.QPushButton("STOP B-field batch")
+            self.batch_stop_button.setProperty("role", "danger")
+            self.batch_status = QtWidgets.QLabel("Idle")
+            self.batch_status.setWordWrap(True)
+            self.batch_status.setProperty("role", "hint")
+            batch_buttons = QtWidgets.QHBoxLayout()
+            batch_buttons.addWidget(self.batch_validate_button)
+            batch_buttons.addWidget(self.batch_start_button)
+            batch_buttons.addWidget(self.batch_stop_button)
+            batch_layout.addWidget(self.batch_enabled)
+            batch_layout.addWidget(self.batch_system_label)
+            batch_layout.addWidget(QtWidgets.QLabel("Ordered target fields (T):"))
+            batch_layout.addWidget(self.batch_fields)
+            batch_layout.addLayout(batch_buttons)
+            batch_layout.addWidget(self.batch_status)
+            self.exp_bfield_batch = CollapsibleSection(
+                "B-field Batch — APS100 / attoDRY1000", batch_content, expanded=False
+            )
+            ctl_layout.addWidget(self.exp_bfield_batch)
+            self.batch_validate_button.clicked.connect(self._validate_batch_fields)
+            self.batch_start_button.clicked.connect(self._start_batch)
+            self.batch_stop_button.clicked.connect(self._stop_batch)
+            self.batch_stop_button.setEnabled(False)
 
         self.lbl_connection_hint = QtWidgets.QLabel()
         self.lbl_connection_hint.setWordWrap(True)
@@ -592,6 +655,13 @@ class GateScanTab(BaseMeasurementTab):
         return parts
 
     def refresh_output_preview(self, *_args) -> None:
+        if self._batch_output_override is not None:
+            self._planned_output = self._batch_output_override
+            self.set_output_preview_text(
+                self._batch_output_override,
+                planned_output_warning(self._batch_output_override, self.save),
+            )
+            return
         planned = build_planned_output(
             self.save,
             "gate_scan",
@@ -730,12 +800,14 @@ class GateScanTab(BaseMeasurementTab):
 
     def _update_manual_buttons(self):
         self._sync_sessions_from_manager()
-        self.btn_start.setEnabled(
+        self.run_panel.set_start_available(
             all(self.device_manager.is_connected(name) for name in self._required_devices())
             and not self._missing_mode_requirements()
             and self.worker_thread is None
         )
         self._update_connection_hint()
+        if self._batch_locked:
+            self._apply_batch_lock()
 
     def _required_devices(self) -> list[str]:
         required = ["daq", "g1", "g2"]
@@ -1098,6 +1170,170 @@ class GateScanTab(BaseMeasurementTab):
         self.p.plot_x_resolved = self._resolved_plot_x_axis()
         self.p.sweep_both_ways = self.chk_sweep_bidirectional.isChecked()
 
+    def set_field_batch_orchestrator(self, orchestrator):
+        self._batch_orchestrator = orchestrator
+        if not self.include_field_batch:
+            return
+        orchestrator.set_review_validator(self._batch_review_valid)
+        orchestrator.state_changed.connect(
+            lambda phase, detail: self.batch_status.setText(f"{phase}: {detail}")
+        )
+        orchestrator.progress_changed.connect(
+            lambda index, count, detail: self.batch_status.setText(
+                f"{detail} — field {min(index + 1, count)}/{count}"
+            )
+        )
+        orchestrator.error.connect(lambda message: self.batch_status.setText(f"Error: {message}"))
+        orchestrator.finished.connect(lambda: self.batch_status.setText("Batch complete"))
+        orchestrator.stopped.connect(lambda message: self.batch_status.setText(f"Stopped: {message}"))
+
+    def _batch_review_valid(self):
+        window = self.window()
+        panel = getattr(window, "magnet_panel", None)
+        return bool(panel is not None and panel._review_valid())
+
+    def set_batch_magnet_context(self, backend_name):
+        if not hasattr(self, "batch_system_label"):
+            return
+        self._batch_magnet_backend = str(backend_name or "1000")
+        if self._batch_magnet_backend != "1000":
+            self.batch_system_label.setText(
+                "Magnet system: attoDRY2100 (SDK) — "
+                "B-field batch requires attoDRY1000 (APS100)"
+            )
+        else:
+            self.batch_system_label.setText("Magnet system: attoDRY1000 (APS100)")
+        self._apply_batch_lock()
+
+    def _validate_batch_fields(self):
+        if self._batch_orchestrator is None:
+            self.batch_status.setText("Batch controller is unavailable")
+            return False
+        try:
+            fields = self._batch_orchestrator.validate_text(self.batch_fields.toPlainText())
+        except Exception as exc:
+            self.batch_status.setText(f"Invalid fields: {exc}")
+            return False
+        self.batch_status.setText("Valid targets: " + ", ".join(f"{value:g} T" for value in fields))
+        return True
+
+    def _start_batch(self):
+        if self._batch_magnet_backend != "1000":
+            self.batch_status.setText(
+                "B-field batch requires attoDRY1000 (APS100); "
+                "select APS100 in Magnet Control"
+            )
+            return
+        if not self.batch_enabled.isChecked():
+            self.batch_status.setText("Enable B-field batch before starting")
+            return
+        if self._batch_orchestrator is None:
+            self.batch_status.setText("Batch controller is unavailable")
+            return
+        self._batch_orchestrator.start(self.batch_fields.toPlainText())
+
+    def _stop_batch(self):
+        if self._batch_orchestrator is not None:
+            self._batch_orchestrator.stop()
+
+    def capture_field_batch_params(self):
+        window = self.window()
+        if hasattr(window, "refresh_models_from_ui"):
+            window.refresh_models_from_ui()
+        calibration = self.verified_run_calibration()
+        if calibration is None:
+            raise ValueError("Signal-chain verification failed")
+        self.refresh_output_preview()
+        if not self.validate_output_ready(self.save):
+            raise ValueError("Gate Scan output is not ready")
+        if not self._validate_required_sessions() or not self._validate_params():
+            raise ValueError("Gate Scan validation failed")
+        self.collect_params()
+        return deepcopy(self.p), tuple(self._required_devices()), calibration
+
+    def begin_field_batch(self, params, required_devices, calibration=None):
+        if self.worker_thread or self._batch_devices_claimed:
+            return False
+        claimed, blocked = self.claim_run_devices(required_devices)
+        if not claimed:
+            return False
+        self._batch_params = deepcopy(params)
+        self.p = deepcopy(params)
+        self._batch_calibration = calibration
+        self._batch_devices_claimed = True
+        self._batch_locked = True
+        self._apply_batch_lock()
+        return True
+
+    def start_field_batch_measurement(self, planned_output, metadata):
+        if not self._batch_devices_claimed or self.worker_thread:
+            return False
+        self._batch_output_override = planned_output
+        self._batch_metadata = dict(metadata or {})
+        self.p.output_csv_path = planned_output.csv_path
+        self.p.output_metadata_path = planned_output.metadata_path
+        self.p.output_log_path = planned_output.log_path
+        self._batch_terminal = None
+        self._batch_starting = True
+        self.start_run()
+        self._batch_starting = False
+        if self.worker_thread is None:
+            self._batch_output_override = None
+            self._batch_metadata = {}
+            return False
+        self.batch_run_started.emit()
+        return True
+
+    def finish_field_batch(self):
+        if self._batch_devices_claimed:
+            self.release_run_devices()
+        self._batch_devices_claimed = False
+        self._batch_params = None
+        self._batch_output_override = None
+        self._batch_metadata = {}
+        self._batch_calibration = None
+        self._batch_locked = False
+        self._output_run_id = None
+        self._apply_batch_lock()
+        self.refresh_output_preview()
+
+    def set_batch_locked(self, locked):
+        self._batch_locked = bool(locked)
+        self._apply_batch_lock()
+
+    def _apply_batch_lock(self):
+        if not hasattr(self, "control_widget") or not self.include_field_batch:
+            return
+        batch_container = getattr(self, "_batch_container", None)
+        exempt = {
+            getattr(self, "batch_enabled", None), getattr(self, "batch_fields", None),
+            getattr(self, "batch_validate_button", None), getattr(self, "batch_start_button", None),
+            getattr(self, "batch_stop_button", None),
+        }
+        for widget in self.control_widget.findChildren(QtWidgets.QWidget):
+            if widget in exempt or widget is batch_container:
+                continue
+            parent = widget
+            in_batch = False
+            while parent is not None:
+                if parent is batch_container:
+                    in_batch = True
+                    break
+                parent = parent.parentWidget()
+            if in_batch or widget is self.btn_stop:
+                continue
+            if isinstance(widget, (QtWidgets.QAbstractButton, QtWidgets.QComboBox,
+                                   QtWidgets.QLineEdit, QtWidgets.QAbstractSpinBox)):
+                widget.setEnabled(not self._batch_locked)
+        self.batch_enabled.setEnabled(not self._batch_locked)
+        self.batch_fields.setEnabled(not self._batch_locked)
+        batch_controls_enabled = (
+            not self._batch_locked and self._batch_magnet_backend == "1000"
+        )
+        self.batch_validate_button.setEnabled(batch_controls_enabled)
+        self.batch_start_button.setEnabled(batch_controls_enabled)
+        self.batch_stop_button.setEnabled(self._batch_locked)
+
     def _validate_params(self) -> bool:
         if self.rad_mode_raw.isChecked() and not any((self.chk_raw_vtg_active.isChecked(), self.chk_raw_vbg_active.isChecked(), self.chk_raw_vds_active.isChecked())):
             QtWidgets.QMessageBox.warning(self, "Invalid Sweep", "Raw trajectory needs at least one active variable.")
@@ -1116,6 +1352,8 @@ class GateScanTab(BaseMeasurementTab):
         calibration = self.verified_run_calibration()
         if calibration is None:
             return
+        if self._batch_starting and self._batch_calibration is not None:
+            calibration = self._batch_calibration
         amp, lkn, signal_chain = calibration
         self.refresh_output_preview()
         if not self.validate_output_ready(self.save):
@@ -1123,14 +1361,16 @@ class GateScanTab(BaseMeasurementTab):
         if not self._validate_required_sessions() or not self._validate_params():
             return
         try:
-            self.collect_params()
+            if not self._batch_starting:
+                self.collect_params()
         except Exception as ex:
             QtWidgets.QMessageBox.warning(self, "Invalid Parameters", str(ex))
             return
-        claimed, blocked = self.claim_run_devices(self._required_devices())
-        if not claimed:
-            QtWidgets.QMessageBox.warning(self, "Busy", f"Devices already in use: {', '.join(blocked).upper()}")
-            return
+        if not self._batch_starting:
+            claimed, blocked = self.claim_run_devices(self._required_devices())
+            if not claimed:
+                QtWidgets.QMessageBox.warning(self, "Busy", f"Devices already in use: {', '.join(blocked).upper()}")
+                return
         self._plot_records = []
         self.plot.clear()
         self.set_plot_axis_source(self.p.plot_choice)
@@ -1148,6 +1388,7 @@ class GateScanTab(BaseMeasurementTab):
                 amp_rate=amp,
                 lkn_rate=lkn,
                 signal_chain=signal_chain_metadata(signal_chain),
+                batch_metadata=self._batch_metadata,
             )
             self.worker_thread = QtCore.QThread()
             self.worker.moveToThread(self.worker_thread)
@@ -1172,7 +1413,8 @@ class GateScanTab(BaseMeasurementTab):
             self._set_mode_selector_enabled(True)
             self.append_log(str(ex))
             self.end_run_logging("error", str(ex))
-            self.release_run_devices()
+            if not self._batch_devices_claimed:
+                self.release_run_devices()
 
     def stop_run(self):
         if self.worker:
@@ -1184,10 +1426,15 @@ class GateScanTab(BaseMeasurementTab):
             self.worker.deleteLater()
             self.worker = None
         self.worker_thread = None
-        self.release_run_devices()
+        if not self._batch_devices_claimed:
+            self.release_run_devices()
         self.run_panel.set_running(False)
         self._set_mode_selector_enabled(True)
         self._update_manual_buttons()
+        if self._batch_terminal is not None:
+            status, detail = self._batch_terminal
+            self._batch_terminal = None
+            self.batch_run_terminal.emit(status, detail)
 
     def on_point_data(self, record):
         self._plot_records.append(record)
@@ -1244,19 +1491,28 @@ class GateScanTab(BaseMeasurementTab):
         self.set_status("Finished", "done", path)
         self.append_log(f"Saved: {path}")
         self.end_run_logging("finished", path)
-        self._output_run_id = None
-        self.refresh_output_preview()
+        if self._batch_devices_claimed:
+            self._batch_terminal = ("finished", str(path))
+        else:
+            self._output_run_id = None
+            self.refresh_output_preview()
 
     def on_error(self, msg: str):
         self.set_status("Run error", "error", msg)
         self.append_log("ERROR: " + msg)
         self.end_run_logging("error", msg)
-        self._output_run_id = None
-        self.refresh_output_preview()
+        if self._batch_devices_claimed:
+            self._batch_terminal = ("error", str(msg))
+        else:
+            self._output_run_id = None
+            self.refresh_output_preview()
 
     def on_stopped(self, message: str):
         self.set_status("Stopped by user", "done", message)
         self.append_log(message)
         self.end_run_logging("stopped", message)
-        self._output_run_id = None
-        self.refresh_output_preview()
+        if self._batch_devices_claimed:
+            self._batch_terminal = ("stopped", str(message))
+        else:
+            self._output_run_id = None
+            self.refresh_output_preview()

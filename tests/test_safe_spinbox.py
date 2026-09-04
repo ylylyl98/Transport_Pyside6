@@ -41,10 +41,14 @@ class SafeSpinBoxTests(unittest.TestCase):
             spinbox.setRange(0, 10)
             spinbox.setValue(5)
 
-            event = self._wheel_event()
-            QtWidgets.QApplication.sendEvent(spinbox, event)
-            self.assertEqual(spinbox.value(), 5)
-            self.assertFalse(event.isAccepted())
+            for focused in (False, True):
+                spinbox.setFocus() if focused else spinbox.clearFocus()
+                for delta in (-120, 120):
+                    event = self._wheel_event(delta)
+                    QtWidgets.QApplication.sendEvent(spinbox, event)
+                    self.assertEqual(spinbox.value(), 5)
+                    # Ignored events remain available to a containing scroll area.
+                    self.assertFalse(event.isAccepted())
 
             spinbox.lineEdit().setFocus()
             for key in (
@@ -61,11 +65,15 @@ class SafeSpinBoxTests(unittest.TestCase):
         combo.addItems(["first", "second", "third"])
         combo.setCurrentIndex(1)
 
-        event = self._wheel_event()
-        QtWidgets.QApplication.sendEvent(combo, event)
+        for focused in (False, True):
+            combo.setFocus() if focused else combo.clearFocus()
+            for delta in (-120, 120):
+                event = self._wheel_event(delta)
+                QtWidgets.QApplication.sendEvent(combo, event)
 
-        self.assertEqual(combo.currentIndex(), 1)
-        self.assertFalse(event.isAccepted())
+                self.assertEqual(combo.currentIndex(), 1)
+                # Ignored events remain available to a containing scroll area.
+                self.assertFalse(event.isAccepted())
 
     def test_read_only_combo_blocks_user_keys_but_allows_programmatic_updates(self):
         combo = SafeComboBox()
@@ -130,7 +138,7 @@ class SafeSpinBoxTests(unittest.TestCase):
 
     def test_application_has_no_raw_combobox_constructors(self):
         app_root = Path(__file__).resolve().parents[1] / "app"
-        raw_constructor = re.compile(r"QtWidgets\.QComboBox\s*\(")
+        raw_constructor = re.compile(r"(?:QtWidgets\.)?QComboBox\s*\(")
         offenders = []
         for path in app_root.rglob("*.py"):
             for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):

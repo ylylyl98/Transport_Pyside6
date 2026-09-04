@@ -8,10 +8,13 @@ from app.gate_transform import (
     RATIO_TARGET_VBG,
     RATIO_TARGET_VTG,
     gates_to_derived,
+    doping_axis_label,
+    efield_axis_label,
     normalize_ratio_target,
     ratio_formula_text,
 )
 from app.models import CoParams, Connections, SaveRoot
+from app.settings import get_app_settings
 from app.plot_x_axis import (
     FOLLOW_SWEEP,
     PLOT_X_AXES,
@@ -30,7 +33,7 @@ from app.ui.widgets.safe_combo import SafeComboBox
 from app.ui.widgets.safe_spinbox import SafeDoubleSpinBox, SafeSpinBox
 from app.ui.widgets.status_panel import SectionHeader, StatusPanel
 from app.utils import _frange_inc, safe_ramp
-from app.workers.cosweep import CoSweepWorker
+from app.workers.cosweep import CoSweepWorker, build_cosweep_points, validate_cosweep_params
 
 SET_BUTTON_WIDTH = 48
 COSWEEP_PANEL_MIN_WIDTH = 380
@@ -52,6 +55,12 @@ class CoSweepTab(BaseMeasurementTab):
         self.worker_thread = None
         self.worker = None
         self._updating_combos = False
+        self._last_coordinate_mode = "Raw"
+        self._axis_memory = {
+            "Raw": ("Vtg", "Vbg"),
+            "Derived": ("Doping", "E-field"),
+        }
+        self._preferred_slow_axis = None
         self._plot_records = []
         self._output_run_id = None
         self._planned_output = None
@@ -77,8 +86,11 @@ class CoSweepTab(BaseMeasurementTab):
         self.cbo_sweep_dim = SafeComboBox()
         self.cbo_sweep_dim.addItems(["1D sweep", "2D map"])
         self.cbo_sweep_dim.setCurrentText("2D map")
-        self.chk_link = QtWidgets.QCheckBox("Plot as Doping/E-field axes")
-        self.chk_link.setToolTip("Changes only the preview and plotted x-axis labels. Hardware control still uses the raw Vtg/Vbg/Vds grid.")
+        self.cbo_coordinates = SafeComboBox()
+        self.cbo_coordinates.addItem("Raw voltages", "Raw")
+        self.cbo_coordinates.addItem("Doping / E-field", "Derived")
+        self.chk_link = QtWidgets.QCheckBox("Plot as Doping/E-field axes (display only)")
+        self.chk_link.setToolTip("Raw mode only: changes preview and plotted axes without changing the hardware trajectory.")
         self.cbo_fast = SafeComboBox()
         self.cbo_fast.addItems(["Vtg", "Vbg", "Vds"])
         self.cbo_slow = SafeComboBox()
@@ -107,11 +119,13 @@ class CoSweepTab(BaseMeasurementTab):
         self.lbl_ratio_formula.setProperty("role", "hint")
         self.lbl_ratio_formula.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Preferred)
         lbl_mode = QtWidgets.QLabel("Sweep Type:")
+        lbl_coordinates = QtWidgets.QLabel("Sweep Coordinates:")
         lbl_fast = QtWidgets.QLabel("Fast Axis:")
         lbl_slow = QtWidgets.QLabel("Slow Axis:")
         lbl_source = QtWidgets.QLabel("Vds Source:")
         lbl_ratio = QtWidgets.QLabel("Ratio r:")
         form_setup.addRow(lbl_mode, self.cbo_sweep_dim)
+        form_setup.addRow(lbl_coordinates, self.cbo_coordinates)
         form_setup.addRow(lbl_fast, self.cbo_fast)
         form_setup.addRow(lbl_slow, self.cbo_slow)
         form_setup.addRow(lbl_source, self.cbo_source)
@@ -187,6 +201,28 @@ class CoSweepTab(BaseMeasurementTab):
         lay_vars.addWidget(self.sp_vds_stop, 3, 3)
         lay_vars.addWidget(self.sp_vds_step, 3, 4)
         lay_vars.addWidget(self.btn_set_vds, 3, 5)
+        self.lbl_doping_mode = QtWidgets.QLabel()
+        self.lbl_efield_mode = QtWidgets.QLabel()
+        self.sp_doping_start = SafeDoubleSpinBox()
+        self.sp_doping_stop = SafeDoubleSpinBox()
+        self.sp_doping_step = SafeDoubleSpinBox()
+        self.sp_efield_start = SafeDoubleSpinBox()
+        self.sp_efield_stop = SafeDoubleSpinBox()
+        self.sp_efield_step = SafeDoubleSpinBox()
+        for spinbox, value in ((self.sp_doping_start, 0.0), (self.sp_doping_stop, 1.0), (self.sp_doping_step, 0.1), (self.sp_efield_start, 0.0), (self.sp_efield_stop, 1.0), (self.sp_efield_step, 0.1)):
+            spinbox.setDecimals(4)
+            spinbox.setRange(-1e4, 1e4)
+            spinbox.setValue(value)
+        lay_vars.addWidget(QtWidgets.QLabel("Doping"), 4, 0)
+        lay_vars.addWidget(self.lbl_doping_mode, 4, 1)
+        lay_vars.addWidget(self.sp_doping_start, 4, 2)
+        lay_vars.addWidget(self.sp_doping_stop, 4, 3)
+        lay_vars.addWidget(self.sp_doping_step, 4, 4)
+        lay_vars.addWidget(QtWidgets.QLabel("E-field"), 5, 0)
+        lay_vars.addWidget(self.lbl_efield_mode, 5, 1)
+        lay_vars.addWidget(self.sp_efield_start, 5, 2)
+        lay_vars.addWidget(self.sp_efield_stop, 5, 3)
+        lay_vars.addWidget(self.sp_efield_step, 5, 4)
         ctl_layout.addWidget(grp_vars)
 
         row_tools = QtWidgets.QHBoxLayout()
@@ -259,8 +295,10 @@ class CoSweepTab(BaseMeasurementTab):
             self.sp_vbg_start, self.sp_vbg_stop, self.sp_vbg_step,
             self.sp_vds_start, self.sp_vds_stop, self.sp_vds_step,
             self.sp_delay, self.sp_nsamp,
-            self.ed_base, self.cbo_source, self.cbo_x, self.cbo_y, self.cbo_fast, self.cbo_slow, self.cbo_sweep_dim,
+            self.ed_base, self.cbo_source, self.cbo_x, self.cbo_y, self.cbo_fast, self.cbo_slow, self.cbo_sweep_dim, self.cbo_coordinates,
             self.sp_ratio, self.cbo_ratio_target,
+            self.sp_doping_start, self.sp_doping_stop, self.sp_doping_step,
+            self.sp_efield_start, self.sp_efield_stop, self.sp_efield_step,
         ]:
             set_standard_input_height(widget)
 
@@ -272,6 +310,7 @@ class CoSweepTab(BaseMeasurementTab):
             spinbox.setMinimumWidth(64)
 
         apply_tooltip("Choose whether this run is a single sweep or a two-axis map.", lbl_mode, self.cbo_sweep_dim)
+        apply_tooltip("Raw voltages preserves the original Vtg/Vbg/Vds grid. Doping/E-field drives both gates as a coordinated 2D map.", lbl_coordinates, self.cbo_coordinates)
         apply_tooltip("Axis that moves for every point in the inner loop.", lbl_fast, self.cbo_fast)
         apply_tooltip("Axis that steps between fast-axis passes. Choose 1D sweep to hold all other axes fixed.", lbl_slow, self.cbo_slow)
         apply_tooltip("Choose Keithley G3 or an NI AO channel as the Vds source.", lbl_source, self.cbo_source)
@@ -305,6 +344,7 @@ class CoSweepTab(BaseMeasurementTab):
         self.btn_set_vbg.clicked.connect(lambda: self.on_set_generic("Vbg", self.btn_set_vbg))
         self.btn_set_vds.clicked.connect(lambda: self.on_set_generic("Vds", self.btn_set_vds))
         self.cbo_sweep_dim.currentIndexChanged.connect(self.on_sweep_type_changed)
+        self.cbo_coordinates.currentIndexChanged.connect(self.on_sweep_type_changed)
         self.chk_link.toggled.connect(self.update_field_states)
         self.cbo_ratio_target.currentIndexChanged.connect(self._on_ratio_target_changed)
         self.cbo_fast.currentIndexChanged.connect(self.on_fast_combo_changed)
@@ -330,9 +370,11 @@ class CoSweepTab(BaseMeasurementTab):
             self.sp_vds_stop,
             self.sp_vds_step,
             self.sp_ratio,
+            self.sp_doping_start, self.sp_doping_stop, self.sp_doping_step,
+            self.sp_efield_start, self.sp_efield_stop, self.sp_efield_step,
         ):
             widget.valueChanged.connect(self.refresh_output_preview)
-        for widget in (self.cbo_source, self.cbo_fast, self.cbo_slow, self.cbo_sweep_dim):
+        for widget in (self.cbo_source, self.cbo_fast, self.cbo_slow, self.cbo_sweep_dim, self.cbo_coordinates):
             widget.currentIndexChanged.connect(self.refresh_output_preview)
         self.cbo_ratio_target.currentIndexChanged.connect(self.refresh_output_preview)
         self.chk_link.toggled.connect(self.refresh_output_preview)
@@ -341,6 +383,9 @@ class CoSweepTab(BaseMeasurementTab):
     def _is_2d_map(self) -> bool:
         return self.cbo_sweep_dim.currentText() == "2D map"
 
+    def _is_derived(self) -> bool:
+        return (self.cbo_coordinates.currentData() or "Raw") == "Derived"
+
     def _swept_axes(self) -> list[str]:
         axes = [self.cbo_fast.currentText()]
         if self._is_2d_map() and self.cbo_slow.currentText() != "None":
@@ -348,6 +393,10 @@ class CoSweepTab(BaseMeasurementTab):
         return axes
 
     def _axis_controls(self, axis: str):
+        if axis == "Doping":
+            return self.lbl_doping_mode, self.sp_doping_start, self.sp_doping_stop, self.sp_doping_step
+        if axis == "E-field":
+            return self.lbl_efield_mode, self.sp_efield_start, self.sp_efield_stop, self.sp_efield_step
         if axis == "Vtg":
             return self.lbl_vtg_mode, self.sp_vtg_start, self.sp_vtg_stop, self.sp_vtg_step
         if axis == "Vbg":
@@ -376,17 +425,27 @@ class CoSweepTab(BaseMeasurementTab):
         swept_axes = self._swept_axes()
         source = "keithley_g3" if self.cbo_source.currentText() == "Keithley 2400" else self.cbo_source.currentText()
         parts = [
+            f"coords_{'derived' if self._is_derived() else 'raw'}",
             f"fast_{self.cbo_fast.currentText()}",
             f"slow_{self.cbo_slow.currentText() if self._is_2d_map() else 'None'}",
             source,
         ]
-        for axis in ("Vtg", "Vbg", "Vds"):
-            start, stop, _step = self._axis_values(axis)
-            if axis in swept_axes:
-                parts.append(f"{axis}_{start:g}to{stop:g}V")
-            else:
-                parts.append(f"fixed_{axis}_{start:g}V")
-        if self.chk_link.isChecked():
+        if self._is_derived():
+            for axis in ("Doping", "E-field"):
+                start, stop, _step = self._axis_values(axis)
+                parts.append(f"{axis}_{start:g}to{stop:g}")
+            vds_start, _vds_stop, _vds_step = self._axis_values("Vds")
+            parts.append(f"fixed_Vds_{vds_start:g}V")
+        else:
+            for axis in ("Vtg", "Vbg", "Vds"):
+                start, stop, _step = self._axis_values(axis)
+                if axis in swept_axes:
+                    parts.append(f"{axis}_{start:g}to{stop:g}V")
+                else:
+                    parts.append(f"fixed_{axis}_{start:g}V")
+        if self.chk_link.isChecked() and not self._is_derived():
+            parts.append(f"ratio_on_{self._ratio_target()}_r_{self.sp_ratio.value():g}")
+        if self._is_derived():
             parts.append(f"ratio_on_{self._ratio_target()}_r_{self.sp_ratio.value():g}")
         parts.extend(signal_chain_filename_parts(self.get_signal_chain()))
         return parts
@@ -411,6 +470,7 @@ class CoSweepTab(BaseMeasurementTab):
             ("plot_x", self.cbo_x),
             ("plot_y", self.cbo_y),
             ("sweep_dim", self.cbo_sweep_dim),
+            ("coordinates", self.cbo_coordinates),
             ("fast_axis", self.cbo_fast),
             ("slow_axis", self.cbo_slow),
             ("link_doping_efield", self.chk_link),
@@ -425,11 +485,38 @@ class CoSweepTab(BaseMeasurementTab):
             ("vds_start", self.sp_vds_start),
             ("vds_stop", self.sp_vds_stop),
             ("vds_step", self.sp_vds_step),
+            ("doping_start", self.sp_doping_start),
+            ("doping_stop", self.sp_doping_stop),
+            ("doping_step", self.sp_doping_step),
+            ("efield_start", self.sp_efield_start),
+            ("efield_stop", self.sp_efield_stop),
+            ("efield_step", self.sp_efield_step),
             ("delay", self.sp_delay),
             ("averages", self.sp_nsamp),
         ]
 
     def _load_tab_settings(self):
+        # Axis settings are stored as text, but the combo contents depend on
+        # the coordinate mode.  Capture both orientations before restoring the
+        # widgets so a derived E-field-fast map is not lost to raw defaults.
+        settings = get_app_settings()
+        for mode, fallback in self._axis_memory.items():
+            if mode == "Raw":
+                fast_choices, slow_choices = {"Vtg", "Vbg", "Vds"}, {"Vtg", "Vbg", "Vds"}
+                fast_key, slow_key = "raw_fast_axis", "raw_slow_axis"
+            else:
+                fast_choices, slow_choices = {"Doping", "E-field"}, {"Doping", "E-field"}
+                fast_key, slow_key = "derived_fast_axis", "derived_slow_axis"
+            if mode == "Raw":
+                legacy_fast = settings.value(f"{self.SETTINGS_PREFIX}/fast_axis", fallback[0])
+                legacy_slow = settings.value(f"{self.SETTINGS_PREFIX}/slow_axis", fallback[1])
+            else:
+                legacy_fast = settings.value(f"{self.SETTINGS_PREFIX}/fast_axis", fallback[0])
+                legacy_slow = settings.value(f"{self.SETTINGS_PREFIX}/slow_axis", fallback[1])
+            fast_value = str(settings.value(f"{self.SETTINGS_PREFIX}/{fast_key}", legacy_fast))
+            slow_value = str(settings.value(f"{self.SETTINGS_PREFIX}/{slow_key}", legacy_slow))
+            if fast_value in fast_choices and slow_value in slow_choices and fast_value != slow_value:
+                self._axis_memory[mode] = (fast_value, slow_value)
         self._load_tab_widget_settings(self.SETTINGS_PREFIX, self._settings_widgets())
         self.on_sweep_type_changed()
         self._update_plot_axis_choices()
@@ -441,7 +528,18 @@ class CoSweepTab(BaseMeasurementTab):
         self._bind_tab_widget_settings(self.SETTINGS_PREFIX, self._settings_widgets())
 
     def save_tab_settings(self):
+        # Keep both coordinate-mode orientations so toggling modes does not
+        # overwrite the user's preferred fast/slow pair.
+        current_fast, current_slow = self.cbo_fast.currentText(), self.cbo_slow.currentText()
+        choices = {"Doping", "E-field"} if self._is_derived() else {"Vtg", "Vbg", "Vds"}
+        if current_fast in choices and current_slow in choices and current_fast != current_slow:
+            self._axis_memory["Derived" if self._is_derived() else "Raw"] = (current_fast, current_slow)
         self._save_tab_widget_settings(self.SETTINGS_PREFIX, self._settings_widgets())
+        settings = get_app_settings()
+        for mode, (fast, slow) in self._axis_memory.items():
+            settings.setValue(f"{self.SETTINGS_PREFIX}/{'derived' if mode == 'Derived' else 'raw'}_fast_axis", fast)
+            settings.setValue(f"{self.SETTINGS_PREFIX}/{'derived' if mode == 'Derived' else 'raw'}_slow_axis", slow)
+        settings.sync()
 
     def _update_manual_buttons(self):
         self._sync_sessions_from_manager()
@@ -459,7 +557,9 @@ class CoSweepTab(BaseMeasurementTab):
             self.cbo_source.currentText() != "Keithley 2400"
             or (self.s_g3 is not None and self.device_manager.is_voltage_source_mode("g3"))
         )
-        self.btn_start.setEnabled(self.s_daq is not None and source_ready and self.worker_thread is None)
+        self.run_panel.set_start_available(
+            self.s_daq is not None and source_ready and self.worker_thread is None
+        )
         self._update_connection_hint()
 
     def _sync_sessions_from_manager(self):
@@ -508,6 +608,8 @@ class CoSweepTab(BaseMeasurementTab):
 
     def _required_devices(self) -> list[str]:
         required = ["daq"]
+        if self._is_derived():
+            required.extend(["g1", "g2"])
         swept_axes = self._swept_axes()
         if "Vtg" in swept_axes or abs(self.sp_vtg_start.value()) > 1e-12:
             required.append("g1")
@@ -534,6 +636,12 @@ class CoSweepTab(BaseMeasurementTab):
         return True
 
     def _validate_sweep_setup(self) -> bool:
+        if self._is_derived() and not self._is_2d_map():
+            QtWidgets.QMessageBox.warning(self, "Sweep Coordinates", "Doping/E-field coordinates are supported for 2D maps only.")
+            return False
+        if self._is_derived() and abs(self.sp_ratio.value()) < 1e-12:
+            QtWidgets.QMessageBox.warning(self, "Invalid Ratio", "Doping/E-field sweeps require a non-zero ratio.")
+            return False
         fast = self.cbo_fast.currentText()
         slow = self.cbo_slow.currentText()
         if self._is_2d_map() and (slow == "None" or slow == fast):
@@ -555,7 +663,7 @@ class CoSweepTab(BaseMeasurementTab):
         if self.sp_nsamp.value() < 1:
             QtWidgets.QMessageBox.warning(self, "Invalid Averages", "Averages must be at least 1.")
             return False
-        if self.chk_link.isChecked() and not self._link_plot_available():
+        if not self._is_derived() and self.chk_link.isChecked() and not self._link_plot_available():
             QtWidgets.QMessageBox.warning(
                 self,
                 "Plot Axis",
@@ -612,7 +720,27 @@ class CoSweepTab(BaseMeasurementTab):
             self.update_field_states()
 
     def on_sweep_type_changed(self):
+        mode = "Derived" if self._is_derived() else "Raw"
+        desired = ["Doping", "E-field"] if mode == "Derived" else ["Vtg", "Vbg", "Vds"]
+        previous_mode = self._last_coordinate_mode
+        if mode != previous_mode:
+            old_fast, old_slow = self.cbo_fast.currentText(), self.cbo_slow.currentText()
+            old_choices = {"Doping", "E-field"} if previous_mode == "Derived" else {"Vtg", "Vbg", "Vds"}
+            if old_fast in old_choices and old_slow in old_choices and old_fast != old_slow:
+                self._axis_memory[previous_mode] = (old_fast, old_slow)
+            target_fast, target_slow = self._axis_memory[mode]
+        else:
+            target_fast, target_slow = self.cbo_fast.currentText(), self.cbo_slow.currentText()
+        current = target_fast
+        self.cbo_fast.blockSignals(True)
+        self.cbo_fast.clear()
+        self.cbo_fast.addItems(desired)
+        self.cbo_fast.setCurrentText(current if current in desired else desired[0])
+        self.cbo_fast.blockSignals(False)
+        self._preferred_slow_axis = target_slow
         self._update_slow_combo_items_grid()
+        self._preferred_slow_axis = None
+        self._last_coordinate_mode = mode
         self.update_field_states()
 
     def _update_slow_combo_items_grid(self):
@@ -620,11 +748,12 @@ class CoSweepTab(BaseMeasurementTab):
             return
         self._updating_combos = True
         fast = self.cbo_fast.currentText()
-        current_slow = self.cbo_slow.currentText()
+        current_slow = self._preferred_slow_axis or self.cbo_slow.currentText()
         self.cbo_slow.blockSignals(True)
         self.cbo_slow.clear()
         if self._is_2d_map():
-            for axis in ["Vtg", "Vbg", "Vds"]:
+            choices = ["Doping", "E-field"] if self._is_derived() else ["Vtg", "Vbg", "Vds"]
+            for axis in choices:
                 if axis != fast:
                     self.cbo_slow.addItem(axis)
         else:
@@ -641,6 +770,9 @@ class CoSweepTab(BaseMeasurementTab):
         self._updating_combos = True
         self.sp_ratio.setEnabled(True)
         self.cbo_ratio_target.setEnabled(True)
+        self.chk_link.setEnabled(not self._is_derived())
+        if self._is_derived():
+            self.chk_link.setChecked(False)
         self.cbo_slow.setEnabled(self._is_2d_map())
         active_sweep = self._swept_axes()
         for axis in ("Vtg", "Vbg", "Vds"):
@@ -652,6 +784,28 @@ class CoSweepTab(BaseMeasurementTab):
             step.setEnabled(is_swept)
             stop.setVisible(is_swept)
             step.setVisible(is_swept)
+        for axis in ("Doping", "E-field"):
+            label, _start, stop, step = self._axis_controls(axis)
+            is_swept = self._is_derived() and axis in active_sweep
+            label.setText("Swept" if is_swept else "Fixed")
+            stop.setEnabled(is_swept)
+            step.setEnabled(is_swept)
+            stop.setVisible(self._is_derived())
+            step.setVisible(self._is_derived())
+        for axis in ("Vtg", "Vbg"):
+            _label, start, stop, step = self._axis_controls(axis)
+            for widget in (start, stop, step):
+                widget.setVisible(not self._is_derived())
+        for axis in ("Doping", "E-field"):
+            _label, start, stop, step = self._axis_controls(axis)
+            for widget in (start, stop, step):
+                widget.setVisible(self._is_derived())
+        # Vds remains visible as the fixed bias in a derived map.
+        self.lbl_vds_mode.setText("Fixed" if self._is_derived() else self.lbl_vds_mode.text())
+        self.sp_vds_stop.setVisible(not self._is_derived())
+        self.sp_vds_step.setVisible(not self._is_derived())
+        self.sp_vds_stop.setEnabled(not self._is_derived())
+        self.sp_vds_step.setEnabled(not self._is_derived())
         self._updating_combos = False
         self._update_ratio_formula()
         self._update_sweep_summary()
@@ -661,7 +815,10 @@ class CoSweepTab(BaseMeasurementTab):
         return normalize_ratio_target(self.cbo_ratio_target.currentData() or RATIO_TARGET_VBG)
 
     def _update_ratio_formula(self) -> None:
-        prefix = "CSV columns and plot axes:\n" if self.chk_link.isChecked() else "Doping/E-field CSV columns:\n"
+        if self._is_derived():
+            prefix = "Hardware coordinates and CSV columns:\n"
+        else:
+            prefix = "CSV columns and plot axes:\n" if self.chk_link.isChecked() else "Doping/E-field CSV columns:\n"
         self.lbl_ratio_formula.setText(prefix + ratio_formula_text(self._ratio_target()))
 
     def _on_ratio_target_changed(self, *_args) -> None:
@@ -702,7 +859,21 @@ class CoSweepTab(BaseMeasurementTab):
         mode = "2D map" if self._is_2d_map() else "1D sweep"
         fast = self.cbo_fast.currentText()
         slow = self.cbo_slow.currentText() if self._is_2d_map() else "None"
-        axes = "; ".join(self._format_axis_summary(axis) for axis in ("Vtg", "Vbg", "Vds"))
+        if self._is_derived():
+            axes = "; ".join(self._format_axis_summary(axis) for axis in ("Doping", "E-field"))
+            axes += f"; Vds: fixed {self.sp_vds_start.value():g} V"
+            try:
+                preview = self._params_for_summary()
+                points = build_cosweep_points(preview)
+                vtg_values = [point["vtg"] for point in points]
+                vbg_values = [point["vbg"] for point in points]
+                axes += f"\nComputed Vtg: {min(vtg_values):g} to {max(vtg_values):g} V; Vbg: {min(vbg_values):g} to {max(vbg_values):g} V"
+            except Exception:
+                axes += "\nComputed Vtg/Vbg: unavailable until ratio and ranges are valid"
+            coordinate_label = "Derived Doping/E-field hardware trajectory"
+        else:
+            axes = "; ".join(self._format_axis_summary(axis) for axis in ("Vtg", "Vbg", "Vds"))
+            coordinate_label = "Raw-voltage hardware trajectory"
         try:
             points = self._point_count()
         except Exception:
@@ -710,8 +881,27 @@ class CoSweepTab(BaseMeasurementTab):
         order = f"Fast: {fast}; Slow: {slow}" if self._is_2d_map() else f"Sweep: {fast}; fixed axes use Start / Fixed"
         if self._is_2d_map():
             order += "; alternate slow passes run the fast axis in reverse."
-        self.lbl_sweep_summary.setText(f"{mode}. {order}\n{axes}\nEstimated points: {points}")
+        self.lbl_sweep_summary.setText(f"{mode} · {coordinate_label}. {order}\n{axes}\nEstimated points: {points}")
         self.refresh_output_preview()
+
+    def _params_for_summary(self) -> CoParams:
+        """Build a non-destructive parameter snapshot for the setup summary."""
+        p = CoParams(
+            coordinate_mode="Derived",
+            axis_fast=self.cbo_fast.currentText(),
+            axis_slow=self.cbo_slow.currentText(),
+            ratio=self.sp_ratio.value(),
+            ratio_target=self._ratio_target(),
+            vds_start=self.sp_vds_start.value(),
+            vds_stop=self.sp_vds_start.value(),
+            doping_start=self.sp_doping_start.value(),
+            doping_stop=self.sp_doping_stop.value(),
+            doping_step=abs(self.sp_doping_step.value()),
+            efield_start=self.sp_efield_start.value(),
+            efield_stop=self.sp_efield_stop.value(),
+            efield_step=abs(self.sp_efield_step.value()),
+        )
+        return p
 
     def on_axis_change_label(self):
         if self._plot_records:
@@ -732,6 +922,22 @@ class CoSweepTab(BaseMeasurementTab):
 
     def on_preview(self):
         self.plot.ax.clear()
+        if self._is_derived():
+            try:
+                points = build_cosweep_points(self._params_for_preview())
+            except Exception as ex:
+                self.plot.ax.set_title(f"Preview unavailable: {ex}")
+                self.plot.canvas.draw_idle()
+                return
+            xs = [point["doping"] for point in points]
+            ys = [point["efield"] for point in points]
+            self.plot.ax.plot(xs, ys, "o-", markersize=4, linewidth=1.0, color="blue", alpha=0.8)
+            self.plot.ax.set_xlabel(doping_axis_label(self.sp_ratio.value(), self._ratio_target()))
+            self.plot.ax.set_ylabel(efield_axis_label(self.sp_ratio.value(), self._ratio_target()))
+            self.plot.ax.set_title(f"Derived 2D Map Preview: {len(points)} pts (coordinated Vtg/Vbg)")
+            self.plot.ax.grid(True)
+            self.plot.canvas.draw_idle()
+            return
         use_ratio = self.chk_link.isChecked() and self._link_plot_available()
         fast_axis = self.cbo_fast.currentText()
         slow_axis = self.cbo_slow.currentText() if self._is_2d_map() else "None"
@@ -775,6 +981,10 @@ class CoSweepTab(BaseMeasurementTab):
             self.plot.ax.set_title(f"{self.cbo_sweep_dim.currentText()} Preview: {len(xs)} pts")
         self.plot.ax.grid(True)
         self.plot.canvas.draw_idle()
+
+    def _params_for_preview(self) -> CoParams:
+        self.collect_params()
+        return self.p
 
     def on_set_generic(self, name, button):
         if name == "Vtg":
@@ -825,6 +1035,7 @@ class CoSweepTab(BaseMeasurementTab):
         self.p.vds_stop = self.sp_vds_stop.value() if "Vds" in swept_axes else self.sp_vds_start.value()
         self.p.vds_step = abs(self.sp_vds_step.value())
         self.p.mode = "Linked" if self.chk_link.isChecked() and self._link_plot_available() else "Grid"
+        self.p.coordinate_mode = self.cbo_coordinates.currentData() or "Raw"
         self.p.axis_fast = self.cbo_fast.currentText()
         self.p.axis_slow = self.cbo_slow.currentText() if self._is_2d_map() else "None"
         self.p.ratio = self.sp_ratio.value()
@@ -835,6 +1046,14 @@ class CoSweepTab(BaseMeasurementTab):
         self.p.n_sample = self.sp_nsamp.value()
         self.p.plot_choice = self.cbo_y.currentText()
         self.p.vg_ramp = GATE_BIAS_RAMP_STEP_V
+        self.p.doping_start = self.sp_doping_start.value()
+        self.p.doping_stop = self.sp_doping_stop.value()
+        self.p.doping_step = abs(self.sp_doping_step.value())
+        self.p.efield_start = self.sp_efield_start.value()
+        self.p.efield_stop = self.sp_efield_stop.value()
+        self.p.efield_step = abs(self.sp_efield_step.value())
+        self.p.derived_fast_axis = self.p.axis_fast if self._is_derived() else "Doping"
+        self.p.derived_slow_axis = self.p.axis_slow if self._is_derived() else "E-field"
 
     def start_run(self):
         if self.worker_thread:
@@ -855,6 +1074,7 @@ class CoSweepTab(BaseMeasurementTab):
             return
         try:
             self.collect_params()
+            validate_cosweep_params(self.p)
         except Exception as ex:
             QtWidgets.QMessageBox.warning(self, "Invalid Parameters", str(ex))
             return

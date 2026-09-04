@@ -845,11 +845,19 @@ class DeviceManager(QtCore.QObject):
         self._connect_lockin(emitter=emitter)
 
     def _disconnect_all_in_thread(self, emitter):
+        zero_failures: list[str] = []
         for session_name in ("g1", "g2", "g3"):
             try:
                 self._safe_zero_keithley_before_close(session_name)
-            except Exception:
-                pass
+            except Exception as ex:
+                detail = f"{session_name.upper()} zero verification failed: {ex}"
+                zero_failures.append(detail)
+                emitter.emit(session_name, "err", detail)
+        if zero_failures:
+            raise RuntimeError(
+                "Disconnect aborted; Keithley outputs were left ON and instrument sessions were preserved. "
+                + " ".join(zero_failures)
+            )
         # Do not change DAQ AO on a normal disconnect. The last held values
         # may belong to equipment outside this run; only explicit Ramp/Zero
         # controls or Emergency Stop are allowed to modify them.
@@ -1070,6 +1078,12 @@ class DeviceManager(QtCore.QObject):
             SAFE_RAMP_STEP_V,
             SAFE_RAMP_STEP_T,
         )
+        confirmed = float(session.get_voltage_setpoint())
+        if not math.isclose(confirmed, 0.0, abs_tol=1e-9):
+            raise RuntimeError(f"final setpoint is {confirmed:g} V, not 0 V")
+        output_check = getattr(session, "is_output_enabled", None)
+        if output_check is not None and not output_check():
+            raise RuntimeError("output is not ON; the sample is not confirmed clamped at 0 V")
 
     def _daq_output_channels(self, requested: Optional[Iterable[int]] = None) -> list[int]:
         if requested is not None:

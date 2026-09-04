@@ -38,6 +38,17 @@ def sanitize_segment(value: str, fallback: str) -> str:
     return _sanitize_base(str(value or "")) or fallback
 
 
+def field_output_tag(field_t: float) -> str:
+    """Return a compact, non-scientific tag suitable for batch filenames."""
+    value = float(field_t)
+    if abs(value) < 0.5e-12:
+        value = 0.0
+    text = f"{value:.12f}".rstrip("0").rstrip(".")
+    if text == "-0":
+        text = "0"
+    return f"B_{text}T"
+
+
 def save_directory(save: SaveRoot, measurement_type: str, create: bool = False) -> str:
     user = sanitize_segment(save.user, "User")
     device_id = sanitize_segment(save.device_id, "device")

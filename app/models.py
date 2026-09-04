@@ -90,6 +90,17 @@ class CoParams:
     vds_start: float = 0.0
     vds_stop: float = 0.0
     vds_step: float = 0.01
+    # Coordinate system used by the 2D map.  ``Raw`` preserves the original
+    # Vtg/Vbg/Vds grid; ``Derived`` drives a coordinated Doping/E-field map.
+    coordinate_mode: str = "Raw"
+    derived_fast_axis: str = "Doping"
+    derived_slow_axis: str = "E-field"
+    doping_start: float = 0.0
+    doping_stop: float = 1.0
+    doping_step: float = 0.1
+    efield_start: float = 0.0
+    efield_stop: float = 1.0
+    efield_step: float = 0.1
 
 
 @dataclass
@@ -132,6 +143,73 @@ class LineSweepParams:
     plot_x_axis: str = "Follow Sweep"
     plot_x_resolved: str = "Vtg"
     sweep_both_ways: bool = False
+
+
+@dataclass
+class GateScanCondition:
+    """Frozen Gate Scan configuration used by a multi-condition series."""
+
+    name: str = "Condition"
+    params: LineSweepParams = field(default_factory=LineSweepParams)
+    enabled: bool = True
+
+
+@dataclass
+class BFieldTransportCondition:
+    """One fixed electrical operating point for a B-field transport sweep.
+
+    ``doping`` and ``efield`` are the user-facing fixed coordinates.  The
+    physical gate setpoints are derived at execution time using ``ratio`` and
+    ``ratio_target`` and are retained here for an explicit preview/readback.
+    """
+
+    name: str = "Condition 1"
+    doping: float = 0.0
+    efield: float = 0.0
+    ratio: float = 1.0
+    ratio_target: str = "Vbg"
+    vtg: float = 0.0
+    vbg: float = 0.0
+    vds: float = 0.0
+    vds_source: str = "Keithley 2400"
+    ao_channel: int = 0
+    settle_s: float = 0.5
+    enabled: bool = True
+
+    def resolve_gates(self) -> tuple[float, float]:
+        from app.gate_transform import derived_to_gates
+        return derived_to_gates(self.doping, self.efield, self.ratio, self.ratio_target)
+
+    def refresh_gates(self) -> tuple[float, float]:
+        self.vtg, self.vbg = self.resolve_gates()
+        return self.vtg, self.vbg
+
+
+@dataclass
+class BFieldTransportParams:
+    """Continuous APS100 B-field transport sweep setup."""
+
+    base_name: str = "bfield_transport"
+    start_field_t: float = -0.5
+    stop_field_t: float = 0.5
+    rate_t_per_min: float = 0.1
+    round_trip: bool = True
+    # ``adaptive`` keeps the APS driven between rows whenever thermal
+    # permission is safe; the other policies are explicit operator choices.
+    cooldown_policy: str = "adaptive"
+    acquisition_delay_s: float = 0.1
+    averages: int = 1
+    conditions: list[BFieldTransportCondition] = field(
+        default_factory=lambda: [BFieldTransportCondition()]
+    )
+    ratio: float = 1.0
+    ratio_target: str = "Vbg"
+
+
+# Friendly aliases used by integrations that call the workflow a B-field
+# sweep rather than a transport sweep.
+BFieldTransportRow = BFieldTransportCondition
+BFieldSweepParams = BFieldTransportParams
 
 
 @dataclass

@@ -583,7 +583,12 @@ class PhotocurrentTab(BaseMeasurementTab):
             not self.chk_use_vds.isChecked()
             or self._vds_is_available()
         )
-        self.btn_start.setEnabled(self.s_mono is not None and self.s_daq is not None and source_ready and self.worker_thread is None)
+        self.run_panel.set_start_available(
+            self.s_mono is not None
+            and self.s_daq is not None
+            and source_ready
+            and self.worker_thread is None
+        )
         self._update_connection_hint()
         self._update_vds_bias_state()
 

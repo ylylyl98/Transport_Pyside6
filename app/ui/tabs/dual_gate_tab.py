@@ -315,7 +315,9 @@ class DualGateTab(BaseMeasurementTab):
             self.cbo_source.currentText() != "Keithley 2400"
             or (self.s_g3 is not None and self.device_manager.is_voltage_source_mode("g3"))
         )
-        self.btn_start.setEnabled(self.s_daq is not None and source_ready and self.worker_thread is None)
+        self.run_panel.set_start_available(
+            self.s_daq is not None and source_ready and self.worker_thread is None
+        )
         self._update_connection_hint()
 
     def _sync_sessions_from_manager(self):

@@ -46,6 +46,7 @@ class LineSweepWorker(RunWorker):
         self.amp_rate = kw.get("amp_rate", 1e7)
         self.lkn_rate = kw.get("lkn_rate", 100.0)
         self.signal_chain = dict(kw.get("signal_chain") or {})
+        self.batch_metadata = dict(kw.get("batch_metadata") or {})
         self._last_vtg = None
         self._last_vbg = None
         self._last_vds = None
@@ -93,6 +94,7 @@ class LineSweepWorker(RunWorker):
                         "connections": self.conns,
                         "params": self.p,
                         "signal_chain": self.signal_chain,
+                        **self.batch_metadata,
                     },
                 )
 
@@ -153,8 +155,10 @@ class LineSweepWorker(RunWorker):
 
             with open(csv_path, "x", newline="", buffering=1, encoding="utf-8") as f:
                 w = csv.writer(f)
-                w.writerow(["Index", "Vtg", "Vbg", "Vds", "Vds_measured", "raw_X", "raw_Y", "raw_DC", "Ids_X", "Ids_Y", "Ids_DC", KEITHLEY_CHANNEL, "Doping", "E-field", "Direction"])
-                w.writerow(["#", "V", "V", "V", "V", "A", "A", "A", "A", "A", "A", "A", "V", "V", ""])
+                batch = self.batch_metadata.get("gate_scan_bfield_batch", {})
+                batch_columns = ["requested_B_T", "verified_B_T"] if batch else []
+                w.writerow(["Index", "Vtg", "Vbg", "Vds", "Vds_measured", "raw_X", "raw_Y", "raw_DC", "Ids_X", "Ids_Y", "Ids_DC", KEITHLEY_CHANNEL, "Doping", "E-field", "Direction", *batch_columns])
+                w.writerow(["#", "V", "V", "V", "V", "A", "A", "A", "A", "A", "A", "A", "V", "V", "", *(('T', 'T') if batch else ())])
                 self.log.emit(f"Trajectory acquisition started: {grand_total} points")
                 self._run_trajectory_pass(f, w, forward_traj, "forward", 0, grand_total)
                 if backward_traj:
@@ -238,6 +242,7 @@ class LineSweepWorker(RunWorker):
                 if self.p.vds_source != "Keithley 2400"
                 else None
             )
+            batch = self.batch_metadata.get("gate_scan_bfield_batch", {})
 
             w.writerow([
                 idx_offset + idx - 1,
@@ -255,6 +260,7 @@ class LineSweepWorker(RunWorker):
                 point["doping"],
                 point["efield"],
                 direction,
+                *((batch.get("requested_field_t"), batch.get("verified_field_t")) if batch else ()),
             ])
             try:
                 f.flush()
