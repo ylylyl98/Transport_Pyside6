@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from copy import deepcopy
 import json
+import os
+import re
 
 from PyQt6 import QtCore, QtWidgets
 
@@ -20,12 +22,16 @@ from app.engine.bfield_transport_sweep import (
     COOLDOWN_POLICIES,
     COOLDOWN_POLICY_LABELS,
     estimate_transport_times,
+    broadcast_condition_series,
+    build_transport_output_paths,
     normalize_cooldown_policy,
+    parse_condition_series,
+    transport_output_summary_parts,
     BFieldTransportSafetyError,
     rate_t_per_min_to_a_per_s,
     validate_setup,
 )
-from app.gate_transform import derived_to_gates
+from app.gate_transform import derived_to_gates, gates_to_derived
 from app.gate_transform import RATIO_TARGET_VBG, RATIO_TARGET_VTG, ratio_formula_text, normalize_ratio_target
 from app.models import BFieldTransportCondition, BFieldTransportParams, Connections, SaveRoot
 from app.run_output import build_planned_output
@@ -49,6 +55,9 @@ class BFieldTransportTab(BaseMeasurementTab):
         self.get_signal_chain = _kwargs.get("get_signal_chain_callable") or (lambda: None)
         self.params = BFieldTransportParams()
         self.conditions = [BFieldTransportCondition()]
+        self._output_run_id = None
+        self._planned_output = None
+        self._transport_output_paths = None
         self._locked = False
         self._execution_controller = None
         super().__init__("START B-FIELD SWEEP", "B-field (T)", "Ids (A)", ["g1", "g2", "g3", "daq"])
@@ -126,27 +135,92 @@ class BFieldTransportTab(BaseMeasurementTab):
         ctl_layout.addWidget(intro)
         self.condition_table = QtWidgets.QTableWidget(0, 9)
         self.condition_table.setHorizontalHeaderLabels(
-            ["", "Name", "Doping", "E-field", "Vds", "Source", "AO", "Vtg", "Vbg"]
+            ["", "Name", "Dop\ning", "E-\nfield", "Vds", "Sour\nce", "AO", "Vtg", "Vbg"]
         )
         self.condition_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         self.condition_table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
         self.condition_table.setMinimumHeight(150)
         self.condition_table.setMaximumHeight(330)
         self.condition_table.verticalHeader().setVisible(False)
-        self.condition_table.horizontalHeader().setStretchLastSection(True)
+        header = self.condition_table.horizontalHeader()
+        header.setStretchLastSection(False)
+        header.setMinimumSectionSize(20)
+        header.setFixedHeight(max(38, header.fontMetrics().lineSpacing() * 2 + 8))
+        header.setDefaultAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Fixed)
+        for column in (2, 3, 4, 5, 7, 8):
+            header.setSectionResizeMode(column, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        for column, width in {0: 22, 1: 48, 6: 24}.items():
+            self.condition_table.setColumnWidth(column, width)
+        for column, tooltip in enumerate((
+            "Enable condition", "Condition name", "Fixed doping", "Fixed E-field",
+            "Drain bias", "Vds source", "DAQ analog-output channel",
+            "Calculated top-gate voltage", "Calculated bottom-gate voltage",
+        )):
+            self.condition_table.horizontalHeaderItem(column).setToolTip(tooltip)
+        self.condition_table.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.condition_table.setToolTip(
+            "All condition columns fit without horizontal scrolling. Select a row to see its "
+            "complete, unabridged values below the table."
+        )
         self.condition_table.itemChanged.connect(self._condition_edited)
+        self.condition_table.itemSelectionChanged.connect(self._refresh_condition_details)
         ctl_layout.addWidget(self.condition_table)
-        row = QtWidgets.QHBoxLayout()
-        self.btn_condition_add = QtWidgets.QPushButton("Add")
+        self.lbl_condition_details = QtWidgets.QLabel()
+        self.lbl_condition_details.setWordWrap(True)
+        self.lbl_condition_details.setProperty("role", "hint")
+        self.lbl_condition_details.setMinimumWidth(0)
+        self.lbl_condition_details.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Ignored,
+            QtWidgets.QSizePolicy.Policy.Preferred,
+        )
+        ctl_layout.addWidget(self.lbl_condition_details)
+        builder = QtWidgets.QGroupBox("Quick add conditions")
+        builder_layout = QtWidgets.QVBoxLayout(builder)
+        builder_layout.setContentsMargins(8, 6, 8, 8)
+        builder_layout.setSpacing(5)
+        mode_row = QtWidgets.QHBoxLayout()
+        mode_row.addWidget(QtWidgets.QLabel("Coordinates:"))
+        self.cbo_condition_add_mode = SafeComboBox()
+        self.cbo_condition_add_mode.addItem("Doping / E-field", "derived")
+        self.cbo_condition_add_mode.addItem("Vtg / Vbg", "gates")
+        mode_row.addWidget(self.cbo_condition_add_mode, 1)
+        builder_layout.addLayout(mode_row)
+        values_row = QtWidgets.QHBoxLayout()
+        self.lbl_condition_add_first = QtWidgets.QLabel("Doping:")
+        self.ed_condition_add_first = QtWidgets.QLineEdit("0")
+        self.lbl_condition_add_second = QtWidgets.QLabel("E-field:")
+        self.ed_condition_add_second = QtWidgets.QLineEdit("0")
+        set_standard_input_height(self.ed_condition_add_first)
+        set_standard_input_height(self.ed_condition_add_second)
+        self.ed_condition_add_first.setPlaceholderText("0, 1, 2 or 0:3:1")
+        self.ed_condition_add_second.setPlaceholderText("single value or matching array")
+        values_row.addWidget(self.lbl_condition_add_first)
+        values_row.addWidget(self.ed_condition_add_first, 1)
+        values_row.addWidget(self.lbl_condition_add_second)
+        values_row.addWidget(self.ed_condition_add_second, 1)
+        builder_layout.addLayout(values_row)
+        self.lbl_condition_add_preview = QtWidgets.QLabel()
+        self.lbl_condition_add_preview.setWordWrap(True)
+        self.lbl_condition_add_preview.setProperty("role", "hint")
+        self.lbl_condition_add_preview.setMinimumWidth(0)
+        builder_layout.addWidget(self.lbl_condition_add_preview)
+        self.btn_condition_add_preview = QtWidgets.QPushButton("Add previewed conditions to table")
+        builder_layout.addWidget(self.btn_condition_add_preview)
+        ctl_layout.addWidget(builder)
         self.btn_condition_update = QtWidgets.QPushButton("Update selected")
         self.btn_condition_duplicate = QtWidgets.QPushButton("Duplicate")
         self.btn_condition_remove = QtWidgets.QPushButton("Remove")
         self.btn_condition_up = QtWidgets.QPushButton("↑")
         self.btn_condition_down = QtWidgets.QPushButton("↓")
-        for button in (self.btn_condition_add, self.btn_condition_update, self.btn_condition_duplicate, self.btn_condition_remove, self.btn_condition_up, self.btn_condition_down):
-            row.addWidget(button)
-        ctl_layout.addLayout(row)
-        self.btn_condition_add.clicked.connect(self._add_condition)
+        edit_row = QtWidgets.QHBoxLayout()
+        for button in (self.btn_condition_update, self.btn_condition_duplicate, self.btn_condition_remove, self.btn_condition_up, self.btn_condition_down):
+            edit_row.addWidget(button)
+        ctl_layout.addLayout(edit_row)
+        self.cbo_condition_add_mode.currentIndexChanged.connect(self._condition_add_mode_changed)
+        self.ed_condition_add_first.textChanged.connect(self._refresh_condition_add_preview)
+        self.ed_condition_add_second.textChanged.connect(self._refresh_condition_add_preview)
+        self.btn_condition_add_preview.clicked.connect(self._add_previewed_conditions)
         self.btn_condition_update.clicked.connect(self._update_selected)
         self.btn_condition_duplicate.clicked.connect(self._duplicate_condition)
         self.btn_condition_remove.clicked.connect(self._remove_condition)
@@ -166,6 +240,11 @@ class BFieldTransportTab(BaseMeasurementTab):
         acq_form.addRow("Averages:", self.sp_averages)
         acq_form.addRow("Filename stem:", self.ed_base)
         ctl_layout.addWidget(acq)
+        output_wrap = QtWidgets.QWidget()
+        output_layout = QtWidgets.QVBoxLayout(output_wrap)
+        output_layout.setContentsMargins(0, 0, 0, 0)
+        self._add_output_preview_section(output_layout)
+        ctl_layout.addWidget(output_wrap)
         self.lbl_preview = QtWidgets.QLabel()
         self.lbl_preview.setWordWrap(True)
         self.lbl_preview.setProperty("role", "hint")
@@ -184,9 +263,12 @@ class BFieldTransportTab(BaseMeasurementTab):
         self.sp_start.valueChanged.connect(self._refresh_rate_preview)
         self.sp_stop.valueChanged.connect(self._refresh_rate_preview)
         self.sp_rate.valueChanged.connect(self._refresh_rate_preview)
+        self.chk_round_trip.toggled.connect(self._refresh_rate_preview)
         self.sp_ratio.valueChanged.connect(self._refresh_ratio_preview)
         self.cbo_ratio_target.currentIndexChanged.connect(self._refresh_ratio_preview)
         self.cbo_cooldown_policy.currentIndexChanged.connect(self._refresh_rate_preview)
+        self.ed_base.textChanged.connect(self.refresh_output_preview)
+        self._condition_add_mode_changed()
         self._refresh_rate_preview()
         self._refresh_ratio_preview()
 
@@ -219,6 +301,10 @@ class BFieldTransportTab(BaseMeasurementTab):
                 values = json.loads(str(raw_conditions))
                 loaded = [BFieldTransportCondition(**dict(item)) for item in values]
                 if loaded:
+                    for condition in loaded:
+                        legacy_name = re.fullmatch(r"Condition\s+(\d+)(.*)", condition.name)
+                        if legacy_name:
+                            condition.name = f"Con{legacy_name.group(1)}{legacy_name.group(2)}"
                     self.conditions = loaded
                     # Migrate legacy per-row ratio fields once.  A persisted
                     # global value wins; otherwise the first row is the only
@@ -253,7 +339,23 @@ class BFieldTransportTab(BaseMeasurementTab):
     @staticmethod
     def _condition_values(condition):
         condition.refresh_gates()
-        return ["✓" if condition.enabled else "", condition.name, f"{condition.doping:g}", f"{condition.efield:g}", f"{condition.vds:g}", condition.vds_source, str(condition.ao_channel), f"{condition.vtg:g}", f"{condition.vbg:g}"]
+        source = "K2400" if condition.vds_source == "Keithley 2400" else (
+            "DAQ" if condition.vds_source == "NI DAQ AO" else condition.vds_source
+        )
+        return ["✓" if condition.enabled else "", condition.name, f"{condition.doping:g}", f"{condition.efield:g}", f"{condition.vds:g}", source, str(condition.ao_channel), f"{condition.vtg:g}", f"{condition.vbg:g}"]
+
+    @staticmethod
+    def _canonical_vds_source(value):
+        source = str(value or "").strip()
+        aliases = {
+            "k2400": "Keithley 2400",
+            "keithley": "Keithley 2400",
+            "keithley 2400": "Keithley 2400",
+            "daq": "NI DAQ AO",
+            "ni daq": "NI DAQ AO",
+            "ni daq ao": "NI DAQ AO",
+        }
+        return aliases.get(source.lower(), source or "Keithley 2400")
 
     def _apply_global_ratio(self):
         ratio = float(self.sp_ratio.value())
@@ -272,6 +374,8 @@ class BFieldTransportTab(BaseMeasurementTab):
             self._apply_global_ratio()
             if hasattr(self, "condition_table"):
                 self._refresh_conditions()
+            if hasattr(self, "lbl_condition_add_preview"):
+                self._refresh_condition_add_preview()
         except Exception as exc:
             self.lbl_ratio_formula.setText(f"Invalid ratio: {exc}")
 
@@ -290,10 +394,13 @@ class BFieldTransportTab(BaseMeasurementTab):
                         item.setFlags(item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
                     if column == 0:
                         item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+                    else:
+                        item.setToolTip(condition.vds_source if column == 5 else value)
                     self.condition_table.setItem(row, column, item)
         finally:
             self.condition_table.blockSignals(False)
         self._update_condition_buttons()
+        self._refresh_condition_details()
         self.refresh_output_preview()
 
     def _condition_from_row(self, row):
@@ -302,9 +409,9 @@ class BFieldTransportTab(BaseMeasurementTab):
             return item.text().strip() if item else ""
         try:
             condition = BFieldTransportCondition(
-                name=text(1) or f"Condition {row + 1}", doping=float(text(2)), efield=float(text(3)),
+                name=text(1) or f"Con{row + 1}", doping=float(text(2)), efield=float(text(3)),
                 ratio=self.sp_ratio.value(), ratio_target=self.cbo_ratio_target.currentData() or RATIO_TARGET_VBG,
-                vds=float(text(4)), vds_source=text(5) or "Keithley 2400", ao_channel=int(text(6) or 0),
+                vds=float(text(4)), vds_source=self._canonical_vds_source(text(5)), ao_channel=int(text(6) or 0),
                 enabled=(self.condition_table.item(row, 0).checkState() == QtCore.Qt.CheckState.Checked),
             )
             condition.refresh_gates()
@@ -326,6 +433,32 @@ class BFieldTransportTab(BaseMeasurementTab):
             except Exception:
                 pass
         self._update_condition_buttons()
+        self._refresh_condition_details()
+        self.refresh_output_preview()
+
+    def _refresh_condition_details(self, *_args):
+        if not hasattr(self, "lbl_condition_details"):
+            return
+        row = self._selected_row()
+        if row < 0 and self.condition_table.rowCount():
+            row = 0
+        if row < 0:
+            self.lbl_condition_details.setText("No gate conditions configured.")
+            return
+        try:
+            condition = self._condition_from_row(row)
+        except Exception:
+            condition = self.conditions[row] if row < len(self.conditions) else None
+        if condition is None:
+            self.lbl_condition_details.setText("Selected condition contains invalid values.")
+            return
+        condition.refresh_gates()
+        state = "Enabled" if condition.enabled else "Disabled"
+        self.lbl_condition_details.setText(
+            f"{condition.name} | {state} | Doping {condition.doping:g} | "
+            f"E-field {condition.efield:g} | Vds {condition.vds:g} V from {condition.vds_source} | "
+            f"AO{condition.ao_channel} | Vtg {condition.vtg:g} V | Vbg {condition.vbg:g} V"
+        )
 
     def _selected_row(self):
         selected = self.condition_table.selectionModel().selectedRows()
@@ -338,10 +471,85 @@ class BFieldTransportTab(BaseMeasurementTab):
             button.setEnabled(enabled)
         self.btn_condition_remove.setEnabled(len(self.conditions) > 1 and enabled)
 
-    def _add_condition(self):
-        self.conditions.append(BFieldTransportCondition(name=f"Condition {len(self.conditions) + 1}"))
+    def _condition_add_mode_changed(self, *_args):
+        gates = self.cbo_condition_add_mode.currentData() == "gates"
+        self.lbl_condition_add_first.setText("Vtg:" if gates else "Doping:")
+        self.lbl_condition_add_second.setText("Vbg:" if gates else "E-field:")
+        self._refresh_condition_add_preview()
+
+    def _next_condition_name(self):
+        used = {condition.name for condition in self.conditions}
+        index = 1
+        while f"Con{index}" in used:
+            index += 1
+        return f"Con{index}"
+
+    def _previewed_add_conditions(self):
+        gates = self.cbo_condition_add_mode.currentData() == "gates"
+        first_label, second_label = (("Vtg", "Vbg") if gates else ("Doping", "E-field"))
+        first = parse_condition_series(self.ed_condition_add_first.text(), first_label)
+        second = parse_condition_series(self.ed_condition_add_second.text(), second_label)
+        pairs = broadcast_condition_series(first, second, first_label, second_label)
+        ratio = float(self.sp_ratio.value())
+        target = self.cbo_ratio_target.currentData() or RATIO_TARGET_VBG
+        conditions = []
+        for first_value, second_value in pairs:
+            if gates:
+                doping, efield = gates_to_derived(first_value, second_value, ratio, target)
+            else:
+                doping, efield = first_value, second_value
+            condition = BFieldTransportCondition(
+                name="",
+                doping=doping,
+                efield=efield,
+                ratio=ratio,
+                ratio_target=target,
+            )
+            condition.refresh_gates()
+            conditions.append(condition)
+        return conditions
+
+    def _refresh_condition_add_preview(self, *_args):
+        try:
+            conditions = self._previewed_add_conditions()
+            lines = [f"Preview ({len(conditions)} condition{'s' if len(conditions) != 1 else ''}):"]
+            for index, condition in enumerate(conditions[:4], start=1):
+                lines.append(
+                    f"{index}. Doping {condition.doping:g}, E-field {condition.efield:g} "
+                    f"→ Vtg {condition.vtg:g} V, Vbg {condition.vbg:g} V"
+                )
+            if len(conditions) > 4:
+                lines.append(f"... {len(conditions) - 4} more")
+            self.lbl_condition_add_preview.setText("\n".join(lines))
+            self.lbl_condition_add_preview.setToolTip(
+                "\n".join(
+                    f"{index}. Doping {condition.doping:g}, E-field {condition.efield:g}, "
+                    f"Vtg {condition.vtg:g} V, Vbg {condition.vbg:g} V"
+                    for index, condition in enumerate(conditions, start=1)
+                )
+            )
+            self.lbl_condition_add_preview.setProperty("role", "hint")
+            self.btn_condition_add_preview.setEnabled(True)
+        except Exception as exc:
+            self.lbl_condition_add_preview.setText(f"Cannot preview: {exc}")
+            self.lbl_condition_add_preview.setToolTip("")
+            self.lbl_condition_add_preview.setProperty("role", "warning-hint")
+            self.btn_condition_add_preview.setEnabled(False)
+        self.lbl_condition_add_preview.style().unpolish(self.lbl_condition_add_preview)
+        self.lbl_condition_add_preview.style().polish(self.lbl_condition_add_preview)
+
+    def _add_previewed_conditions(self):
+        try:
+            pending = self._previewed_add_conditions()
+        except Exception:
+            self._refresh_condition_add_preview()
+            return
+        first_new_row = len(self.conditions)
+        for condition in pending:
+            condition.name = self._next_condition_name()
+            self.conditions.append(condition)
         self._refresh_conditions()
-        self.condition_table.selectRow(len(self.conditions) - 1)
+        self.condition_table.selectRow(first_new_row)
 
     def _update_selected(self):
         row = self._selected_row()
@@ -421,6 +629,8 @@ class BFieldTransportTab(BaseMeasurementTab):
             self.lbl_preview.setProperty("role", "warning-hint")
             if hasattr(self, "lbl_time_estimate"):
                 self.lbl_time_estimate.setText("")
+        if hasattr(self, "lbl_filename_preview"):
+            self.refresh_output_preview()
 
     def collect_params(self):
         self.conditions = self._collect_conditions()
@@ -445,15 +655,109 @@ class BFieldTransportTab(BaseMeasurementTab):
             raise BFieldTransportSafetyError("Enable at least one fixed transport condition")
         return result
 
-    def refresh_output_preview(self):
-        """Refresh the lightweight preview used by MainWindow save updates."""
-        if hasattr(self, "lbl_preview"):
-            self._refresh_rate_preview()
+    def _preview_params(self):
+        try:
+            conditions = self._collect_conditions()
+        except Exception:
+            conditions = deepcopy(self.conditions)
+        return BFieldTransportParams(
+            base_name=self.ed_base.text().strip() or "bfield_transport",
+            start_field_t=self.sp_start.value(),
+            stop_field_t=self.sp_stop.value(),
+            rate_t_per_min=self.sp_rate.value(),
+            round_trip=self.chk_round_trip.isChecked(),
+            conditions=conditions,
+        )
+
+    def freeze_output_plan(self, params=None):
+        """Build and retain the exact paths that the controller must use."""
+        params = deepcopy(params) if params is not None else self._preview_params()
+        signal_chain = self.get_signal_chain()
+        planned = build_planned_output(
+            self.save,
+            "bfield_transport",
+            params.base_name,
+            transport_output_summary_parts(params, signal_chain),
+            run_id=self._output_run_id,
+        )
+        self._output_run_id = planned.run_id
+        self._planned_output = planned
+        enabled = [condition for condition in params.conditions if condition.enabled]
+        self._transport_output_paths = build_transport_output_paths(planned, enabled)
+        return self._transport_output_paths
+
+    def _output_warning(self, paths):
+        warnings = []
+        if not str(self.save.user or "").strip():
+            warnings.append("Operator is blank")
+        if not str(self.save.device_id or "").strip():
+            warnings.append("Device ID is blank")
+        if not str(self.save.base or "").strip():
+            warnings.append("Data root is blank")
+        existing = [os.path.basename(path) for path in paths.all_paths if os.path.exists(path)]
+        if existing:
+            warnings.append("output already exists: " + ", ".join(existing[:3]))
+        return "; ".join(warnings)
+
+    def validate_transport_output_ready(self, paths=None):
+        paths = paths or self._transport_output_paths
+        if paths is None:
+            raise BFieldTransportSafetyError("Output plan is unavailable")
+        missing = []
+        if not str(self.save.user or "").strip():
+            missing.append("Operator")
+        if not str(self.save.device_id or "").strip():
+            missing.append("Device ID")
+        if not str(self.save.base or "").strip():
+            missing.append("Data Root")
+        if missing:
+            raise BFieldTransportSafetyError(
+                "Fill in required save settings before starting: " + ", ".join(missing)
+            )
+        existing = [path for path in paths.all_paths if os.path.exists(path)]
+        if existing:
+            raise BFieldTransportSafetyError(
+                "Output file already exists. Change the filename stem or reset the preview: "
+                + ", ".join(os.path.basename(path) for path in existing)
+            )
+        os.makedirs(paths.planned.output_dir, exist_ok=True)
+
+    def refresh_output_preview(self, *_args):
+        """Refresh the full series preview used by MainWindow save updates."""
+        if not hasattr(self, "lbl_filename_preview"):
+            return
+        try:
+            paths = self.freeze_output_plan()
+            csv_names = [os.path.basename(path) for path in paths.condition_csv_paths]
+            preview = csv_names[0] if len(csv_names) == 1 else f"{len(csv_names)} CSV files:\n" + "\n".join(csv_names[:3])
+            if len(csv_names) > 3:
+                preview += f"\n... {len(csv_names) - 3} more"
+            self.lbl_filename_preview.setPlainText(preview or "No enabled condition CSV files")
+            self.lbl_filename_preview.setToolTip("\n".join(paths.condition_csv_paths))
+            self.lbl_path_preview.setPlainText(paths.planned.output_dir)
+            self.lbl_path_preview.setToolTip(paths.planned.output_dir)
+            self.lbl_metadata_preview.setPlainText(
+                os.path.basename(paths.manifest_path) + "\n" + os.path.basename(paths.checkpoint_path)
+            )
+            self.lbl_metadata_preview.setToolTip(paths.manifest_path + "\n" + paths.checkpoint_path)
+            self.lbl_log_preview.setPlainText(os.path.basename(paths.log_path))
+            self.lbl_log_preview.setToolTip(paths.log_path)
+            warning = self._output_warning(paths)
+            self.lbl_output_warning.setText(warning)
+            self._output_warning_row.setVisible(bool(warning))
+        except Exception as exc:
+            self.lbl_filename_preview.setPlainText(f"Invalid output preview: {exc}")
+
+    def reset_output_preview(self):
+        self._output_run_id = None
+        self.refresh_output_preview()
 
     def set_sweep_locked(self, locked: bool):
         self._locked = bool(locked)
         for widget in (self.sp_start, self.sp_stop, self.sp_rate, self.chk_round_trip, self.condition_table,
-                       self.btn_condition_add, self.btn_condition_update, self.btn_condition_duplicate,
+                       self.cbo_condition_add_mode, self.ed_condition_add_first,
+                       self.ed_condition_add_second, self.btn_condition_add_preview,
+                       self.btn_condition_update, self.btn_condition_duplicate,
                        self.btn_condition_remove, self.btn_condition_up, self.btn_condition_down):
             widget.setEnabled(not self._locked)
         self.btn_stop.setEnabled(self._locked)

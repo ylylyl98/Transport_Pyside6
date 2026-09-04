@@ -6,6 +6,7 @@ import unittest
 from PyQt6 import QtCore
 
 from app.engine.bfield_transport_sweep import (
+    build_transport_output_paths,
     BFieldTransportSafetyError,
     BFieldTransportSweep,
     COIL_CONSTANT_T_PER_A,
@@ -20,12 +21,44 @@ from app.engine.bfield_transport_sweep import (
     TransportSweepPlan,
     estimate_transport_times,
     normalize_cooldown_policy,
+    transport_output_summary_parts,
 )
 from app.engine.bfield_transport_controller import BFieldTransportController
-from app.models import BFieldTransportCondition, BFieldTransportParams
+from app.models import BFieldTransportCondition, BFieldTransportParams, SaveRoot
+from app.run_output import build_planned_output
+from app.signal_chain import SignalChainSnapshot
 
 
 class BFieldTransportSweepTests(unittest.TestCase):
+    def test_transport_output_names_include_sweep_signal_chain_and_condition_names(self):
+        params = BFieldTransportParams(
+            start_field_t=-0.5,
+            stop_field_t=0.5,
+            rate_t_per_min=0.1,
+            round_trip=True,
+            conditions=[
+                BFieldTransportCondition(name="Neutral point"),
+                BFieldTransportCondition(name="High / doping"),
+            ],
+        )
+        signal_chain = SignalChainSnapshot(1000.0, 0.02, 100e-9)
+        parts = transport_output_summary_parts(params, signal_chain)
+        self.assertEqual(parts[:4], ["B_-0.5to0.5T", "round_trip", "rate_0.1Tpermin", "2conditions"])
+        self.assertEqual(parts[-3:], ["freq_1kHz", "lia_20mV", "preamp_100nA"])
+
+        planned = build_planned_output(
+            SaveRoot(base=".", user="operator", device_id="sample"),
+            "bfield_transport",
+            "transport",
+            parts,
+            run_id="run",
+        )
+        paths = build_transport_output_paths(planned, params.conditions)
+        self.assertIn("B_-0.5to0.5T_round_trip_rate_0.1Tpermin_2conditions", planned.stem)
+        self.assertTrue(paths.condition_csv_paths[0].endswith("_C01_Neutral_point.csv"))
+        self.assertTrue(paths.condition_csv_paths[1].endswith("_C02_High_doping.csv"))
+        self.assertIn(paths.manifest_path, paths.all_paths)
+
     def test_adaptive_is_default_and_policy_estimates_preserve_trajectory(self):
         self.assertEqual(BFieldTransportParams().cooldown_policy, "adaptive")
         self.assertEqual(normalize_cooldown_policy("Stay driven"), "stay_driven")
@@ -201,8 +234,21 @@ class BFieldTransportSweepTests(unittest.TestCase):
             def is_voltage_source_mode(self, name): return name in self.sessions
             def applied_gate_voltage_limit(self, name): return 20.0
         class Tab(QtCore.QObject):
-            def __init__(self): super().__init__(); self.save = type("Save", (), {"user": "u", "device_id": "d", "base": tempfile.gettempdir()})(); self.locked = []
+            def __init__(self):
+                super().__init__()
+                self.temporary = tempfile.TemporaryDirectory()
+                self.save = SaveRoot(user="u", device_id="d", base=self.temporary.name)
+                self.locked = []
+                self.frozen_paths = None
             def collect_params(self): return BFieldTransportParams(start_field_t=0, stop_field_t=1, conditions=[BFieldTransportCondition()])
+            def freeze_output_plan(self, params):
+                planned = build_planned_output(
+                    self.save, "bfield_transport", params.base_name,
+                    transport_output_summary_parts(params), run_id="controller_exact",
+                )
+                self.frozen_paths = build_transport_output_paths(planned, params.conditions)
+                return self.frozen_paths
+            def validate_transport_output_ready(self, paths): os.makedirs(paths.planned.output_dir, exist_ok=True)
             def set_sweep_locked(self, value): self.locked.append(value)
             def window(self): return type("Window", (), {"magnet_panel": type("Panel", (), {"_review_valid": lambda self: True})()})()
         magnet, manager, tab = Magnet(), Manager(), Tab()
@@ -213,11 +259,14 @@ class BFieldTransportSweepTests(unittest.TestCase):
         })()
         controller = BFieldTransportController(magnet, tab, manager, thermal_safety=thermal)
         self.assertTrue(controller.start())
+        self.assertEqual(controller._manifest, tab.frozen_paths.manifest_path)
+        self.assertEqual(tuple(writer.path for writer in controller._writers.values()), tab.frozen_paths.condition_csv_paths)
         self.assertIn(("configure", .1, 6.0), magnet.events)
         self.assertTrue(controller.active)
         controller.stop()
         self.assertIn("persistent", magnet.events)
         self.assertIn(("release", "bfield-transport"), magnet.events)
+        tab.temporary.cleanup()
 
 
 if __name__ == "__main__":

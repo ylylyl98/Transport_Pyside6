@@ -18,6 +18,8 @@ from app.engine.bfield_transport_sweep import (
     BFieldTransportSafetyError,
     TransportCsvWriter,
     TransportSweepPlan,
+    build_transport_output_paths,
+    transport_output_summary_parts,
     validate_voltage_margin,
     write_series_manifest,
     normalize_cooldown_policy,
@@ -52,6 +54,7 @@ class BFieldTransportController(QtCore.QObject):
         self._stored_rates = self._stored_limits = None
         self._persistent_confirmation_granted = False
         self._writers = {}
+        self._transport_outputs = None
         self._manifest = self._checkpoint = None
         self._log_path = None
         self._results = []
@@ -103,6 +106,25 @@ class BFieldTransportController(QtCore.QObject):
         try:
             params = self.tab.collect_params()
             self.plan = TransportSweepPlan.from_params(params)
+            if hasattr(self.tab, "freeze_output_plan"):
+                self._transport_outputs = self.tab.freeze_output_plan(params)
+                self.tab.validate_transport_output_ready(self._transport_outputs)
+            else:
+                signal_getter = getattr(self.tab, "get_signal_chain", None)
+                signal_chain = signal_getter() if callable(signal_getter) else None
+                planned = build_planned_output(
+                    self.tab.save,
+                    "bfield_transport",
+                    params.base_name,
+                    transport_output_summary_parts(params, signal_chain),
+                )
+                self._transport_outputs = build_transport_output_paths(planned, self.plan.conditions)
+                existing = [path for path in self._transport_outputs.all_paths if os.path.exists(path)]
+                if existing:
+                    raise BFieldTransportSafetyError(
+                        "Output file already exists: " + ", ".join(os.path.basename(path) for path in existing)
+                    )
+                os.makedirs(planned.output_dir, exist_ok=True)
             policy = normalize_cooldown_policy(self.plan.params.cooldown_policy)
             window = self.tab.window()
             panel = getattr(window, "magnet_panel", None)
@@ -169,16 +191,17 @@ class BFieldTransportController(QtCore.QObject):
                 self._exclusive_acquired = False
                 raise BFieldTransportSafetyError("Transport devices already in use: " + ", ".join(blocked))
             self._claimed = required
-            planned = build_planned_output(self.tab.save, "bfield_transport", params.base_name, create_dir=True)
-            self._manifest = os.path.join(planned.output_dir, planned.stem + "_series_manifest.json")
-            self._checkpoint = os.path.join(planned.output_dir, planned.stem + "_series_checkpoint.json")
-            self._log_path = os.path.join(planned.output_dir, planned.stem + "_series_log.txt")
+            self._manifest = self._transport_outputs.manifest_path
+            self._checkpoint = self._transport_outputs.checkpoint_path
+            self._log_path = self._transport_outputs.log_path
             self._log("B-field Transport series started")
             write_series_manifest(self._manifest, params=params, validation=self.plan.validation)
             write_series_manifest(self._checkpoint, params=params, validation=self.plan.validation)
             self._writers = {}
-            for index, condition in enumerate(self.plan.conditions, start=1):
-                self._writers[index] = TransportCsvWriter(os.path.join(planned.output_dir, f"{planned.stem}_C{index}.csv"), condition)
+            for index, (condition, csv_path) in enumerate(
+                zip(self.plan.conditions, self._transport_outputs.condition_csv_paths), start=1
+            ):
+                self._writers[index] = TransportCsvWriter(csv_path, condition)
             self._active = True
             self._stop_requested = False
             self._started_monotonic = time.monotonic()
@@ -411,6 +434,8 @@ class BFieldTransportController(QtCore.QObject):
         self._active = False
         self._cleanup_in_progress = False
         self.tab.set_sweep_locked(False)
+        if hasattr(self.tab, "reset_output_preview"):
+            self.tab.reset_output_preview()
         self.state_changed.emit(self._cleanup_status, self._cleanup_detail or self._cleanup_status)
         if self._cleanup_status == "finished": self.finished.emit()
         elif self._cleanup_status == "stopped": self.stopped.emit(self._cleanup_detail or "B-field Transport stopped")

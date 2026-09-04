@@ -19,6 +19,8 @@ from typing import Iterable, Mapping
 
 from app.gate_transform import derived_to_gates
 from app.models import BFieldTransportCondition, BFieldTransportParams
+from app.run_output import PlannedOutput, sanitize_segment
+from app.signal_chain import signal_chain_filename_parts
 from utils.config import cfg
 
 
@@ -40,6 +42,138 @@ COOLDOWN_POLICY_LABELS = {
 
 class BFieldTransportSafetyError(ValueError):
     """Raised when a requested transport sweep is outside its envelope."""
+
+
+def parse_condition_series(text: str, label: str, *, maximum: int = 100) -> tuple[float, ...]:
+    """Parse scalars, bracketed arrays, and exclusive ``start:stop:step`` ranges."""
+    source = str(text or "").strip()
+    if source.startswith("[") or source.endswith("]"):
+        if not (source.startswith("[") and source.endswith("]")):
+            raise ValueError(f"{label}: array brackets must be paired")
+        source = source[1:-1]
+    values: list[float] = []
+    for raw in source.replace(";", ",").replace("\n", ",").split(","):
+        token = raw.strip()
+        if not token:
+            continue
+        if ":" not in token:
+            try:
+                value = float(token)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"{label}: {token!r} is not a number") from exc
+            if not math.isfinite(value):
+                raise ValueError(f"{label}: values must be finite")
+            values.append(value)
+        else:
+            parts = [part.strip() for part in token.split(":")]
+            if len(parts) != 3 or any(not part for part in parts):
+                raise ValueError(f"{label}: use start:stop:step for ranges")
+            try:
+                start, stop, step = (float(part) for part in parts)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"{label}: range values must be numbers") from exc
+            if not all(math.isfinite(value) for value in (start, stop, step)):
+                raise ValueError(f"{label}: range values must be finite")
+            if step == 0:
+                raise ValueError(f"{label}: range step cannot be zero")
+            distance = (stop - start) / step
+            if not math.isfinite(distance):
+                raise ValueError(f"{label}: range is too large")
+            if distance < 0:
+                raise ValueError(f"{label}: range step direction does not reach its stop")
+            count = max(0, math.ceil(distance))
+            if len(values) + count > maximum:
+                raise ValueError(f"{label}: series cannot exceed {maximum} values")
+            for index in range(count):
+                value = start + index * step
+                if (step > 0 and value >= stop) or (step < 0 and value <= stop):
+                    break
+                values.append(0.0 if abs(value) < 0.5e-12 else value)
+        if len(values) > maximum:
+            raise ValueError(f"{label}: series cannot exceed {maximum} values")
+    if not values:
+        raise ValueError(f"Enter at least one {label} value")
+    return tuple(0.0 if abs(value) < 0.5e-12 else value for value in values)
+
+
+def broadcast_condition_series(
+    first: tuple[float, ...],
+    second: tuple[float, ...],
+    first_label: str,
+    second_label: str,
+) -> tuple[tuple[float, float], ...]:
+    """Pair equal arrays or broadcast either scalar across the other array."""
+    if len(first) == len(second):
+        return tuple(zip(first, second))
+    if len(first) == 1:
+        return tuple((first[0], value) for value in second)
+    if len(second) == 1:
+        return tuple((value, second[0]) for value in first)
+    raise ValueError(
+        f"{first_label} and {second_label} must have equal lengths, or one must be a single value"
+    )
+
+
+def transport_output_summary_parts(
+    params: BFieldTransportParams,
+    signal_chain=None,
+) -> list[str]:
+    """Return the filename tags shared by the transport preview and runner."""
+    direction = "round_trip" if params.round_trip else "one_way"
+    enabled_count = sum(1 for condition in params.conditions if condition.enabled)
+    parts = [
+        f"B_{params.start_field_t:g}to{params.stop_field_t:g}T",
+        direction,
+        f"rate_{params.rate_t_per_min:g}Tpermin",
+        f"{enabled_count}conditions",
+    ]
+    if signal_chain is not None:
+        parts.extend(signal_chain_filename_parts(signal_chain))
+    return parts
+
+
+@dataclass(frozen=True)
+class BFieldTransportOutputPaths:
+    """Every file produced by one multi-condition transport series."""
+
+    planned: PlannedOutput
+    condition_csv_paths: tuple[str, ...]
+    manifest_path: str
+    checkpoint_path: str
+    log_path: str
+
+    @property
+    def all_paths(self) -> tuple[str, ...]:
+        return (
+            *self.condition_csv_paths,
+            self.manifest_path,
+            self.checkpoint_path,
+            self.log_path,
+        )
+
+
+def build_transport_output_paths(
+    planned: PlannedOutput,
+    conditions: Iterable[BFieldTransportCondition],
+) -> BFieldTransportOutputPaths:
+    """Expand a series stem into readable, collision-checkable output paths."""
+    condition_paths = []
+    for index, condition in enumerate(conditions, start=1):
+        fallback = f"condition_{index}"
+        condition_name = sanitize_segment(condition.name, fallback)
+        condition_paths.append(
+            os.path.join(
+                planned.output_dir,
+                f"{planned.stem}_C{index:02d}_{condition_name}.csv",
+            )
+        )
+    return BFieldTransportOutputPaths(
+        planned=planned,
+        condition_csv_paths=tuple(condition_paths),
+        manifest_path=os.path.join(planned.output_dir, planned.stem + "_series_manifest.json"),
+        checkpoint_path=os.path.join(planned.output_dir, planned.stem + "_series_checkpoint.json"),
+        log_path=os.path.join(planned.output_dir, planned.stem + "_series_log.txt"),
+    )
 
 
 def normalize_cooldown_policy(policy: str | None) -> str:

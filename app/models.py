@@ -163,7 +163,7 @@ class BFieldTransportCondition:
     ``ratio_target`` and are retained here for an explicit preview/readback.
     """
 
-    name: str = "Condition 1"
+    name: str = "Con1"
     doping: float = 0.0
     efield: float = 0.0
     ratio: float = 1.0
