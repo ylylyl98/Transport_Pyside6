@@ -822,7 +822,7 @@ class MagnetPanel(QtWidgets.QWidget):
         if (
             self._last_progress_log_at is None
             or label != self._last_progress_label
-            or now - self._last_progress_log_at >= 1.0
+            or now - self._last_progress_log_at >= 10.0
         ):
             self._append_activity(
                 f"{label}: {numeric:.3f} {unit}".rstrip(), "PROGRESS"

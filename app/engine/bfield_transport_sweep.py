@@ -446,6 +446,7 @@ class TransportCsvWriter:
         "Doping", "E-field", "Vtg", "Vbg", "Vds", "Vds_measured",
         "raw_X", "raw_Y", "raw_DC", "Ids_X", "Ids_Y", "Ids_DC", "Keithley_current",
         "Sample_temperature_K", "Reservoir_temperature_K",
+        "Acquisition_started", "Acquisition_finished", "Keithley_read_error",
     )
 
     def __post_init__(self):
@@ -517,7 +518,9 @@ class TransportSweepPlan:
     @classmethod
     def from_params(cls, params: BFieldTransportParams, **validation_kwargs):
         params.cooldown_policy = normalize_cooldown_policy(params.cooldown_policy)
-        params.final_mode = normalize_final_mode(params.final_mode)
+        # Successful transport completion always keeps the heater on, including
+        # recipes saved before this policy. Failure cleanup remains Persistent.
+        params.final_mode = "driven"
         validation = validate_setup(
             params.start_field_t, params.stop_field_t, params.rate_t_per_min,
             **validation_kwargs,
@@ -573,7 +576,7 @@ class BFieldTransportSweep:
 
     def run(self, *, persistent_field_confirmed: bool = False) -> list[dict]:
         params = self.plan.params
-        final_mode = normalize_final_mode(getattr(params, "final_mode", "persistent"))
+        final_mode = "driven"
         started = False
         captured_rates = captured_limits = None
         status = "stopped"

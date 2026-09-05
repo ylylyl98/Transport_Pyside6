@@ -126,6 +126,10 @@ class LakeShore335Controller(QObject):
         super().__init__(parent)
         self._thread = QThread(self)
         self._worker = _LakeShoreWorker()
+        from app.engine.transport_tasks import LatestTelemetry
+        self.telemetry_cache = LatestTelemetry()
+        self._worker.snapshot_updated.connect(self.telemetry_cache.publish, Qt.ConnectionType.DirectConnection)
+        self._worker.disconnected.connect(self.telemetry_cache.clear, Qt.ConnectionType.DirectConnection)
         self._worker.moveToThread(self._thread)
         self._connect_requested.connect(self._worker.connect_instrument, Qt.ConnectionType.QueuedConnection)
         self._disconnect_requested.connect(self._worker.disconnect_instrument, Qt.ConnectionType.QueuedConnection)
@@ -135,7 +139,8 @@ class LakeShore335Controller(QObject):
         self._heater_off_requested.connect(self._worker.heater_off, Qt.ConnectionType.QueuedConnection)
         self._worker.connected.connect(self.connected)
         self._worker.disconnected.connect(self.disconnected)
-        self._worker.snapshot_updated.connect(self.snapshot_updated)
+        self._last_delivered_snapshot = None
+        self._worker.snapshot_updated.connect(self._deliver_latest_snapshot)
         self._worker.error.connect(self.error)
         self._worker.fault.connect(self.fault)
         self._worker.control_result.connect(self.control_result)
@@ -144,6 +149,12 @@ class LakeShore335Controller(QObject):
     @property
     def adapter(self):
         return self._worker.adapter
+
+    def _deliver_latest_snapshot(self, _queued_snapshot):
+        snapshot = self.telemetry_cache.get()
+        if snapshot is not None and snapshot is not self._last_delivered_snapshot:
+            self._last_delivered_snapshot = snapshot
+            self.snapshot_updated.emit(snapshot)
 
     @property
     def is_connected(self):

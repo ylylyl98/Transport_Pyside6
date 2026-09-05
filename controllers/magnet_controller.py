@@ -5,6 +5,7 @@ from __future__ import annotations
 import threading
 import traceback
 import uuid
+import math
 from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Optional
@@ -16,6 +17,7 @@ Slot = pyqtSlot
 
 from app.devices.aps100_attodry1000_adapter import (
     APS100AttoDry1000Adapter,
+    APS100SafetyError,
     MockAPS100Adapter,
 )
 from utils.config import cfg
@@ -179,9 +181,20 @@ class _MagnetWorker(QObject):
         if self.adapter is None:
             return
         try:
+            rates = self.adapter.get_rates()
+            fast_reader = getattr(self.adapter, "get_fast_rate_a_per_s", None)
+            fast_rate_a = float(fast_reader()) if callable(fast_reader) else None
+            fast_rate_t = None
+            fast_t_reader = getattr(self.adapter, "get_fast_rate_t_per_min", None)
+            if callable(fast_t_reader):
+                fast_rate_t = float(fast_t_reader())
             self.rates_updated.emit(
                 {
-                    "rates": self.adapter.get_rates(),
+                    "rates": rates,
+                    "fast_rate_a_per_s": fast_rate_a,
+                    "fast_rate_t_per_min": fast_rate_t,
+                    "rate_units": {"normal": {"current": "A/s", "field": "T/min"},
+                                   "fast": {"current": "A/s", "field": "T/min"}},
                     "voltage_limit_v": self.adapter.get_voltage_limit_v(),
                 }
             )
@@ -380,6 +393,23 @@ class _MagnetWorker(QObject):
         phase = "capturing current APS100 settings"
         try:
             rates = self.adapter.get_rates()
+            fast_rate_a = None
+            fast_rate_t = None
+            fast_reader = getattr(self.adapter, "get_fast_rate_a_per_s", None)
+            if callable(fast_reader):
+                fast_rate_a = float(fast_reader())
+                if not math.isfinite(fast_rate_a) or fast_rate_a <= 0.0:
+                    raise APS100SafetyError(
+                        f"APS100 Fast Mode RATE? 5 is invalid: {fast_rate_a!r} A/s"
+                    )
+                fast_t_reader = getattr(self.adapter, "get_fast_rate_t_per_min", None)
+                fast_rate_t = float(fast_t_reader()) if callable(fast_t_reader) else (
+                    fast_rate_a * self.adapter.coil_constant_t_per_a * 60.0
+                )
+                if not math.isfinite(fast_rate_t) or fast_rate_t <= 0.0:
+                    raise APS100SafetyError(
+                        f"APS100 Fast Mode RATE? 5 is invalid: {fast_rate_t!r} T/min"
+                    )
             limits = self.adapter.get_limits_t()
             voltage = self.adapter.get_voltage_limit_v()
             # RATE, LLIM and ULIM are remote-only APS100 commands.  A normal
@@ -398,6 +428,10 @@ class _MagnetWorker(QObject):
             self.transport_config_result.emit({
                 "success": True, "stored_rates": rates, "stored_limits": limits,
                 "voltage_limit_v": voltage, "rates": changed, "limits": actual_limits,
+                "stored_fast_rate_a_per_s": fast_rate_a,
+                "stored_fast_rate_t_per_min": fast_rate_t,
+                "rate_units": {"normal": {"current": "A/s", "field": "T/min"},
+                               "fast": {"current": "A/s", "field": "T/min"}},
             })
         except Exception as exc:
             rollback_failures = []
@@ -492,6 +526,10 @@ class MagnetController(QObject):
         super().__init__(parent)
         self._thread = QThread(self)
         self._worker = _MagnetWorker()
+        from app.engine.transport_tasks import LatestTelemetry
+        self.telemetry_cache = LatestTelemetry()
+        self._worker.snapshot_updated.connect(self.telemetry_cache.publish, Qt.ConnectionType.DirectConnection)
+        self._worker.disconnected.connect(self.telemetry_cache.clear, Qt.ConnectionType.DirectConnection)
         self._worker.moveToThread(self._thread)
 
         self._connect_requested.connect(
@@ -536,7 +574,8 @@ class MagnetController(QObject):
 
         self._worker.connected.connect(self.connected)
         self._worker.disconnected.connect(self.disconnected)
-        self._worker.snapshot_updated.connect(self.snapshot_updated)
+        self._last_delivered_snapshot = None
+        self._worker.snapshot_updated.connect(self._deliver_latest_snapshot)
         self._worker.rates_updated.connect(self.rates_updated)
         self._worker.safe_move_audit.connect(self.safe_move_audit)
         self._worker.safe_move_result.connect(self.safe_move_result)
@@ -556,6 +595,12 @@ class MagnetController(QObject):
 
     def _cache_snapshot(self, snapshot) -> None:
         self._latest_snapshot = snapshot
+
+    def _deliver_latest_snapshot(self, _queued_snapshot):
+        snapshot = self.telemetry_cache.get()
+        if snapshot is not None and snapshot is not self._last_delivered_snapshot:
+            self._last_delivered_snapshot = snapshot
+            self.snapshot_updated.emit(snapshot)
 
     @property
     def latest_snapshot(self):

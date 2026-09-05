@@ -157,9 +157,17 @@ class MagnetPanelTests(unittest.TestCase):
             self.panel._on_snapshot("1000", snapshot)
             self.panel._on_progress("ramping field", 0.1)
             self.panel._on_progress("ramping field", 0.2)
+            clock[0] = 19.9
+            self.panel._on_progress("ramping field", 0.3)
         lines = self.panel.activity_log.toPlainText().splitlines()
         self.assertEqual(len([line for line in lines if "telemetry:" in line]), 1)
         self.assertEqual(len([line for line in lines if "ramping field:" in line]), 1)
+        with patch("app.ui.magnet_panel.time.monotonic", return_value=20.0):
+            self.panel._on_progress("ramping field", 0.4)
+            self.panel._on_progress("matching leads", 0.4)
+        lines = self.panel.activity_log.toPlainText().splitlines()
+        self.assertEqual(len([line for line in lines if "ramping field:" in line]), 2)
+        self.assertTrue(any("matching leads:" in line for line in lines))
         clock[0] = 40.1
         self.panel._on_snapshot("1000", snapshot)
         self.assertEqual(len([line for line in self.panel.activity_log.toPlainText().splitlines() if "telemetry:" in line]), 2)

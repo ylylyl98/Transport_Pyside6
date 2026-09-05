@@ -3,6 +3,7 @@ import json
 import os
 import tempfile
 import unittest
+import time
 from unittest.mock import patch
 from types import SimpleNamespace
 from PyQt6 import QtCore
@@ -34,6 +35,12 @@ from utils.config import cfg
 
 
 class BFieldTransportSweepTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PyQt6 import QtWidgets
+        cls.app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+
     def test_transport_polling_is_restarted_only_after_sweep_acceptance(self):
         class Magnet(QtCore.QObject):
             transport_config_result = QtCore.pyqtSignal(object)
@@ -342,7 +349,7 @@ class BFieldTransportSweepTests(unittest.TestCase):
             self.assertEqual(runtime["leg_index"], 0)
             self.assertAlmostEqual(runtime["target_field_t"], 0.1)
 
-    def test_telemetry_watchdog_fails_active_leg(self):
+    def test_telemetry_watchdog_holds_active_leg(self):
         class Magnet(QtCore.QObject):
             transport_config_result = QtCore.pyqtSignal(object)
             safe_move_result = QtCore.pyqtSignal(object)
@@ -361,11 +368,13 @@ class BFieldTransportSweepTests(unittest.TestCase):
         controller._last_progress_monotonic = 0.0
         controller._failures = []
         controller._fail = lambda message: controller._failures.append(message)
+        holds = []
+        controller._begin_monitor_hold = holds.append
         with patch("app.engine.bfield_transport_controller.time.monotonic", return_value=200.0):
             with patch.object(cfg.mcd, "sweep_progress_timeout_s", 1.0):
                 controller._on_telemetry_watchdog()
-        self.assertEqual(len(controller._failures), 1)
-        self.assertIn("telemetry watchdog timeout", controller._failures[0])
+        self.assertEqual(controller._failures, [])
+        self.assertIn("telemetry watchdog timeout", holds[0])
 
     def test_endpoint_oscillation_has_bounded_stability_grace(self):
         controller = BFieldTransportController.__new__(BFieldTransportController)
@@ -726,7 +735,8 @@ class BFieldTransportSweepTests(unittest.TestCase):
         self.assertEqual(applied, ["a", "b"])
         self.assertEqual([r["direction"] for r in records], ["start", "forward", "backward"] * 2)
         self.assertEqual(acquired[2][2], -1)
-        self.assertEqual(runner.adapter.events[-1], "persistent")
+        self.assertNotIn("persistent", runner.adapter.events)
+        self.assertEqual(plan.params.final_mode, "driven")
 
     def test_runner_writes_rates_limits_restores_and_acquires_progress(self):
         class Adapter:
@@ -1052,6 +1062,10 @@ class BFieldTransportSweepTests(unittest.TestCase):
         self.assertTrue(controller.active)
         controller.stop()
         self.assertIn("persistent", magnet.events)
+        deadline = time.monotonic() + 5.0
+        while controller.active and time.monotonic() < deadline:
+            self.app.processEvents()
+            time.sleep(0.005)
         self.assertIn(("release", "bfield-transport"), magnet.events)
         tab.temporary.cleanup()
 

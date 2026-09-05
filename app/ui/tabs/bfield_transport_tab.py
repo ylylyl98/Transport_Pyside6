@@ -23,12 +23,10 @@ from app.engine.bfield_transport_sweep import (
     MAX_RATE_T_PER_MIN,
     COOLDOWN_POLICIES,
     COOLDOWN_POLICY_LABELS,
-    FINAL_MODES,
     FINAL_MODE_LABELS,
     estimate_transport_times,
     build_transport_output_paths,
     normalize_cooldown_policy,
-    normalize_final_mode,
     parse_condition_series,
     transport_output_summary_parts,
     BFieldTransportSafetyError,
@@ -117,11 +115,10 @@ class BFieldTransportTab(BaseMeasurementTab):
         )
         form.addRow("Between-row thermal policy:", self.cbo_cooldown_policy)
         self.cbo_final_mode = SafeComboBox()
-        for mode in FINAL_MODES:
-            self.cbo_final_mode.addItem(FINAL_MODE_LABELS[mode], mode)
+        self.cbo_final_mode.addItem(FINAL_MODE_LABELS["driven"], "driven")
+        self.cbo_final_mode.setEnabled(False)
         self.cbo_final_mode.setToolTip(
-            "On successful completion, Persistent cools and zeros the leads; "
-            "Driven leaves the heater ON at the final field. Stops, errors, "
+            "Successful B-field sweeps always leave the heater ON at the final field. Stops, errors, "
             "and interlocks always use conservative persistent cleanup."
         )
         form.addRow("Successful final APS100 mode:", self.cbo_final_mode)
@@ -335,16 +332,8 @@ class BFieldTransportTab(BaseMeasurementTab):
         except ValueError:
             policy = "adaptive"
         self.cbo_cooldown_policy.setCurrentIndex(max(0, self.cbo_cooldown_policy.findData(policy)))
-        # Migrate the old Persistent default once for quick successive sweeps.
-        # Subsequent explicit selections (including Persistent) are preserved.
-        if not settings.value("driven_default_applied", False, type=bool):
-            settings.setValue("final_mode", "driven")
-            settings.setValue("driven_default_applied", True)
-        try:
-            final_mode = normalize_final_mode(str(settings.value("final_mode", "driven")))
-        except ValueError:
-            final_mode = "driven"
-        self.cbo_final_mode.setCurrentIndex(max(0, self.cbo_final_mode.findData(final_mode)))
+        settings.setValue("final_mode", "driven")
+        self.cbo_final_mode.setCurrentIndex(0)
         self.sp_delay.setValue(float(settings.value("delay_s", self.params.acquisition_delay_s)))
         self.sp_averages.setValue(int(settings.value("averages", self.params.averages)))
         self.ed_base.setText(str(settings.value("base_name", self.params.base_name)))
@@ -383,7 +372,7 @@ class BFieldTransportTab(BaseMeasurementTab):
         settings.setValue("ratio_target", self.cbo_ratio_target.currentData() or RATIO_TARGET_VBG)
         settings.setValue("round_trip", self.chk_round_trip.isChecked())
         settings.setValue("cooldown_policy", self.cbo_cooldown_policy.currentData() or "adaptive")
-        settings.setValue("final_mode", self.cbo_final_mode.currentData() or "driven")
+        settings.setValue("final_mode", "driven")
         settings.setValue("driven_default_applied", True)
         settings.setValue("delay_s", self.sp_delay.value())
         settings.setValue("averages", self.sp_averages.value())
@@ -671,7 +660,7 @@ class BFieldTransportTab(BaseMeasurementTab):
                 "Ready: " + ("round trip" if self.chk_round_trip.isChecked() else "one-way")
                 + f" {self.sp_start.value():+.4g} → {self.sp_stop.value():+.4g} T; "
                 + f"{enabled} enabled condition(s); final mode: "
-                + f"{FINAL_MODE_LABELS.get(self.cbo_final_mode.currentData(), 'Persistent')}; "
+                + f"{FINAL_MODE_LABELS['driven']}; "
                 + f"output preview: {planned.output_dir}"
             )
             self.lbl_preview.setProperty("role", "hint")
@@ -714,7 +703,7 @@ class BFieldTransportTab(BaseMeasurementTab):
             ratio=float(self.sp_ratio.value()),
             ratio_target=normalize_ratio_target(self.cbo_ratio_target.currentData() or RATIO_TARGET_VBG),
             cooldown_policy=normalize_cooldown_policy(self.cbo_cooldown_policy.currentData() or "adaptive"),
-            final_mode=normalize_final_mode(self.cbo_final_mode.currentData() or "driven"),
+            final_mode="driven",
             acquisition_delay_s=self.sp_delay.value(), averages=self.sp_averages.value(),
             conditions=deepcopy(self.conditions),
         )
@@ -740,7 +729,7 @@ class BFieldTransportTab(BaseMeasurementTab):
             rate_t_per_min=self.sp_rate.value(),
             round_trip=self.chk_round_trip.isChecked(),
             conditions=conditions,
-            final_mode=normalize_final_mode(self.cbo_final_mode.currentData() or "persistent"),
+            final_mode="driven",
         )
 
     def freeze_output_plan(self, params=None):
@@ -858,6 +847,15 @@ class BFieldTransportTab(BaseMeasurementTab):
         if name in {"g1", "g2", "g3", "daq"}:
             self._sync_measurement_statuses()
 
+    def _aps100_readiness_max_age_s(self):
+        """Allow idle polling plus read latency; retain the active-run limit."""
+        if self._locked or bool(getattr(self._execution_controller, "active", False)):
+            return 3.0
+        poll = max(0.1, float(cfg.magnet.poll_interval_s))
+        stationary = max(poll, float(cfg.magnet.stationary_poll_interval_s))
+        read_margin = max(2.0, float(cfg.magnet.timeout_ms) / 1000.0 + poll)
+        return max(3.0, stationary + read_margin)
+
     def _sync_aps100_status(self, *_args):
         controller = self._execution_controller
         magnet = getattr(controller, "magnet", None) if controller is not None else None
@@ -877,7 +875,7 @@ class BFieldTransportTab(BaseMeasurementTab):
             age = getattr(snapshot, "reading_age_s", None)
             if age is None and getattr(snapshot, "monotonic_s", None) is not None:
                 age = time.monotonic() - float(snapshot.monotonic_s)
-            if age is not None and (not math.isfinite(float(age)) or float(age) > 3.0):
+            if age is not None and (not math.isfinite(float(age)) or float(age) < 0 or float(age) > self._aps100_readiness_max_age_s()):
                 self.set_device_status("aps100", "warn", "APS100 telemetry is stale")
             else:
                 self.set_device_status("aps100", "ok")
@@ -899,7 +897,7 @@ class BFieldTransportTab(BaseMeasurementTab):
             age = getattr(snapshot, "reading_age_s", None) if snapshot is not None else None
             if age is None and snapshot is not None and getattr(snapshot, "monotonic_s", None) is not None:
                 age = time.monotonic() - float(snapshot.monotonic_s)
-            if snapshot is None or (age is not None and (not math.isfinite(float(age)) or float(age) > 3.0)):
+            if snapshot is None or (age is not None and (not math.isfinite(float(age)) or float(age) < 0 or float(age) > self._aps100_readiness_max_age_s())):
                 blockers.append("refresh APS100 telemetry")
         thermal = getattr(controller, "thermal_safety", None) if controller is not None else None
         if thermal is None or not bool(getattr(thermal, "is_armed", getattr(thermal, "armed", False))):

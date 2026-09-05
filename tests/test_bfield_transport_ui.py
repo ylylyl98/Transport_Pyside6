@@ -17,6 +17,7 @@ from app.models import Connections, SaveRoot
 from app.settings import get_app_settings
 from app.signal_chain import SignalChainSnapshot
 from app.ui.tabs.bfield_transport_tab import BFieldTransportTab
+from utils.config import cfg
 
 
 class BFieldTransportUiTests(unittest.TestCase):
@@ -92,17 +93,40 @@ class BFieldTransportUiTests(unittest.TestCase):
         self.assertEqual(self.tab.status_panel.label("aps100").lbl_state.text(), "OK")
         self.assertTrue(self.tab.btn_start.isEnabled())
 
+        with patch.object(cfg.magnet, "stationary_poll_interval_s", 3.0), patch.object(cfg.magnet, "poll_interval_s", 0.5), patch.object(cfg.magnet, "timeout_ms", 1500):
+            # Lake Shore can recheck readiness just before the next idle APS
+            # read completes. Ordinary latency must not toggle the button.
+            for age in (0.0, 2.5, 3.1, 3.8, 0.0, 3.1):
+                controller.magnet.latest_snapshot.reading_age_s = age
+                self.tab._sync_aps100_status()
+                self.assertTrue(self.tab.btn_start.isEnabled(), age)
+                self.assertEqual(self.tab.status_panel.label("aps100").lbl_state.text(), "OK")
+            for age in (5.1, float("nan"), -1.0):
+                controller.magnet.latest_snapshot.reading_age_s = age
+                self.tab.refresh_hardware_readiness()
+                self.assertFalse(self.tab.btn_start.isEnabled(), age)
+            controller.magnet.latest_snapshot.reading_age_s = 3.1
+            controller.active = True
+            self.assertEqual(self.tab._aps100_readiness_max_age_s(), 3.0)
+            self.tab.refresh_hardware_readiness()
+            self.assertFalse(self.tab.btn_start.isEnabled())
+            controller.active = False
+            controller.magnet.latest_snapshot.reading_age_s = 0.0
+            self.tab.refresh_hardware_readiness()
+            self.assertTrue(self.tab.btn_start.isEnabled())
+
         controller.magnet.is_connected = False
         controller.magnet.disconnected.emit()
         self.app.processEvents()
         self.assertEqual(self.tab.status_panel.label("aps100").lbl_state.text(), "Disconnected")
         self.assertFalse(self.tab.btn_start.isEnabled())
 
-    def test_transport_final_mode_is_selectable_and_persisted(self):
+    def test_transport_final_mode_is_always_driven_and_persisted(self):
         self.assertEqual(self.tab.cbo_final_mode.currentData(), "driven")
-        self.tab.cbo_final_mode.setCurrentIndex(self.tab.cbo_final_mode.findData("persistent"))
+        self.assertFalse(self.tab.cbo_final_mode.isEnabled())
+        self.assertEqual(self.tab.cbo_final_mode.findData("persistent"), -1)
         params = self.tab.collect_params()
-        self.assertEqual(params.final_mode, "persistent")
+        self.assertEqual(params.final_mode, "driven")
         self.tab.close()
         self.tab.deleteLater()
         self.app.processEvents()
@@ -111,13 +135,13 @@ class BFieldTransportUiTests(unittest.TestCase):
             SaveRoot(base=self.temporary.name, user="operator", device_id="sample"),
             connections, DeviceManager(connections),
         )
-        self.assertEqual(self.tab.cbo_final_mode.currentData(), "persistent")
+        self.assertEqual(self.tab.cbo_final_mode.currentData(), "driven")
 
     def test_legacy_persistent_default_migrates_to_driven(self):
         settings = get_app_settings()
         settings.beginGroup(self.tab.SETTINGS_PREFIX)
         settings.setValue("final_mode", "persistent")
-        settings.remove("driven_default_applied")
+        settings.setValue("driven_default_applied", True)
         settings.endGroup()
         self.tab._load_settings()
         self.assertEqual(self.tab.collect_params().final_mode, "driven")

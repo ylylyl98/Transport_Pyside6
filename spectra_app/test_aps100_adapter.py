@@ -380,7 +380,7 @@ class APS100AdapterTests(unittest.TestCase):
             timeout_s=2.0,
         )
 
-        match_index = fake.commands.index("SWEEP UP SLOW")
+        match_index = fake.commands.index("SWEEP UP FAST")
         heater_on_index = fake.commands.index("PSHTR ON")
         zero_index = fake.commands.index("SWEEP ZERO")
         heater_off_index = fake.commands.index("PSHTR OFF")
@@ -392,6 +392,45 @@ class APS100AdapterTests(unittest.TestCase):
         self.assertFalse(result.heater_on)
         self.assertAlmostEqual(result.field_t, 0.0)
         self.assertAlmostEqual(result.output_current_a, 0.0)
+
+    def test_fast_lead_matching_reads_rate5_without_mutating_it(self):
+        fake = _InstantSweepAPS100Resource()
+        adapter, fake = self.make_adapter(fake, heater_warm_s=0.0)
+        adapter.connect()
+        fake.field_kg = 5.0
+        fake.output_kg = 0.0
+        fake.heater = 0
+        adapter.enter_driven_mode()
+        self.assertIn("RATE? 5", fake.commands)
+        self.assertIn("SWEEP UP FAST", fake.commands)
+        self.assertFalse(any(command.startswith("RATE 5 ") for command in fake.commands))
+
+    def test_invalid_fast_rate_does_not_enable_heater(self):
+        fake = _FakeAPS100Resource()
+        fake.field_kg = 5.0
+        fake.output_kg = 0.0
+        fake.heater = 0
+        fake.rates[5] = 0.0
+        adapter, _ = self.make_adapter(fake, heater_warm_s=0.0)
+        adapter.connect()
+        with self.assertRaises(APS100SafetyError):
+            adapter.enter_driven_mode()
+        self.assertNotIn("PSHTR ON", fake.commands)
+
+    def test_matching_deadline_scales_and_field_sweep_exits_fast(self):
+        fake = _InstantSweepAPS100Resource()
+        adapter, fake = self.make_adapter(fake, heater_warm_s=0.0)
+        adapter.connect()
+        fake.field_kg, fake.output_kg, fake.heater = 5.0, 0.0, 0
+        fake.rates[5] = 0.001
+        with patch.object(adapter, "wait_for_field", wraps=adapter.wait_for_field) as wait:
+            adapter.enter_driven_mode()
+        self.assertGreater(wait.call_args.kwargs["timeout_s"], 900.0)
+        self.assertLessEqual(wait.call_args.kwargs["tolerance_t"],
+                             adapter.current_match_tolerance_a * adapter.coil_constant_t_per_a)
+        adapter.start_sweep_to(0.1)
+        self.assertLess(fake.commands.index("SWEEP UP FAST"), fake.commands.index("PSHTR ON"))
+        self.assertIn("SWEEP DOWN SLOW", fake.commands)
 
     def test_persistent_matching_requires_explicit_stored_field_confirmation(self):
         adapter = MockAPS100Adapter()

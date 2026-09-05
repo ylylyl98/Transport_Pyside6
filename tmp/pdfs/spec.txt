@@ -1,0 +1,1310 @@
+PAGE 1
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+attocube systems AG 
+Eglfinger Weg 2  
+D–85540 Haar bei München  
+Germany 
+E-Mail: info@attocube.com 
+www.attocube.com 
+ 
+For technical queries, contact: 
+support@attocube.com 
+ 
+attocube systems office Munich: 
+Phone +49 89 4207 97 0 
+Fax +49 89 4207 9720 190 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+218965 
+System Specifications & Test Certificate 
+Closed cycle cryostat attoDRY1000-9T with a 
+basic insert and positioner stack 
+ 
+PAGE 2
+ 
+© 2001-2023 attocube systems AG. Product and company names listed are trademarks or trade names of their respective companies. 
+Any rights not expressly granted herein are reserved. ATTENTION: Specifications and technical data are subject to change without 
+notice. 
+Page 2 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+Page left blank intentionally. 
+  
+PAGE 3
+ 
+© 2001-2023 attocube systems AG. Product and company names listed are trademarks or trade names of their respective companies.  
+Any rights not expressly granted herein are reserved. ATTENTION: Specifications and technical data are subject to change without  
+notice. 
+Page 3 
+Table of Contents 
+ 
+I. System Components ................................................................................................... 5 
+I.1. Serial Numbers ...................................................................................................................................... 5 
+II. Component Specifications .......................................................................................... 7 
+II.1. attoDRY1000 Performance Overview .................................................................................................... 7 
+II.2. Superconducting Magnet ...................................................................................................................... 7 
+II.3. Optical Window ..................................................................................................................................... 8 
+II.4. Objective ................................................................................................................................................ 9 
+II.5. Positioners and Scanners ....................................................................................................................... 9 
+II.5.a. Coarse Positioners ............................................................................................................................ 9 
+II.5.b. Scanners ........................................................................................................................................... 9 
+III. System Schematics ................................................................................................... 11 
+III.1. Microscope Insert ................................................................................................................................ 11 
+III.2. Microscope Wiring and Stack Assembly .............................................................................................. 13 
+III.2.a. Microscope Head ............................................................................................................................ 13 
+III.2.b. Wires from the Microscope Head to the Cage Plates .................................................................... 14 
+III.2.c. Stack Assembly ............................................................................................................................... 15 
+III.2.d. Quick-Exchange Sample Holder ...................................................................................................... 16 
+III.3. Electronics Overview ........................................................................................................................... 16 
+III.3.a. Electronics Layout ........................................................................................................................... 16 
+III.3.b. Wiring Scheme ................................................................................................................................ 17 
+IV. Cryostat Test Results ................................................................................................ 19 
+IV.1. Cooldown Tests ................................................................................................................................... 19 
+IV.1.a. Initial Cooldown .............................................................................................................................. 19 
+IV.1.b. Cooldown of Microscope Insert ..................................................................................................... 19 
+IV.1.c. Temperature Stability Tests ............................................................................................................ 20 
+IV.1.a. Cooling Power ................................................................................................................................. 21 
+IV.1.b. Magnet Testing ............................................................................................................................... 21 
+Test Certificate ............................................................................................................... 23 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+  
+PAGE 4
+ 
+© 2001-2023 attocube systems AG. Product and company names listed are trademarks or trade names of their respective companies. 
+Any rights not expressly granted herein are reserved. ATTENTION: Specifications and technical data are subject to change without 
+notice. 
+Page 4 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+Page left blank intentionally. 
+  
+PAGE 5
+ 
+© 2001-2023 attocube systems AG. Product and company names listed are trademarks or trade names of their respective companies.  
+Any rights not expressly granted herein are reserved. ATTENTION: Specifications and technical data are subject to change without  
+notice. 
+Page 5 
+I. System Components 
+The following table gives an overview of the major components of this system and 
+their serial numbers. Specifications and test results for individual components are 
+listed in the sections below. 
+ 
+Should you need technical support in the future, please contact attocube systems 
+and quote the serial number of your system: 
+ 
+218965 
+ 
+I.1. Serial Numbers 
+ 
+Component Make / Model Serial Number 
+System Closed cycle cryostat attoDRY1000-9T with 
+basic insert and positioner stack 
+218965 
+  
+ 
+Cryostat Components  
+Pulse Tube CryoMech PT410-RM CH60410W03-405132000446 
+Compressor CryoMech CP289C CPA289CW2EGCE-41290300001 
+Magnet Cryomagnetics, Inc. 9T Solenoid Magnet  
+090-275-010-LCF 
+C-2754-M 
+T-Sensor 40K Silicon Diode DT-670D-CU D6126926 
+T-Sensor 4K/Magnet Lakeshore CX-1050-CU-HT-1.4L X197982 
+  Electronic Components  
+Temperature Controller  LakeShore 335 LSA2K2B 
+Module Carrier ACC50 N/A 
+Positioning Electronics  ANC300 – CPU  ANC300B-C-2241-4010088 
+ ANC300 – Case  ANC300/0-AD22464013022 
+Plug-In-Modules ANM200 Scanning Module (X) ANM200A-M-2147-4010020 
+ ANM200 Scanning Module (Y) ANM200A-M-2328-4013011 
+ ANM150 Stepping Module (X) ANM150A-M-2328-4016035 
+ ANM150 Stepping Module (Y) ANM150A-M-2328-4016021 
+ ANM150 Stepping Module (Z) ANM150A-M-2328-4016012 
+Magnet Power Supply APS100 23 01 029 
+  
+ 
+Microscope Components  
+Sample T-Sensor Lakeshore Cernox: CX-1050-SD-HT-1.4L X191722 
+Positioner X ANPx101 /LT ANPX101-08660 
+Positioner Y ANPx101 /LT ANPx101-08941 
+Positioner Z ANPz102 /LT ANPz102-08816 
+Scanner XYZ ANSxy100lr/LT ANSxx100-08619 
+  
+ 
+Objectives   
+LT-APO Objectives LT-APO/VISIR/0.82 24 S1 005 
+  
+PAGE 6
+ 
+© 2001-2023 attocube systems AG. Product and company names listed are trademarks or trade names of their respective companies. 
+Any rights not expressly granted herein are reserved. ATTENTION: Specifications and technical data are subject to change without 
+notice. 
+Page 6 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+Page left blank intentionally. 
+  
+PAGE 7
+ 
+© 2001-2023 attocube systems AG. Product and company names listed are trademarks or trade names of their respective companies.  
+Any rights not expressly granted herein are reserved. ATTENTION: Specifications and technical data are subject to change without  
+notice. 
+Page 7 
+II. Component Specifications 
+In the following section, the specifications and test results for the major components 
+of your system are listed.  
+ 
+II.1. attoDRY1000 Performance Overview 
+Several tests have been carried out on the cryostat. The essential results of these 
+tests, characterizing the system, are listed in the following table. The tests are 
+described in more detail in the following sections. 
+ 
+Property Value 
+Initial Cooldown Time (Magnet < 4 K) 8 h 
+Magnet Temperature Empty 3.14 K 
+Sample Cooldown Time to < 4 K 77 min 
+Sample Base Temperature 3.74 K 
+Sample Temperature Stability @10 K mK 
+Cooling Power @ 10 K 98 mW 
+Maximum Magnetic Field in Z-Direction 9 T  
+ 
+II.2. Superconducting Magnet  
+For detailed information about magnet operation, please refer to the manufacturer’s 
+handbook. The table below lists the most important properties of the magnet. 
+ 
+Property Value 
+Rated Central Field 9.0 T 
+Rated Current @ 9.0 T at 4.2 K 44.27 A 
+Total Inductance 58.31 H 
+Field-to-Current Ratio 2032.8 G/A 
+Charging Rates 0 - 40 A:          0.0343 A/s (2 V) 
+40 – 43.71 A: 0.0171 A/s (1 V) 
+Persistent Switch Present 
+Persistent Switch Heater Current 27 mA 
+Persistent Switch Heater Resistance 92.8 Ω (at room temperature) 
+Magnet Resistance (at input leads) 98.7 Ω (at room temperature) 
+ 
+The magnet has been successfully driven to full field at least twice. For the first ramp 
+to full field, training ramp rates have been employed that are lower than the 
+standard ramp rates. For more detailed information on magnet training please see 
+the magnet manual. The second time, the magnet has been charged using maximum 
+charging rates (given above).  
+ 
+Below is the stray field plot of the 9T magnet. For further information please consult 
+the magnet manual. 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+  
+PAGE 8
+ 
+© 2001-2023 attocube systems AG. Product and company names listed are trademarks or trade names of their respective companies. 
+Any rights not expressly granted herein are reserved. ATTENTION: Specifications and technical data are subject to change without 
+notice. 
+Page 8 
+ 
+ 
+ 
+ 
+II.3. Optical Window 
+The following table shows the properties of the used optical window:  
+Property Value 
+Window Material Fused Silica 
+AR Coating 400 - 1000 nm 
+Diameter 25 mm 
+Thickness 1.5 mm 
+ 
+The following graphs show a typical broadband reflectance curve of the AR coated 
+Fused Silica (C7979) windows.  
+ 
+Reflectance of 400-1000nm coating on UV Grade Silica C7980 
+ 
+ 
+
+PAGE 9
+ 
+© 2001-2023 attocube systems AG. Product and company names listed are trademarks or trade names of their respective companies.  
+Any rights not expressly granted herein are reserved. ATTENTION: Specifications and technical data are subject to change without  
+notice. 
+Page 9 
+II.4. Objective 
+This system is delivered with the following low temperature objective: 
+ 
+Property Value 
+Type LT-APO/VISIT 
+Numerical Aperture (NA) 0.82 
+Clear Aperture 4.7 mm 
+Working Distance 0.65 mm 
+Apochromatic range 565 - 770 nm 
+AR-coating 400 - 1000 nm 
+ 
+II.5. Positioners and Scanners 
+II.5.a. Coarse Positioners 
+Table below presents a summary of essential positioner properties both at room 
+temperature and at low temperatures. 
+ 
+Axis Positioner Travel Range Capacitance 
+ Type Ser. No. nominal RT LT 
+X ANPx101//LT 08660 5 mm 908 nF 162 nF 
+Y ANPx101/LT 88941 5 mm 932 nF 168 nF 
+Z ANPz102/LT 08816 5 mm 863 nF 159 nF 
+ 
+ 
+II.5.b. Scanners 
+Table below presents a summary of essential scanner properties both at room 
+temperature and at low temperatures. 
+ 
+Axis Scanner Travel Range 
+nominal 
+Capacitance 
+ Type Ser. No. RT LT RT LT 
+X ANSxy100Ir/LT 08619 50 µm 30 µm 7.28 µF 1050 nF 
+Y 7.21 µF 1040 nF 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+  
+PAGE 10
+ 
+© 2001-2023 attocube systems AG. Product and company names listed are trademarks or trade names of their respective companies. 
+Any rights not expressly granted herein are reserved. ATTENTION: Specifications and technical data are subject to change without 
+notice. 
+Page 10 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+Page left blank intentionally. 
+  
+PAGE 11
+ 
+© 2001-2023 attocube systems AG. Product and company names listed are trademarks or trade names of their respective companies.  
+Any rights not expressly granted herein are reserved. ATTENTION: Specifications and technical data are subject to change without  
+notice. 
+Page 11 
+III. System Schematics 
+This section contains technical information specific to this system.  
+III.1. Microscope Insert 
+The microscope insert mechanical design is illustrated in this section. 
+ 
+ 
+The figure on the left shows an example of a basic microscope insert. 
+The top of the microscope insert head contains all electrical 
+connectors and feedthroughs as well as the vacuum window allowing 
+for free optical access to the sample. The so -called cage plates have a 
+standard thread (SM1) for mounting any 1” optics into the optical free 
+beam path. 
+ 
+1: Microscope Head 
+2: Cage Plates with SM1 thread 
+3: Last Insert Cage Plate 
+4: LT Objective 
+5: Nanopositioner Stack 
+ 
+ 
+  
+1 
+2 
+3 
+4 
+5 
+PAGE 12
+ 
+© 2001-2023 attocube systems AG. Product and company names listed are trademarks or trade names of their respective companies. 
+Any rights not expressly granted herein are reserved. ATTENTION: Specifications and technical data are subject to change without 
+notice. 
+Page 12 
+ 
+ 
+The figure on the left shows the positions and the 
+dimensions of the cage plates as well as the housing that 
+holds the objective and the positioner stack. 
+ 
+ 
+Notes: 
+• The sample’s upper surface is in the center plane of the 
+magnet, which is 166.8 mm from the lower surface of 
+the last G10 cage plate. 
+ 
+• The sample holder is designed in such a way that the 
+focal point of the objective coincides with the center of 
+the vector magnetic field. 
+ 
+ 
+   
+WD 
+166.8 mm 
+Magnet 
+Center 
+Plane 
+Last G10 Cage Plate 
+Microscope Head 
+Stick Tubes  
+(G10 or similar) 
+Module Rods (Ti) 
+PAGE 13
+ 
+© 2001-2023 attocube systems AG. Product and company names listed are trademarks or trade names of their respective companies.  
+Any rights not expressly granted herein are reserved. ATTENTION: Specifications and technical data are subject to change without  
+notice. 
+Page 13 
+III.2. Microscope Wiring and Stack Assembly 
+This section shows the details of the microscope insert cabling as well as the 
+assembly of the positioner stack and the sample holder. 
+ 
+III.2.a. Microscope Head 
+The figure below presents a schematic top view of the microscope insert head and 
+its electrical and optical vacuum feedthroughs. 
+ 
+Fischer 4
+Fischer 2
+Fischer 1
+Back
+Fischer 3
+Front
+SMA 1-4
+Q1 Q2
+ 
+ 
+Q3 Q4
+ 
+ 
+SMA 5-6
+21
+SR1 SR2
+ 
+ 
+Fischer 1
+Positioners + B4..B6
+ 
+twisted pair
+6x Brass
+Fischer 3
+Cust. M1..M6
+twisted pair
+6x Manganin
+Fischer 2
+Scanners + B9..B12
+twisted pair
+6x Brass
+Fischer 4
+Thermometry
+twisted pair
+6x Brass
+ 
+ 
+These cables are routed through the insert G10 stick tubes according to the following 
+schematic: 
+ 
+1
+2/CX
+4
+3
+Front
+Back
+Fischer 3
+View 
+from top
+Fischer 2
+Fischer 4 Fischer 1
+23
+4 1
+ 
+  
+PAGE 14
+ 
+© 2001-2023 attocube systems AG. Product and company names listed are trademarks or trade names of their respective companies. 
+Any rights not expressly granted herein are reserved. ATTENTION: Specifications and technical data are subject to change without 
+notice. 
+Page 14 
+III.2.b. Wires from the Microscope Head to the Cage Plates 
+The insert’s connections are accessible at the last two cage plates. 
+ 
+Upper cage plate 
+3 2/CX
+14
+Top
+View
+Front Row
+Left Row
+Right Row
+SR1      SR2
+Back Row
+Q1  Q4
+Q2Q1 Q4Q3
+4
+1
+24
+3
+10
+913
+14
+15
+16 12
+11
+8
+7 5
+6
+Front Row: 4 x MMCX – Pico-coax
+Q1 MMCX female to SMA Q 1
+Q2 MMCX female to SMA Q 2
+Q3 MMCX female to SMA Q 3
+Q4 MMCX female to SMA Q 4
+Back Row: (Fischer 4) - Brass
+Pin From Name
+1 Fischer 4 – 1 H+
+2 Fischer 4 –  H-
+3 Fischer 4 –  Tv+
+4 Fischer 4 –  Tv-
+5 Fischer 4 –  Ti+
+6 Fischer 4 – 6 Ti-
+7 Fischer 4 –  B16+
+8 Fischer 4 – 8 B16-.
+9 Fischer 4 –  B17+
+10 Fischer 4 – 1 B17-
+11 Fischer 4 – 11 B18+
+12 Fischer 4 – 1 B18-
+Left Row: 2 x semi-rigid
+SR1, SR2 
+ 
+The Back Row is used for the sample temperature regulation and connects to the 
+sample heater (H) and temperature sensor (Ti, Tv) , and can also be used to connect 
+to the free brass lines (B1 6…B18). The Front Row houses  4 micro-miniature coaxial 
+(MMCX) connectors. The Left Row is occupied by the two semi-rigid cables. 
+ 
+Lower cage plate 
+2
+3 2
+ 
+Top
+View
+Front Row
+Back Row
+Left Row
+Right Row
+1
+SR1      SR2
+16
+1513
+1412
+119
+10
+7
+86
+5
+4
+3
+2
+1
+1 2
+43
+65
+7 8
+9 10
+11 12
+11
+24
+3
+10
+913
+14
+15
+16 12
+11
+8
+7 5
+6
+3
+Front  Row:  (Fischer 3) - Manganin
+Pin From Name
+1 Fischer 3 – 1 M1+
+2 Fischer 3 –  M1-
+3 Fischer 3 –  M2+
+4 Fischer 3 –  M2-
+5 Fischer 3 –  M3+
+6 Fischer 3 – 6 M3-
+7 Fischer 3 –  M4+
+8 Fischer 3 – 8 M4-
+9 Fischer 3 –  M5+
+10 Fischer 3 – 1 M5-
+11 Fischer 3 – 11 M6+
+12 Fischer 3 – 1 M6-
+Right Row: (Fischer 2) - Brass
+Pin From Name
+1 Fischer 2 – 1 Sx+
+2 Fischer 2 –  Sx-
+3 Fischer 2 –  Sy+
+4 Fischer 2 –  Sy-
+5 Fischer 2 –  B9+
+6 Fischer 2 – 6 B9-
+7 Fischer 2 –  B10+
+8 Fischer 2 – 8 B10-
+9 Fischer 2 –  B11+
+10 Fischer 2 – 1 B11-
+11 Fischer 2 – 11 B12+
+12 Fischer 2 – 1 B12-
+Back Row: (Fischer 1) - Brass
+Pin From Name
+1 Fischer 1 – 1 Px+
+2 Fischer 1 –  Px-
+3 Fischer 1 –  Py+
+4 Fischer 1 –  Py-
+5 Fischer 1 –  Pz+
+6 Fischer 1 – 6 Pz-
+7 Fischer 1 –  B4+
+8 Fischer 1 – 8 B4-
+9 Fischer 1 –  B5+
+10 Fischer 1 – 1 B5-
+11 Fischer 1 – 11 B6+
+12 Fischer 1 – 1 B6-
+Left Row: 2 x semi-rigid
+SR1, SR2 
+ 
+The Back Row is used by the open-loop piezoelectric nanopositioners (Px, Py and Pz) 
+and can be used to connect the free brass lines (B4..B6). The Right Row houses a 1 -
+pin connector, which is used for the scanners (Sx, Sy) and can be used to connect to 
+the free Brass lines (B9…B12). The Front Row houses a 12-pin connector, which can 
+PAGE 15
+ 
+© 2001-2023 attocube systems AG. Product and company names listed are trademarks or trade names of their respective companies.  
+Any rights not expressly granted herein are reserved. ATTENTION: Specifications and technical data are subject to change without  
+notice. 
+Page 15 
+be used to connect to the manganin lines (M1…M6). The Left Row is occupied by the 
+two semi-rigid cables. 
+ 
+III.2.c. Stack Assembly 
+The stack consists of positioners, scanners, and a sample holder. They are shown 
+below in the order in which they are stacked. The schematic also lists the required 
+screws (all titanium) for mounting the components. When assembling for the first 
+time, build up the stack from the bottom. For disassembly, proceed in the reverse 
+order. 
+Pos X
+ANPx101/LT
+Pos Z
+ANPz102/LT 
+Pos Y
+ANPx101/LT 
+ASH/QE
+sample holder 
+Isolator Plate 2"
+Teflon 1 mm
+Spacer 
+H=18mm
+Scan XY
+ANSxy100lr/LT
++
+P
+x
+P
+x
++
+P
+y
+P
+y
++
+P
+z
+P
+z
+Length: 300mm
+Q
+4
+Q
+3
+Q
+2
+Q
+1
+QE Base
+H T
+V
+T
+I
+Scanner XY
+S
+x
+S
+y
+S 
+x
+S 
+y Length: 300 mm
+M2x8 x2
+M2.5x12x2
+M2x8 x2
+M2.5x6 x2
+M2x6 x2
+M2x7x2
+M2x3x2
+Y
+X
+ 
+PAGE 16
+ 
+© 2001-2023 attocube systems AG. Product and company names listed are trademarks or trade names of their respective companies. 
+Any rights not expressly granted herein are reserved. ATTENTION: Specifications and technical data are subject to change without 
+notice. 
+Page 16 
+III.2.d. Quick-Exchange Sample Holder 
+The PCB of the quick-exchange sample holders has the following characteristics: 
+• the contacts (1+, 1-), (2+, 2-), (3+, 3-), (4+, 4-) are pairwise connected to the 
+pico-coax connections labelled Q1, Q2, Q3, Q4 as inner and outer contacts, 
+respectively. 
+• - 1+ is connected to the sample area in the middle (via SP pad) 
+• - 1- is connected to the GND layer underneath the surface (also connected 
+to all outside holes) 
+• - 1+ and 1- can be disconnected from standard by cutting their respective 
+connection south or north of sample area 
+• - 1- can be connected to sample area by connecting the two pads north of 
+the sample area 
+ 
+ 
+ 
+III.3. Electronics Overview 
+Electronics layout and wiring scheme are shown in this section. 
+ 
+III.3.a. Electronics Layout 
+ 
+ 
+ 
+ 
+ 
+APS 100
+attocube
+ANC300
+attocube
+ANM150
+Pos X
+ANM150
+Pos Y 
+ANM150
+Pos Z
+ANM200
+Scan X
+ANM200
+Scan Y
+ACC50
+attocube
+Px
+1
+Py
+Pz
+B4
+B5
+B6
+Positioners
+Sx
+2
+Sy
+B9
+B10
+B11
+B12
+Scanners
+M1
+3
+M2
+M3
+M4
+M5
+M6
+Manganin
+LakeShore
+H
+4
+T-V
+T-I
+B16
+B17
+B18
+Temp.
+T i 40K
+5
+T v 40K
+T i 4K
+T v 4K
+PSH
+VT
+at toDRY
+ 
+ 
+ 
+ 
+ 
+The figure on the left shows a schematic drawing 
+of the electronics of this system. These are from 
+top to bottom: 
+ 
+• LakeShore335 temperature controller 
+• ACC50 component carrier equipped with 5 
+break-out panels 
+• ANC300: motion controller including 
+• 2 x ANM200 scanner module for 
+X, Y, Z-scanners 
+• 3 x ANM150 stepping module for 
+X, Y, Z-positioners 
+• APS100 magnet power supply 
+ 
+Please refer to the corresponding manual for 
+further information regarding each device. 
+ 
+
+PAGE 17
+ 
+© 2001-2023 attocube systems AG. Product and company names listed are trademarks or trade names of their respective companies.  
+Any rights not expressly granted herein are reserved. ATTENTION: Specifications and technical data are subject to change without  
+notice. 
+Page 17 
+Break-out panels of the ACC50: 
+Px
+1
+Py
+Pz
+B4
+B5
+B6
+Positioners
+Sx
+2
+Sy
+B9
+B10
+B11
+B12
+Scanners
+M1
+3
+M2
+M3
+M4
+M5
+M6
+Manganin
+H
+4
+T-V
+T-I
+B16
+B17
+B18
+Temp.
+Ti 40K
+5
+Tv 40K
+Ti 4K
+Tv 4K
+PSH
+VT
+attoDRY
+ 
+ 
+III.3.b. Wiring Scheme 
+MIC Head
+1
+2
+3
+4
+Microscope Head
+1
+2
+3
+Scanners
+B12B11B10B9SySx
+Manganin
+M6M5M4M3M2M1
+ANC300MPS ACC50
+Sx: ANC300 Axis 1
+Sy: ANC300 Axis 2
+ANC300 Axis 2: Sy
+ANC300 Axis 1: Sx
+Positioners
+B6B5B4PzPyPx
+Px: ANC300 Axis 4
+Py: ANC300 Axis 5
+Pz: ANC300 Axis 6
+ANC300 Axis 6: Pz
+ANC300 Axis 5: Py
+ANC300 Axis 4: Px
+ANC 300
+7Ser. 6 5 4 3 2 1
+ANM150
+Pos Y
+ANM150
+Pos X
+ANM150
+Pos Z
+ANM200
+Sc an X
+M OD DC
+ANM200
+Sc an Y
+M OD DC
+LAN
+Temp.
+B18B17B16T-IT-VH
+Magnet Power Supply
+VoltageTapsSwitchHeater
+Alternative 
+connection
+LakeShore: INPUT B
+LakeShore: OUT 1
+H
+Lake Shore 335
+OUT2OUT1INPUT BINPUT AUSB
+attoDRY
+VTPSHTv 4KTi 4KTv 40KTi 40K
+Ti 40K
+VT
+PSH
+Tv 4K
+Ti 4K
+Tv 40K
+attoDRY10005
+attoDRY MU
+attoDRY MU: Z+
+attoDRY MU: Z-
+MPS: Z+
+MPS: Z-
+MPS PSH
+MPS: VT
+4
+Tv
+Ti
+LakeShore: INPUT A
+USB Hub      4(5)x
+      5x
+        2x
+      2x
+         2x
+      1x
+      2x
+      1x
+1x
+Fischer cable 
+BNC 0.5m
+High current leads   (incl.)
+Magnet read-out cable  (incl.)
+USB 1m  (2 incl.)
+USB 3m 
+T-Sensor cabel  (incl.)
+Heater cabel (incl.)
+USB 2.0 Hub 
+ANC300: USB Hub
+USB Hub: ANC300
+LakeShore: USB Hub
+USB Hub: LakeShore
+ 
+PAGE 18
+ 
+© 2001-2023 attocube systems AG. Product and company names listed are trademarks or trade names of their respective companies. 
+Any rights not expressly granted herein are reserved. ATTENTION: Specifications and technical data are subject to change without 
+notice. 
+Page 18 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+Page left blank intentionally. 
+  
+PAGE 19
+ 
+© 2001-2023 attocube systems AG. Product and company names listed are trademarks or trade names of their respective companies.  
+Any rights not expressly granted herein are reserved. ATTENTION: Specifications and technical data are subject to change without  
+notice. 
+Page 19 
+IV. Cryostat Test Results 
+In this section test measurements are shown that are taken with the actual system. 
+Several tests were carried out with the cryostat. The essential results of these tests 
+are listed in the following sections. The tests are described in more details in their 
+respective sections. 
+ 
+IV.1. Cooldown Tests 
+IV.1.a. Initial Cooldown  
+The prepared cryostat was initially cooled down with an empty sample space.  
+The graph below shows the temperatures of the magnet (4K Stage) as a function of 
+time. 
+ 
+ 
+ 
+ 
+Cooldown time to below 4K: 8 h 
+Magnet temperature: 3.14 K 
+ 
+ 
+IV.1.b. Cooldown of Microscope Insert 
+With the cryostat residing at base temperature, the sample space was warmed up 
+and vented with gaseous helium. The microscope insert was inserted into the sample 
+space, which was then evacuated and subsequently filled with helium gas to a 
+pressure of ≈1    mbar (exchange gas atmosphere). The plot below presents the 
+measured temperatures of the insert (sample temperature) and the gas in the VTI as 
+a function of time. 
+ 
+ 
+  
+0
+50
+100
+150
+200
+250
+300
+0 2 4 6 8 10
+Tmeperature [K]
+Time [h]
+Magnet [K]
+40K [K]
+PAGE 20
+ 
+© 2001-2023 attocube systems AG. Product and company names listed are trademarks or trade names of their respective companies. 
+Any rights not expressly granted herein are reserved. ATTENTION: Specifications and technical data are subject to change without 
+notice. 
+Page 20 
+ 
+ 
+ 
+Cooldown time to below 4K: 77 min 
+Sample temperature: 3.74 K 
+ 
+ 
+IV.1.c. Temperature Stability Tests 
+With the cryostat residing at base temperature, a control loop was activated to 
+stabilize the sample temperature at various setpoints . They all meet the 
+specifications (Tpp < 50 mK for T < 4 .. 50 K). 
+The results of the tests for the measurement at 10K are presented in the following 
+figure and table. 
+ 
+ 
+ 
+ 
+Analysis Time: 5 min 
+Average Temperature: 10 K 
+Temperature Variation (peak-to-peak): 32 mK 
+PID Parameters: 0, 50, 20 
+ 
+  
+0
+50
+100
+150
+200
+250
+300
+0 10 20 30 40 50 60 70 80
+Temperature [K]
+Time [min]
+4K Stage
+Sample
+9,98
+9,985
+9,99
+9,995
+10
+10,005
+10,01
+10,015
+10,02
+0 1 2 3 4 5
+Temperature [K]
+Time [min]
+PAGE 21
+ 
+© 2001-2023 attocube systems AG. Product and company names listed are trademarks or trade names of their respective companies.  
+Any rights not expressly granted herein are reserved. ATTENTION: Specifications and technical data are subject to change without  
+notice. 
+Page 21 
+IV.1.a. Cooling Power 
+ 
+As presented below, a cooling power plot was generated for temperature values up 
+to 15 K. 
+ 
+ 
+ 
+ 
+Cooling power at 10K: 98 mW 
+ 
+ 
+IV.1.b. Magnet Testing 
+The microscope stick was inserted into the vacuum tube, which was then pumped 
+to a pressure below 10-4 mbar and subsequently filled with Helium exchange gas to 
+200 mbar. While flushing the outer sample space with Helium the vacuum tube 
+including the insert was placed inside the outer sample space to cool down. 
+The diagram below shows the temperature graphs for the sample and the magnet.  
+ 
+ 
+ 
+   
+0
+50
+100
+150
+200
+250
+3 4 5 6 7 8 9 10 11 12 13 14 15
+Cooling Power [mW]
+Temperature [K]
+0
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+0
+1
+2
+3
+4
+5
+6
+0 10 20 30 40 50 60
+Magnetic field [T]
+Temeraturep [K]
+Time [min]
+Temp Mag
+Sample
+Mag in T
+PAGE 22
+ 
+© 2001-2023 attocube systems AG. Product and company names listed are trademarks or trade names of their respective companies. 
+Any rights not expressly granted herein are reserved. ATTENTION: Specifications and technical data are subject to change without 
+notice. 
+Page 22 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+Page left blank intentionally. 
+  
+PAGE 23
+ 
+© 2001-2023 attocube systems AG. Product and company names listed are trademarks or trade names of their respective companies.  
+Any rights not expressly granted herein are reserved. ATTENTION: Specifications and technical data are subject to change without  
+notice. 
+Page 23 
+ 
+ 
+Test Certificate 
+ 
+The above measurements were carried out at the attocube test facilities. All components 
+successfully fulfilled the pass-criteria and it is herewith certified that the system leaves attocube in 
+proper condition.  
+ 
+ Certified by:    
+ Sajid Nakvee (Test Engineer) 
+ Maximilian Spanner (Test Technician) 
+ Certified by:    
+ Dr. Sabina Simon (Project Manager) 
+ 
+ 
+ 
+ 
+ Munich, November 2023 
+  
+PAGE 24
+ 
+© 2001-2023 attocube systems AG. Product and company names listed are trademarks or trade names of their respective companies. 
+Any rights not expressly granted herein are reserved. ATTENTION: Specifications and technical data are subject to change without  
+notice. 
+Page 24 
+ 
+ 
+attocube systems AG 
+Eglfinger Weg 2 
+85540 Haar 
+Germany 
+ 
+Phone: +49 89 420 797 0 
+Fax: +49 89 4207 9720 190 
+ 
+E-Mail: info@attocube.com 
+www.attocube.com 
+ 
+ 

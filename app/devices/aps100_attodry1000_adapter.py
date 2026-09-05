@@ -104,7 +104,7 @@ class MagnetSnapshot:
 
 
 _VALUE_UNIT_RE = re.compile(
-    r"^\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)\s*([A-Za-z]+)?\s*$"
+    r"^\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)\s*([A-Za-z]+(?:/[A-Za-z]+)?)?\s*$"
 )
 
 
@@ -452,6 +452,18 @@ class APS100AttoDry1000Adapter:
     def get_rate_t_per_min(self, index: int) -> float:
         return self.get_rate_a_per_s(index) * self.coil_constant_t_per_a * 60.0
 
+    def get_fast_rate_a_per_s(self) -> float:
+        """Return the configured APS100 Fast Mode readback (RATE? 5)."""
+        value = float(self.get_rate_a_per_s(5))
+        if not math.isfinite(value) or value <= 0.0:
+            raise APS100SafetyError(
+                f"APS100 Fast Mode RATE? 5 is invalid: {value!r} A/s"
+            )
+        return value
+
+    def get_fast_rate_t_per_min(self) -> float:
+        return self.get_fast_rate_a_per_s() * self.coil_constant_t_per_a * 60.0
+
     def get_range_a(self, index: int) -> float:
         if index not in range(5):
             raise ValueError("APS100 range index must be 0..4")
@@ -459,10 +471,16 @@ class APS100AttoDry1000Adapter:
         return value
 
     def get_rates(self) -> dict[int, tuple[float, float]]:
-        return {
-            index: (self.get_range_a(index), self.get_rate_t_per_min(index))
-            for index in range(5)
-        }
+        rates = {}
+        for index in range(5):
+            boundary = float(self.get_range_a(index))
+            rate_a = float(self.get_rate_a_per_s(index))
+            if not math.isfinite(boundary) or boundary < 0.0:
+                raise APS100SafetyError(f"APS100 RANGE? {index} readback is invalid: {boundary!r} A")
+            if not math.isfinite(rate_a) or rate_a <= 0.0:
+                raise APS100SafetyError(f"APS100 RATE? {index} readback is invalid: {rate_a!r} A/s")
+            rates[index] = (boundary, rate_a * self.coil_constant_t_per_a * 60.0)
+        return rates
 
     def restore_rates(self, rates: dict[int, tuple[float, float]]) -> dict[int, float]:
         """Restore captured RATE values with command/readback verification.
@@ -644,9 +662,14 @@ class APS100AttoDry1000Adapter:
 
     def _start_output_sweep_to(self, target_t: float) -> str:
         self._ensure_no_fault()
+        if self.get_heater_state() != 0:
+            raise APS100SafetyError(
+                "Fast lead matching requires APS100 heater OFF confirmation"
+            )
+        self.get_fast_rate_a_per_s()
         current = self.get_output_field_t()
         direction = self._set_directional_target(target_t, current)
-        self._write(f"SWEEP {direction} SLOW")
+        self._write(f"SWEEP {direction} FAST")
         return direction.lower()
 
     def pause(self, *, confirm: bool = True, timeout_s: float = 3.0) -> None:
@@ -883,12 +906,30 @@ class APS100AttoDry1000Adapter:
         magnet_t = self.get_field_t()
         output_t = self.get_output_field_t()
         tolerance_a = self.current_match_tolerance_a
+        if not math.isfinite(tolerance_a) or tolerance_a <= 0.0:
+            raise APS100SafetyError("Current-match tolerance must be positive and finite")
+        requested_tolerance_t = abs(float(tolerance_t))
+        if not math.isfinite(requested_tolerance_t) or requested_tolerance_t <= 0.0:
+            raise APS100SafetyError("Field tolerance must be positive and finite")
         if abs(output_t - magnet_t) / self.coil_constant_t_per_a > tolerance_a:
+            # RATE? 5 is read-only verification here. FAST is permitted by the
+            # APS100 only while the persistent heater is confirmed OFF.
+            if self.get_heater_state() != 0:
+                raise APS100SafetyError(
+                    "Fast lead matching requires APS100 heater OFF confirmation"
+                )
+            fast_rate_a_per_s = self.get_fast_rate_a_per_s()
+            fast_rate_t_per_s = fast_rate_a_per_s * self.coil_constant_t_per_a
+            mismatch_t = abs(output_t - magnet_t)
+            expected_s = mismatch_t / fast_rate_t_per_s
+            # A configured slow fast-rate must not hit the old fixed 900 s
+            # cap while making normal progress. Allow several serial reads.
+            match_timeout_s = max(float(timeout_s), expected_s * 2.0 + 30.0)
             self._start_output_sweep_to(magnet_t)
             self.wait_for_field(
                 magnet_t,
-                tolerance_t=tolerance_t,
-                timeout_s=timeout_s,
+                tolerance_t=min(requested_tolerance_t, tolerance_a * self.coil_constant_t_per_a),
+                timeout_s=match_timeout_s,
                 read_output=True,
                 stop_event=stop_event,
                 progress=(
@@ -1190,6 +1231,9 @@ class MockAPS100Adapter:
         self._low_t = 0.0
         self._high_t = 0.0
         self._rate_t_per_min = 0.1
+        # The mock has no persisted instrument setting; mirror the normal
+        # configured rate while still exercising the RATE? 5/FAST path.
+        self._fast_rate_t_per_min = self._rate_t_per_min
         self._target_t: Optional[float] = None
         self._standby = False
         self._magnet_voltage_v = 0.0
@@ -1221,7 +1265,8 @@ class MockAPS100Adapter:
         self._last_update = now
         if self._target_t is None:
             return
-        step = self._rate_t_per_min / 60.0 * elapsed * self._time_scale
+        rate = self._rate_t_per_min if self._heater else self._fast_rate_t_per_min
+        step = rate / 60.0 * elapsed * self._time_scale
         delta = self._target_t - self._output_t
         if abs(delta) <= step or step <= 0:
             self._output_t = self._target_t
@@ -1279,14 +1324,24 @@ class MockAPS100Adapter:
     def get_range_a(self, index):
         return [40.0, 44.28, 45.0, 89.0, 100.0][index]
 
-    def get_rate_a_per_s(self, _index):
-        return self._rate_t_per_min / (self.coil_constant_t_per_a * 60.0)
+    def get_rate_a_per_s(self, index):
+        rate = self._fast_rate_t_per_min if int(index) == 5 else self._rate_t_per_min
+        return rate / (self.coil_constant_t_per_a * 60.0)
 
     def get_rate_t_per_min(self, index):
         return self.get_rate_a_per_s(index) * self.coil_constant_t_per_a * 60.0
 
     def get_rates(self):
         return {i: (self.get_range_a(i), self.get_rate_t_per_min(i)) for i in range(5)}
+
+    def get_fast_rate_a_per_s(self):
+        value = float(self.get_rate_a_per_s(5))
+        if not math.isfinite(value) or value <= 0.0:
+            raise APS100SafetyError("Invalid mock APS100 Fast Mode rate")
+        return value
+
+    def get_fast_rate_t_per_min(self):
+        return self.get_fast_rate_a_per_s() * self.coil_constant_t_per_a * 60.0
 
     def read_snapshot(self):
         self._update()
@@ -1346,6 +1401,17 @@ class MockAPS100Adapter:
             self._low_t = target_t
         self._target_t = target_t
         return direction
+
+    def _start_output_sweep_to(self, target_t):
+        if self.get_heater_status() is not False:
+            raise APS100SafetyError("Fast lead matching requires APS100 heater OFF")
+        self.get_fast_rate_a_per_s()
+        self._update()
+        target_t = float(target_t)
+        if abs(target_t) > self.maximum_field_t:
+            raise APS100SafetyError("Target is outside mock field limits")
+        self._target_t = target_t
+        return "up" if target_t >= self._output_t else "down"
 
     def pause(self, **_kwargs):
         self._update()
@@ -1410,6 +1476,25 @@ class MockAPS100Adapter:
         return self._output_t
 
     def enter_driven_mode(self, *, progress=None, **_kwargs):
+        if not self._heater:
+            magnet_t = self.get_field_t()
+            output_t = self.get_output_field_t()
+            tolerance_t = self.current_match_tolerance_a * self.coil_constant_t_per_a
+            if abs(output_t - magnet_t) > tolerance_t:
+                fast_rate = self.get_fast_rate_t_per_min()
+                expected_s = abs(output_t - magnet_t) / (fast_rate / 60.0)
+                self._start_output_sweep_to(magnet_t)
+                self.wait_for_field(
+                    magnet_t,
+                    tolerance_t=tolerance_t,
+                    timeout_s=max(1.0, expected_s * 2.0 + 2.0),
+                    read_output=True,
+                    stop_event=_kwargs.get("stop_event"),
+                    progress=(lambda value: progress("matching leads", value)) if progress else None,
+                )
+                self.pause()
+            if abs(self.get_output_field_t() - self.get_field_t()) > tolerance_t:
+                raise APS100SafetyError("Cannot enable heater: mock current mismatch")
         self._output_t = self._field_t
         self._heater = True
         self._standby = False

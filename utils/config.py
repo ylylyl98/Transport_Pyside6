@@ -384,6 +384,8 @@ class MCDConfig:
     endpoint_stable_reads: int = 3
     transport_endpoint_settling_enabled: bool = False
     transport_endpoint_settling_timeout_s: float = 120.0
+    transport_monitor_recovery_timeout_s: float = 30.0
+    transport_monitor_recovery_reads: int = 3
     rotation_tolerance_deg: float = 0.25
     lightfield_ready_timeout_s: float = 15.0
     sweep_mode: str = "one_way"

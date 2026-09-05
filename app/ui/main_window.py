@@ -146,6 +146,7 @@ class MainWindow(QtWidgets.QMainWindow):
             thermal_safety=self.thermal_safety, parent=self,
         )
         self.tab_bfield_transport.set_execution_controller(self.bfield_transport_controller)
+        self.bfield_transport_controller.lakeshore_controller = self.lakeshore335
         # If closing the window has to wait for an APS100 Persistent
         # acknowledgement after a successful Driven transport, retry the
         # close event automatically once that safety transition completes.

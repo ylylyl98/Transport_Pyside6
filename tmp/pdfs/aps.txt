@@ -1,0 +1,2429 @@
+PAGE 1
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+WARNING! 
+User Manual  
+APS100 Magnet Power Supply  
+ 
+attoCONTROL 
+ Electronics & Software Control Units  
+ 
+
+PAGE 2
+DO NOT ATTEMPT TO OPERATE THIS EQUIPMENT BEFORE YOU HAVE THOROUGHLY 
+READ THIS INSTRUCTION MANUAL. 
+ 
+ 
+  
+Version:  1.1.  
+Modified:  November 20  
+Products:  APS100, APS200      
+© 2014 -2020  attocube s ystems AG. Product and company names listed are trademarks or  trade names of their respective companies. 
+Any rights not expressly granted herein are reserved. ATTENTION: Specifications and technical data are subject to change without notice. 
+PAGE 3
+Decla ra tions of conformity  
+ 
+For Customers in Europe  
+This equipment has been tested and found to comply with the following 
+product specifications: 
+Safety: EN61010-1, 1993, Amendment 2 
+  EN61326 
+EMC:  EN55011 Conducted Emissions 
+  EN55011 Radiated Emissions 
+  EN61000-4-2 ESD Air Discharge, 1kV, 2kV, 4kV 
+  EN61000-4-2 ESD Contact Discharge, 2kV, 4kV, 8kV 
+  EN61000-4-3 Radiated Immunity 10V/m 
+  EN61000-4-4, EFT 500V, 1kV, 2kV 
+  IEC 1000-4-5:1995 Surge 500V, 1kV L-L, 
+     500V, 1kV, 2kV L-G 
+  EN61000-4-6 Conducted Immunity 10V rms 
+  EN61000-4-8 Power Frequency Magnetic Field 
+  EN61000-4-11 Voltage Dips and Interrupts 
+ 
+Application of Council Directives: 
+ 
+The product complies with the requirements of the Low Voltage Directive 2008/95/EC 
+and the EMC Directive 2004/108/EC. 
+  
+
+PAGE 4
+Table of Contents  
+ 
+I.  INTRODUCTION ............................................................................................................................. 7 
+I.1.  DESCRIPTION ................................................................................................................................... 7 
+I.2.  FEATURES  ....................................................................................................................................... 8 
+I.3.  SPECIFICATIONS  ............................................................................................................................. 10  
+II.  INSTALLATION ............................................................................................................................. 11  
+II.1.  LINE VOLTAGE AND FUSES  ............................................................................................................... 11  
+II.2.  MOUNTING  .................................................................................................................................. 11  
+II.3.  ENVIRONMENT  .............................................................................................................................. 12  
+II.4.  TERMINAL STRIP CONNECTIONS  ........................................................................................................ 12  
+II.5.  POWER OUTPUT TERMINALS  ............................................................................................................ 13  
+II.6.  MAINTENANCE  .............................................................................................................................. 13  
+III.  SETUP AND OPERATION .............................................................................................................. 15  
+III.1.  SETTING MAGNET PARAMETERS  ....................................................................................................... 15  
+III.2.  SETTING CHARGE RATES  .................................................................................................................. 16  
+III.3.  SETTING LIMITS  ............................................................................................................................. 16  
+III.4.  ENERGIZING THE MAGNET  ............................................................................................................... 16  
+III.5.  DISCHARGING THE MAGNET  ............................................................................................................. 17  
+III.6.  FAST SWEEPING  ............................................................................................................................. 18  
+III.7.  POWER FAIL MODE  ........................................................................................................................ 18  
+III.8.  MAGNET QUENCH  ......................................................................................................................... 18  
+IV.  DISPLAYS AND MENUS ............................................................................................................ 20  
+IV.1.  NORMAL OPERATING DISPLAYS  ........................................................................................................ 20  
+IV.1.a.  Single Supply..................................................................................................................... 20  
+IV.1.b.  Dual Supply ....................................................................................................................... 22  
+IV.1.c.  Display Field Descriptions ................................................................................................. 23  
+IV.2.  KEY PAD OPERATION  ...................................................................................................................... 25  
+IV.3.  MENUS  ........................................................................................................................................ 26  
+IV.3.a.  Organization ..................................................................................................................... 26  
+IV.3.b.  General Menu Features .................................................................................................... 26  
+IV.3.c.  Limits Menu ...................................................................................................................... 28  
+IV.3.d.  Rates Menu ...................................................................................................................... 30  
+IV.3.e.  Magnet Menu ................................................................................................................... 30  
+IV.3.f.  General Menu ................................................................................................................... 33  
+V.  INTERFACING ............................................................................................................................... 36  
+V.1.  USB  COMPUTER INTERFACE ............................................................................................................. 36  
+V.2.  IEEE-488.2  COMPUTER INTERFACE  .................................................................................................. 36 
+V.3.  ETHERNET INTERFACE  ..................................................................................................................... 36  
+VI.  THEORY OF OPERATION .......................................................................................................... 39  
+VI.1.  CIRCUIT DESCRIPTION  ..................................................................................................................... 39  
+VII.  LIMITED WARRANTY POLICY ................................................................................................... 41  
+APPENDIX A: FACTORY CALIBRATIONS AND CERTIFICATION ................................................................ 43  
+APPENDIX B: COMPUTER INTERFACE COMMAND REFERENCE ............................................................. 44  
+PAGE 5
+APPENDIX C: CALIBRATION .................................................................................................................. 62  
+APPENDIX D: SHUT-DOWN INPUT ........................................................................................................ 64  
+APPENDIX E: PARALLELING POWER MODULES ..................................................................................... 65  
+APPENDIX F: REVISION HISTORY .......................................................................................................... 67  
+APPENDIX G: FIRMWARE UPGRADING ................................................................................................. 70  
+APPENDIX H: SHIM SUPPLY OPTION .................................................................................................... 86  
+H.1  OVERVIEW  .................................................................................................................................... 86  
+H.2  SHIM OPTION DESCRIPTION  ............................................................................................................. 87  
+H.3  SETUP  .......................................................................................................................................... 88  
+H.3.1  MANUAL Mode ..................................................................................................................... 89  
+H.3.2  SHIM Mode ........................................................................................................................... 89  
+H.3.3  Setup Menu ........................................................................................................................... 90  
+H.3.4  Edit Menu.............................................................................................................................. 91  
+H.3.5  Hardware Connections ......................................................................................................... 93  
+H.4  OPERATION  .................................................................................................................................. 93  
+H.4.1  Energizing Shims ................................................................................................................... 93  
+H.4.1  Discharging Shims ................................................................................................................. 95  
+  
+PAGE 6
+Symbols and Abbreviations  
+ 
+ Warning – Danger of electrical shock 
+ 
+ 
+ 
+ Protective Earth Ground 
+ 
+ 
+A Amperes 
+°C degrees centigrade 
+°F degrees Fahrenheit 
+Hz Hertz 
+kg kilograms 
+kG kilogauss 
+mA milliamperes 
+mV millivolts 
+T Tesla 
+ 
+  
+
+PAGE 7
+Page 7 
+ 
+ 
+ 
+I.  Introduction  
+I.1.  Description  
+The APS100 Magnet Power Supply is an advanced instrument designed specifically for powering superconducting 
+magnets.  It is a true four-quadrant power supply – meaning it is capable of operating with positive current / positive 
+voltage (sourcing power), positive current / negative voltage (sinking power), negative current / positive voltage 
+(sinking power), and negative current / negative voltage (sourcing power).  The supply allows the user to generate 
+smooth sweeps through zero current for performing hysteresis loop experiments or other research requiring smooth 
+magnetic field reversal. 
+ 
+The APS100 is available in several configurations.  It may have one or two power modules, and the power modules may 
+be independent or paralleled internal to the supply.  Power modules are available as 50A or 100A units.  This 
+architecture allows the APS100 to be configured as a single 50A, 100A, 150A, or 200A unit.  It also allows it to be 
+configured as a dual 50A or dual 100A unit.  The dual units may be paralleled externally by the user to provide the full 
+current capability to a single load, but this requires some special operational considerations.  All APS100 units are 
+capable of delivering up to ±10 volts of output voltage.  An easy-to-use menu system is provided to allow the operator 
+to set the supply up using the parameters of his/her particular magnet.  Most of the supply operating parameters may 
+be changed or queried through the USB and IEEE-488 interfaces. 
+ 
+Power supplies used for energizing superconducting magnets have unique requirements placed upon them.  The 
+supplies are used to source energy to magnets which can have a wide range of inductance (mH to thousands of 
+henries).  In addition, the magnet load can range from a nearly pure resistance to a nearly pure inductance – and 
+everything in between.  This places demands on the supply that are far beyond what a typical power supply used for 
+bench top electronics would see.  The supply will experience the challenges of sinking energy when a magnet is 
+discharging every day.  At the same time, the potential exists for either the magnet or power supply to be damaged in 
+the event of a power failure or magnet quench.  The APS100’s advanced circuitry enables it to take virtually any 
+scenario encountered in superconducting magnet operation in stride.  The quiet switch-mode design of the APS100 
+makes it a low noise, highly efficient supply – and one that is proven stable even on the most sensitive 
+superconducting magnets.  Versatile programmability allows the user to specify several different sweep rates for 
+different current ranges of the magnet – making it possible to sweep a magnet slower in a particular range if it is more 
+sensitive there, without user intervention. 
+  
+PAGE 8
+Page 8 
+ 
+ 
+I.2.  Features  
+Figure 1.  Front View, Dual Supply  
+ 
+Figure 2.  Rear View, Dual Supply  
+ 
+The APS100  has a wi de range of features available:  
+ True Four-Quadrant Operation.  The supply can provide positive or negative output current along with either 
+polarity voltage.  This gives it the ability to smoothly sweep through zero current without the need for current 
+reversing switches or pauses. 
+ User – Friendly Menus.  The APS100 has intuitive menus to display and enter operating parameters.  It can be set 
+up in a matter of minutes and changes during daily operation are simple and quick. 
+ Easy to Read Display.  The high quality 5 1/4” color LCD can be read at a glance.  The current is displayed in a 
+large font that can be read even from across the lab. 
+ ±10 Volt / ±50A, 100A, 150A, 200A High Stability Output(s).  The APS100 provides quiet, stable output power 
+thanks to its low noise switch-mode design and precision current monitoring and control circuits. 
+  
+
+PAGE 9
+Page 9 
+ 
+ 
+ 
+ Power Fail Magnet Discharge.  Should a power failure occur during operation of the magnet, the supply converts to 
+a “Power Fail” mode wherein it begins to discharge the magnet at a low voltage.  If power is restored, the user can 
+intervene to stop the discharge and re-energize the magnet if desired.  “Power Fail” mode is a convenient feature 
+of the APS100 since it enables the user to simply turn OFF the power switch for the unit at the end of the day. 
+ Independent Upper and Lower Current Limit Set points.  Independent current limits allow sweeping between two 
+set points without having to re-enter the menu and constantly change limit settings. 
+ PID-Controlled Sweeping.  A PID inside the power supply’s control circuits allows smooth sweeping between set 
+points without the need for or dependence on voltage taps across the magnet. 
+ Changeable Settings During Sweep.  The menu system can be entered at virtually any time during operation of the 
+supply to change parameters.  While in the menu, the display continues to update the user as to the status of the 
+supply/magnet. 
+ Computer Interfacing.  A versatile USB and IEEE-488 interface are standard.  Through either interface, a 
+comprehensive set of monitor and control commands is available.  The IEEE-488 interface conforms to the IEEE-
+488.2-1992 standard. 
+ LabVIEW TM  drivers.  Virtual Instrument drivers compatible with National Instruments LabVIEW TM  are available for 
+attocube’ instrumentation through attocube’ website. 
+ Built-in Persistent Switch Heater Supply.  A power supply for energizing a persistent switch is built into the 
+APS100. 
+ Remote Shut-down Input.  A signal can be provided by the user to the APS100 which commands it to discharge 
+(Zero) the magnet.  This can be used to lock out operation of the magnet when helium gets too low or when some 
+other user-defined event occurs. 
+ Quench Detection and Protection.  The APS100 is fully protected from damage due to quench.  In addition, if a 
+quench is detected the APS100 will give an audible and visual indication of the quench.    
+ 
+ 
+The current readings leading up to the quench can be displayed on the unit’s front panel. Since quench detection 
+is activated on observed current transients, it must be disabled if automatic recovery is desired from abnormal 
+conditions such as those encountered in several of the CE qualification tests.  These tests include electrical fast 
+transient and electrostatic discharge.   
+  
+PAGE 10
+Page 10 
+ 
+ 
+I.3.  Specifications  
+Common Specifications         Current      Voltage  
+DC Output: See model specific spec   0 to ± 10 V 
+Output Power See model specific spec 
+Ripple and noise 20 uA rms        10 mV rms @ 100A 
+Stability (drift) at 25 ± 1C: ± 3mA / °C  ± 0.01% V max 
+Display Resolution: 0.1 mA 1 mV 
+Display Update Rate:      ~ 500ms Intervals. 
+Output Current Setability: 0.1 mA 5 mV 
+Sweep Rate Resolution: 0.1 mA/sec 
+Source effect (line regulation for any line 
+change within the rated line voltage): 0.005% Imax 0.05% Vmax 
+Load effect (load regulation for a load change equal 
+to max. voltage in constant current mode or 
+max. current in constant voltage mode): 0.01% Imax 0.01% Imax 
+Output Protection:     Protected from damage due to  quench 
+Persistent Switch Heater 0-125mA 0-12V 
+AC Input:      220-230V a.c., 50-60 Hz, 16A max 
+Circuit Breakers:      16A, 240V a.c., slow blow 
+Operating Temperature:     15 °C to 35 °C 
+Relative Humidity     10% to 95%, non-condensing 
+Over-Temperature Protection: Unit will limit discha rge power to prevent overheating. 
+Overall Dimensions (excluding front handles):  483 mm W X 133 mm H X 533 mm D 
+USB interface:      USB 1.1/2.0 Full-Speed 
+IEEE-488 interface:     IEEE-488.2-1992 Standard 
+Ethernet: IEEE-802.3 10/100 BASE-T 
+Shut-down Input: +5V, +24V, or switch closure signaling 
+ 
+Model Specific Specifications  
+ Max Current Max Output Power Weight (lbs/kg) 
+APS100-100 100A 1000W 29.0/13.2 
+APS100-200 200A 2000W 43.2/19.7 
+APS100-100/100 100A/100A 1000W/1000W 43.2/19.7 
+ 
+The APS100 is designed to operate per the specifications in this table and the instructions provided in this manual.  
+Other use may impair the safety protections provided by the equipment. 
+PAGE 11
+Page 11  
+ 
+ 
+ 
+II.  Installation  
+The following section outlines information concerning the installation and setup of the APS100 supply.  As with any equipment 
+purchase, the user is strongly encouraged to inspect the power supply for shipping damage immediately upon receipt.  Proper 
+power and ground connections should be made using the appropriate codes and practices.  Should the APS100 require return to 
+the factory due to shipping damage or for servicing, contact attocube or an authorized service represe ntative for instructions and a 
+return authorization number. 
+ 
+The APS100 is delivered to you fully tested, calibrated, and ready to operate.  This includes configuring appropriate 
+setup values if the supply is purchased with a magnet system. 
+ 
+II.1.  Line  Voltage and Fuses  
+The APS100 is fused for operation using 220-230 V a.c., 50-60 Hz input power by a 16A circuit breaker incorporated 
+in the power entry module.  Never use an ungrounded power cord for line power. 
+ 
+It is strongly recommended that AC power provided to the APS100 be protected with a Ground Fault Interrupter (GFI) 
+and a surge suppressor.  If the unit is operating in an area subject to power failures or brownouts, the user may wish to 
+install an Uninterruptible Power Supply (UPS) (sine wave) to minimize the chance of inadvertently discharging or 
+quenching the magnet due to line effects. 
+ 
+If the APS100 is powered from a line voltage less than 220V the output power available will be reduced.  The maximum 
+power available from each power output module may be calculated by  
+Output Power Available = (1200-(200-V
+IN )*7.42) - 3*I OUT 
+where V IN is the AC input line voltage and I OUT is the DC output current. 
+ 
+Operation at a reduced voltage greater than 90V a.c. can be achieved if the above constraint is observed. 
+ 
+II.2.  Mounting  
+The APS100 is compatible with all standard 19-inch wide rack cabinets.  Due to the instrument’s weight, it is 
+recommended that rails be located beneath the supply to prevent bending of the supply mounting brackets.  Adequate 
+ventilation is essential to the APS100.  An unobstructed air path should be available at the ventilation slots in the rear 
+and side panels of the instrument and at the fan outlets to avoid overheating. 
+ 
+PAGE 12
+Page 12 
+ 
+ 
+II.3.  Environment  
+The APS100 is designed for operation in free air, non-condensing atmospheres within a temperature range of 15° to 
+35°C (59° to 95°F).  It has been designed primarily for laboratory use – so harsh environments of dust or corrosive 
+materials could result in eventual damage.  A filtered enclosure is recommended for operation under these conditions. 
+ 
+II.4.  Terminal Strip Connections  
+The rear panel terminal strip of the APS100 provides service for all analog input and output signals for  the APS100.  
+The terminal strip is shown in Figure and Table outlines the definition and function of each terminal pair. A cover is 
+provided to prevent electrostatic discharge damage to the electrical connections.  A terminal strip is present for each 
+installed power module. 
+ 
+ 
+Figur e 3.  Rear Panel Terminal Strip  
+ 
+Terminal #  Name  Function  
+1 Pers Sw +  Persistent Switch  Heater Power Supply Output  
+2 Pers Sw - 
+3 Mag.Vin +  Magnet Voltage Taps – Input Signal to APS100 from Magnet (optional) 
+4 Mag.Vin - 
+5 Ground  Ground connections for I/O Cable and Output Cable shields  
+6 Ground  
+ 
+Table 1.  Terminal Functions  
+ 
+Before making connections to the rear panel terminal strip, make sure the power to the APS100 is OFF.  Shield cables 
+must be used with shields connected to terminal 6 for CE compliance.  Make all connections using the appropriate 
+wire size.  The terminal strip is designed to accept AWG 24 – 12 (0.2 – 2.5 mm 2 stranded or 0.2 – 0.4 mm 2 solid) 
+conductor.  The ends should be stripped bare 7mm.  All connections should be isolated from instrument ground and 
+from each other. 
+ 
+
+PAGE 13
+Page 13  
+ 
+ 
+ 
+II.5.  Power Output Terminals  
+The high current output terminals are located on the rear panel and are labeled I(+)  and I( -).  Make sure the APS100 
+power is OFF before attaching the terminals to the magnet power leads.  Care should be taken in attaching power leads 
+for the magnet to insure solid contact is made using a ¼-20 bolt with nut to each terminal.  Although quench 
+protection is built into the APS100 to prevent the occurrence of high voltages, the magnet leads should NEVER be 
+disconnected when current is present.  Potentially lethal voltage can easily occur due to the high inductance of 
+superconducting magnets.  
+ 
+ 
+ 
+CAUTION – RISK OF ELECTRIC SHOCK 
+ 
+Note:  Ferrite beads (Fair-Rite P/N 0444177081) must be installed on the output cables for compliance with 
+CE standards for RF conducted immunity.  Cables must be shielded with shields connected to terminal 6 of 
+the terminal block. 
+ 
+II.6.  Maintenance  
+The APS100 should be inspected periodically to verify that all connections are secure, fans operate properly, and that 
+the ventilation openings are clear.  
+If cleaning is required, disconnect the power cord and clean the unit with a soft cloth dampened with water.  
+The APS100 does not contain user serviceable parts.  If repairs should be required, contact the factory for a repair 
+authorization number, and return to the factory for service to ensure the integrity of the unit is maintained. 
+ 
+  
+
+PAGE 14
+Page 14 
+ 
+ 
+  
+PAGE 15
+Page 15  
+ 
+ 
+ 
+III.  Setup and Operati on  
+The APS100 is designed specifically for operation with superconducting magnets.  Before using the supply to energize 
+a magnet; however, certain parameters specific to the superconducting magnet being used, the charge rate(s) desired 
+during field sweep, and the operating current limit(s) should be set through the menu system.  The following procedure 
+is recommended. 
+ 
+III.1.  Setting Magnet Parameters  
+The first thing the user should set up is the magnet parameters.  If this is a dual unit, select SUPPLY A or SUPPLY B first.  
+In the sweep menu, press [SETUP], then [MAGNET].  The display will show the Magnet Parameters.  If a persistent 
+heater is being used, Persistent Heater Present should be set to Yes.  If the magnet to be energized is currently at zero 
+field, the Persistent Mode Current should be set to 0.0000A.  If the magnet is already in persistent mode at some other 
+known current, this current can be entered instead.  Be sure the polarity of the magnet current is entered correctly. 
+ 
+The maximum safe operating current for the magnet should be entered in the Maximum Current Rating parameter 
+position.  The supply will not allow output current to exceed this value.  Should the user enter a Sweep Limit setting 
+exceeding this value (in the Limits menu), the supply will only sweep to the Maximum Current Rating value and indicate 
+MAG LIMIT REACHED  on the display. 
+ 
+The Gauss/Amp Ratio of the magnet may be entered in the Magnet Parameters setup if desired.  The APS100 only 
+uses this parameter if the Display Units is set to Field rather than Amperes.  Consequently setting this parameter is not 
+essential. 
+ 
+If the magnet to be energized is equipped with a persistent mode switch, the heater current necessary to activate it 
+should be entered in the Persistent Switch Heater (mA) field.  The persistent switch heater power supply is capable of 
+up to 125 mA of output current at up to 12V compliance. 
+ 
+If quench detection is desired, set Quench Detection to On. 
+ 
+Set the magnet's nominal inductance into the Inductance (H) parameter.  If the supply was shipped with a magnet, this 
+field should already be set. 
+ 
+When done with the magnet parameters, press EXIT, then SAVE. 
+PAGE 16
+Page 16 
+ 
+ 
+III.2.  Setting Charge Rates  
+The charge rate(s) for energizing the magnet should be entered through the Rates menu. The APS100 allows the user 
+to set up to five different charge rates to be used in five current ranges, plus a fast rate.  This allows the user to specify 
+a slower rate for a magnet when it is near its maximum rated field. 
+ 
+From the sweep menu, press [SETUP], then [RATES].  Using the inductance of the magnet as a guide, set the desired 
+rates keeping in mind that the best (smoothest) sweeps of the magnet are achieved when 1V margin is maintained 
+relative to the supply’s voltage limit setting.  The charging voltage of the magnet is computed by    V = L 
+di /dt , where the 
+value of di /dt  is the desired sweep rate in amperes per second indicated in the Rates menu. 
+ 
+Once the rates and their respective current ranges have been set, press [EXIT] then [SAVE] to accept the changes, or 
+[DISCARD] to abort and ignore all changes.  If the message 'VALUE TOO LOW' appears, the cursor will be on a 'To' 
+field that is lower than the start of the range.  It must be greater. 
+ 
+III.3.  Setting Limits  
+The desired operating current for the magnet is set in the Limits menu.  The APS100 allows the user to enter two 
+different limits – an upper and a lower – to enable smooth sweeps between two points.  Either or both of the upper and 
+lower current limits may be positive or negative current values as long as the upper is more positive than the lower. 
+ 
+From the sweep menu, select [SETUP] then [LIMITS].  Use the arrow keys to select the appropriate current limit and 
+then enter the desired value.  If changes to the voltage limit are desired, this can be entered now, too. 
+ 
+If alarm operation is desired, change the Alarm HI Limit and Alarm LO Limit to the desired values.  This will result in 
+alarm messages on the display when these values are exceeded.  If the optional relay outputs are in use, they can be 
+enabled or disabled with the Alarm Relay Bypass setting.  If set to On, the outputs remain closed all the time. 
+ 
+When an alarm occurs, it is reset either automatically (when the current falls back within limits) or require a button 
+press.  To automatically reset them, set Alarm Relay Autoreset to On. 
+ 
+Once the settings are made, press [EXIT] and [SAVE] to accept the changes (or [DISCARD] to abort and ignore the 
+changes). 
+III.4.  Energizing the Magnet  
+Once the magnet parameters, charge rates, and limits have been set, the supply is ready to energize the magnet.  From 
+the supply sweep menu, energize the persistent switch heater supply by pressing [PERS HTR] then [CONFIRM HTR ON].  
+Pressing either [CANCEL] or [ESC] will cancel turning the heater on.  Wait for a few seconds or whatever time is required 
+PAGE 17
+Page 17  
+ 
+ 
+ 
+by the magnet’s persistent switch before beginning the field sweep. 
+ 
+Press [HI LIMIT] to begin energizing the magnet in the direction of the upper current limit.  Alternatively, the operator 
+can press [LO LIMIT] to begin energizing the magnet in the direction of the lower current limit.  Once the appropriate 
+current limit is reached, the APS100 will hold that current. 
+ 
+To place the magnet into persistent mode, turn off the persistent switch heater supply by pressing [PERS HTR] then 
+[CONFIRM HTR OFF].  Pressing either [CANCEL] or [ESC] will cancel turning the heater off.  Wait a few seconds or 
+whatever time is required by the magnet’s persistent switch before zeroing the current in the leads. 
+ 
+Once the magnet is in persistent mode, the current in the leads may be brought back to zero by pressing the [Zero] key. 
+IMPORTANT  
+Be sure to zero the supply by pressing the [ZERO] key.  Pressing [LO LIMIT] will 
+result in the supply sweeping to the lower current limit rat her than to  zero.  
+ 
+Watch the magnet voltage while the supply begins to sweep toward zero to verify that the magnet has indeed entered 
+persistent mode.  If no voltage is detected, press [Shift-ZERO] to bring the supply back to zero output current at the fast 
+sweep rate.  When the supply reaches zero output current, it automatically switches to Standby mode. 
+ 
+III.5.  Discharging the Magnet  
+To discharge a magnet that is in persistent mode, press the [Shift-HI LIMIT] or [Shift-LO LIMIT] to quickly bring the 
+supply output current back to the current left in the magnet.  Be sure to bring the current back in the proper polarity as 
+was left in the magnet. 
+ 
+When current limit is reached, the supply will stabilize and hold that current.  From the main supply sweep menu, 
+energize the persistent switch heater supply by pressing [PERS HTR] then [CONFIRM HTR ON].  To cancel turning the 
+heater on press either [CANCEL] or [ESC].  Wait for a few seconds (or whatever time is required by the magnet’s 
+persistent switch) before beginning the field sweep. 
+ 
+Once the persistent switch is warm, sweep the magnet current back to zero by pressing the [ZERO] key.  Watch the 
+magnet voltage to verify that the magnet is beginning to discharge.  When the supply reaches zero output current, it will 
+automatically change to Standby mode.  Turn off the persistent switch heater supply by pressing [PERS HTR] then 
+[CONFIRM HTR OFF].   
+PAGE 18
+Page 18 
+ 
+ 
+ 
+To sweep to the opposite current limit rather than zero, press the appropriate [HI LIMIT] or [LO LIMIT] key rather than 
+the [ZERO] key.  The supply will smoothly sweep through zero and on to the other current limit. 
+ 
+III.6.  Fast Sweeping  
+To invoke the fast sweep rate, press and hold SHIFT, and then select the desired sweep function. 
+ 
+Note that fast sweeping is only available under certain conditions in order to avoid accidental exposure of the 
+superconducting magnet to excessive voltage and rapid current changes.  For fast sweeping to be enabled: 
+ The Persistent Heater Present parameter in the MAGNET menu must be set to Yes. 
+ The persistent switch heater must be OFF. 
+If the above conditions are not met, fast sweep operation will be disabled (the keys will gray out when SHIFT is 
+pressed). 
+ 
+III.7.  Power Fail Mode  
+Should there be a loss of line power during energizing or discharging of the superconducting magnet, the APS100 will 
+automatically switch to Power Fail Mode.  In Power Fail Mode, the magnet is put into a slow self-discharge by limiting 
+the voltage at the power supply output terminals to about 0.9V. 
+ 
+If line power is restored, the APS100 will continue to discharge the magnet at 0.9V unless the user intervenes.  Upon 
+return of line power, the supply displays a message PASSIVE DISCHARGE if it detects current in the magnet, and will 
+continue slowly discharging the magnet.  It is not necessary to fully discharge the magnet if this occurs.  Pressing 
+[PAUSE] will stop the self-discharge by entering RECOVERY mode, and when complete will allow normal operation to 
+be resumed. 
+  
+ 
+III.8.  Magnet Quench  
+The APS100 has magnet quench detection built-in.  In the event a magnet quench is detected, QUENCH DETECTED will 
+be displayed and the supply will switch to Standby mode, removing power from the output.  If the Quench Alarm (in the 
+General menu) has been set to Yes, the unit emits a steady tone.  Pressing any key will silence the tone.  In the quench 
+state, there are two keys available:  QUENCH RESET and QUENCH DATA.  QUENCH DATA will show the last few dozen 
+current readings leading up to the quench.  QUENCH RESET clears the quench state and puts the supply into STANDBY.  
+If a quench should be falsely detected, the power supply will display PASSIVE DISCHARGE, and the magnet will be 
+discharged as described in the Power Fail Mode. 
+PAGE 19
+Page 19  
+ 
+ 
+ 
+  
+PAGE 20
+Page 20 
+ 
+ 
+IV.  Displays and Menus  
+Setup and operation of the APS100 may be performed either through the front panel keypad and simple menu 
+instructions or through a remote computer interface (USB or IEEE-488.2). The following sections contain descriptions 
+of how to configure and operate the APS100 through the front panel. 
+ 
+The APS100 Magnet Power Supply is available in single or dual power module configurations. With few exceptions, in 
+dual power module configurations, the two modules operate independently and have separate settings. The displays 
+vary slightly between a single and dual module unit.  Unless otherwise specified, menu descriptions apply equally to 
+both modules. 
+ 
+Before connecting a magnet or other cabling to the APS100, connect the power cord provided with your APS100 to an 
+appropriate power source.  Power the instrument ON and familiarize yourself with the display and keypad.  
+ 
+IV.1.  Normal Operating Displays  
+The normal operating displays of the APS100 are shown in Figures 2  through 4. 
+IV.1.a.  Single Supply  
+  
+
+PAGE 21
+Page 21  
+ 
+ 
+ 
+Figure 4.  Normal Operating Display, Single Suppl y 
+ 
+Figure 5.  Normal Operating Display, Single Supply, Continued  
+ 
+ 
+  
+
+PAGE 22
+Page 22 
+ 
+ 
+IV.1.b.  Dual Supply  
+ 
+Figure 6.  Normal Operating Display, Dual Supply  
+ 
+  
+
+PAGE 23
+Page 23  
+ 
+ 
+ 
+IV.1.c.  Display Field Descriptions  
+Module Name  
+This field displays which power module's data is being shown. 
+ 
+Module Sweep Status  
+The Module Sweep Status field indicates the present supply activity.  Standby  indicates that the power supply output 
+module is disabled and not developing power.  Sweeping to HI LIMIT  indicates that the supply output current is being 
+swept to the upper sweep limit.  Sweeping to LO LIMIT indicates that the supply output current is being swept to the 
+lower sweep limit.  -Paused -  indicates that the sweep function is not active, and that the supply is maintaining or 
+converging to a constant output current.  Sweeping to ZERO indicates the supply is discharging the magnet. 
+ 
+When the Sweep Status is 
+Sweeping to HI LIMIT  or Sweeping to LO LIMIT the sweep will continue until the respective 
+upper or lower current limit is reached.  When Zeroing, the Sweep Mode of the supply will automatically change to 
+Standby  when zero current and zero voltage is reached. 
+ 
+Indicators that may appear in the Module Sweep Status field are: 
+ Standby 
+ -Paused- 
+ Sweeping to HI LIMIT 
+ Sweeping to LO LIMIT 
+ Sweeping to ZERO 
+ Sweeping to MAGNET 
+ Swp FAST to HI LIMIT 
+ Swp FAST to LO LIMIT 
+ Swp FAST to ZERO 
+ Swp FAST to MAGNET 
+ 
+In addition, Module Sweep Status can indicate several module exceptions: 
+ QUENCH DETECTED 
+ PASSIVE DISCHARGE 
+ RECOVERING 
+ SHUTDOWN COMMAND (rear shutdown input activated) 
+ OFFLINE (indicates a problem with the module)  
+PAGE 24
+Page 24 
+ 
+ 
+Module User Label  
+The Module User Label is a 16-character alpha-numeric label that is user-settable.  This field may be set using a 
+command through the APS100’s USB, Ethernet, or GPIB interface. 
+ 
+Module Output  Current  
+This field indicates the output current or field (amperes shown) sensed in the output leads. 
+ 
+Module Output Voltage  
+This field indicates the output voltage at the output terminals of the power supply module.  Note that it may differ from 
+magnet voltage due to voltage drop in the magnet power leads.  This voltage will be clamped to the voltage limit setting 
+in the LIMITS menu. 
+ 
+Magnet Voltage  
+This field indicates the voltage sensed at the Mag. Vin  terminals on the rear panel. 
+ 
+Magnet Current  
+The magnet current is displayed in this field in the selected units.  The magnet current will track the Module Output 
+Current if either: 
+ There is no persistent switch heater (a setting in the Magnet menu) 
+ There is a persistent switch heater and it is on. 
+If a persistent switch heater exists and it is off (magnet is in the persistent mode), this value is either: 
+ The Module Output Current existing when the heater was turned off 
+ A value entered by the user when the heater was off. 
+The magnet current will indicate zero if a quench is detected. 
+ 
+Persistent Switch Heater Status  
+This field is shown if there is a persistent switch heater present (a setting in the Magnet menu).  The values it can show 
+are: 
+ OFF 
+ ON 
+ FAIL  No switch heater current detected (check connections). 
+ 
+High Sweep Limit  
+PAGE 25
+Page 25  
+ 
+ 
+ 
+The target current for a sweep-to-high limit command.  This value is entered in the LIMITS menu.  If this value exceeds 
+the Maximum Current Rating (set in the Magnet menu), the supply will only sweep up to the maximum rating and 
+indicate MAG LIMIT REACHED . 
+ 
+Low Sweep Limit  
+The target current for a sweep-to-low limit command.  This value is entered in the LIMITS screen.  If this value exceeds 
+the Maximum Current Rating (set in the Magnet menu), the supply will only sweep down to the maximum rating and 
+indicate MAG LIMIT REACHED . 
+ 
+Output Voltage Limit  
+The module will not allow the output voltage to exceed this value.  It is set in the LIMITS menu. 
+ 
+Local / Remote (not shown in pictures) 
+The Local  indication shows that operator has pressed the Local button, and that the remote interfaces (USB, Ethernet 
+or GPIB) cannot control the supply until the operator presses the Local button again.  The Remote  indication shows 
+that a remote interface is controlling the supply, and that all buttons except the Local  button are disabled. 
+Display Units  
+The operator may select Amperes or Field to display the output current. 
+ 
+IV.2.  Key Pad Operation  
+The keypad layout is shown in Figure 5.  The six unlabeled (soft) keys next to the display are not shown.  Most keys on 
+the keypad are used only for menu navigation and parameter entry. 
+ 
+ 
+ 
+ 
+ 
+ 
+Figure 7.  Keypad Layout  
+The [Local] key is used to put the APS100 in local mode, locking out remote commands.  [Local] is the only button 
+active when in REMOTE mode.  [ESC] is used to back out of a parameter change and restore the previous value, and if 
+not editing a parameter, behaves the same as the [Exit] key in menus.  [Enter] is used to accept parameter changes 
+
+PAGE 26
+Page 26 
+ 
+ 
+and parallels the function of the SAVE soft-key in menus.  [Shift] is used in conjunction with the sweep soft-keys to 
+command a fast sweep mode.  See Notes about Sweeping. 
+ 
+IV.3.  Menus  
+The menus of the APS100 are designed for to minimize the number of keystrokes required, while at the same time 
+being intuitive for system operators. 
+ 
+IV.3.a.  Organization  
+The menus have the following overall organization: 
+ 
+Figure 8.  Menu Organization  
+IV.3.b.  General Menu Features  
+There are two types of parameters in the menus:  Numerical and list.  Numerical parameters are entered via the keypad 
+0-9, decimal point, and the change sign key.  When starting an entry on a numerical parameter, the field is cleared and 
+
+PAGE 27
+Page 27  
+ 
+ 
+ 
+changed to a yellow background, and a SAVE soft-key function appears.  After you enter the desired value, you must 
+press SAVE to keep your entry, or ESC to abort the change (which restores the old value) before you can exit the field. 
+ 
+List parameters are selected by using the CHANGE soft-key, which appears when the cursor is on a list parameter.  You 
+press CHANGE to cycle through all the possible values for the field.  Like numerical parameters, the field turns yellow 
+during changing, and you must either SAVE the new setting or ESC to restore the old before you can exit the field. 
+ 
+Parameter changes made in any menu are not effective until you exit the menu and choose SAVE at the prompt. 
+ 
+All setup menus share a common upper half where the status of the module(s) is shown in real time.  Example: 
+ 
+Figure 9.  General Setup Menu  
+ 
+
+PAGE 28
+Page 28 
+ 
+ 
+IV.3.c.  Limits Menu  
+The Limits menu is used to set the sweep limits and voltage limit. 
+ 
+Figure 10.  Limits Menu  
+ 
+High and Low Sweep Limits  
+These are the target sweep limits for the sweep up and sweep down functions.  They may be set to anything within the 
+capability of the installed module(s), but the module(s) still obey the Maximum Current Rating setting in the Magnet 
+menu. 
+ 
+Voltage Limit  
+The voltage limit is used to set the maximum or minimum output voltage that will appear at the power supply output 
+terminals during charge or discharge.  Note that the voltage at the magnet will be either more or less due to the 
+direction of current in the current leads and the lead resistance. 
+ 
+Alarm HI and LO Limits  
+The output current is compared to these values, and if they are exceeded, alarm messages appear on the monitor 
+displays.  If you have the optional alarm outputs installed, these will go open upon an alarm condition.  If you do not 
+desire alarm messages, set these to a high value or to the maximum capability of the module. 
+
+PAGE 29
+Page 29  
+ 
+ 
+ 
+ 
+Alarm Relay Bypass  
+If you have the optional alarm outputs installed, and you do not desire these to open under any condition, set Alarm 
+Relay Bypass to ON.  The outputs will always be closed as long as the APS100 is powered on. 
+ 
+Alarm Relay Autoreset  
+This parameter is not shown in the picture; you must scroll down to it.  There are two ways to reset alarms:  
+Automatically, when the current falls under the alarm limits, and manually, by soft-keys provided on the display.  Set 
+Alarm Relay Autoreset to On if you want it done automatically, Off if you want manual resets. 
+ 
+  
+PAGE 30
+Page 30 
+ 
+ 
+IV.3.d.  Rates Menu  
+The Rates menu is used to set the sweep ranges and rates. 
+ 
+Figure 11.  Rates Menu Current Ranges  
+ 
+Five current ranges may be defined by setting the upper current limits (the To field) for each.  Start at the top and work 
+down.  As you enter a value for an upper limit of a range, it is automatically copied to the beginning of the next range.  
+The upper limit must be greater than the beginning of the range, or you will get a 'VALUE TOO LOW' error when you try 
+to exit. 
+ 
+Sweep Rates  
+Sweep rates may be set for each current range.  This allows sweep rates to be automatically reduced at high fields and 
+increased at low fields if desired. 
+Fast Mode  
+Fast mode sweep rate is used when sweep up fast [Shift-HI LIMIT], sweep down fast [Shift-LO LIMIT], or [Shift-Zero] is 
+selected.  These modes are selected by holding the shift key and pressing the appropriate sweep button.  Fast mode is 
+only available when the persistent switch heater option is enabled and the heater is turned off. 
+IV.3.e.  Magnet Menu  
+The Magnet menu should be the first menu configured when preparing the supply for use. 
+
+PAGE 31
+Page 31  
+ 
+ 
+ 
+ 
+ 
+Figure 12.  Magnet Parameters Menu  
+ 
+Display Units  
+The Units menu item allows the user to set the display units of the APS100.  Available options are Amperes and Field.  
+The Fields displays will autorange between Gauss, Kilogauss, and Tesla.  Once the system of units is selected, the 
+APS100 uses that system of units for displaying the output current, magnet current, and limits.  
+ 
+Persistent Heater Present  
+This tells the APS100 whether or not a persistent switch heater is present.  If not, you will not have the capability to use 
+fast sweeps, and the Persistent Mode Current and Persistent Switch Heater parameters will be unavailable. 
+ 
+Persistent Mode Current  
+Persistent mode current displays the present magnet current if it is in persistent mode and it was last used with the 
+supply.  This field may be edited, in case the magnet was placed in persistent mode using a different power supply, or if 
+a magnet quenches while the power supply is turned off. 
+ 
+
+PAGE 32
+Page 32 
+ 
+ 
+Persistent Switch Heater Current  
+The persistent switch heater current can be set from 1 to 125 mA.  The switch heater is not turned on until it is selected 
+in the operating display or via a remote interface command. 
+ 
+Maximum Current Rating  
+This is the maximum current that the supply may output, regardless of the settings in the upper or lower current limits, 
+or the maximum current set the current ranges in the Rates menu.  It would normally be set to the magnet's maximum 
+safe operating limit. 
+ 
+Gauss to Amp Ratio  
+This is entered in units of gauss per ampere.  It is used to display the magnetic field instead of output current if Field is 
+selected in the Display Units menu item.  It may be set as a whole number ranging from 1 to 3000. 
+ 
+Quench Detection  
+The supply monitors the output current when quench detect is enabled.  If a rapid decrease is detected it assumes that 
+a quench has occurred, and the supply is immediately placed in standby.  At this point the supply stops delivering any 
+current to the magnet system, which in turn protects the magnet's quench protection system.  The Quench Detection 
+setting allows this feature to be disabled. 
+ 
+Inductance  
+Set this to the nominal inductance of your magnet.  It is used to set PID parameters for the sweep algorithm.  If a low 
+resistance persistent switch is used in parallel with the magnet, a lower value than the actual magnet inductance may 
+provide faster settling times without inducing overshoot. 
+PAGE 33
+Page 33  
+ 
+ 
+ 
+IV.3.f.  Ge neral Menu  
+The General menu is used to select computer interface parameters and other parameters common to either one or two 
+module units. 
+ 
+Figure 13.  General Power Supply Setup Menu  
+ 
+Interface  
+The Interface field displays the computer interface.  Available interfaces are GPIB, USB, and Ethernet.  Power must be 
+cycled for it to take effect. 
+ 
+GPIB Device ID  
+The GPIB device ID may be set from 0 to 30.  Power must be cycled for it to take effect. 
+ 
+Baud Rate  
+This controls the baud rate used for the USB virtual COM port.  It may be set to 9600, 19200, 38400, 57600, and 
+115200.  It does not require power cycling to become effective. 
+ 
+
+PAGE 34
+Page 34 
+ 
+ 
+IP Address  
+Sets the IP address for the Ethernet. 
+ 
+Subnet Mask (not shown)  
+Sets the Subnet mask for the Ethernet. 
+ 
+Port  
+Sets the port for the Ethernet.   
+ 
+Quench Alarm  
+If quench detection is enabled, this allows control over the audible alert.  It can be set to Silent or Steady.  When the 
+alarm is activated, pressing any key will silence it. 
+ 
+Key Click (not shown)  
+This provides audible feedback when pressing keys. 
+ 
+  
+PAGE 35
+Page 35  
+ 
+ 
+ 
+
+PAGE 36
+Page 36 
+ 
+ 
+V.  Interfacing  
+The APS100 provides USB, IEEE-488.2, and Ethernet computer interfaces.  Front panel functions may be accessed 
+using command strings over the selected interface.  Commands available to the APS100 operator over the computer 
+interfaces are given in Appendix B.  The commands available through USB and Ethernet are identical to those available 
+through IEEE-488.2; however, some commands may be IEEE-488.2 specific and may not provide responses consistent 
+with the USB and Ethernet interfaces.  The command set includes Local, Remote, and RWLock which are not 
+applicable to IEEE-488.2. 
+ 
+Command strings are normally limited to 60 characters when the USB and Ethernet interfaces are used.  A <RETURN> 
+will be generated internally when any line longer than the maximum is encountered, and any valid commands in the 
+received line prior to the internally generated <RETURN> will be processed.  An output buffer of 62 characters is used 
+although longer responses can be successfully generated.  All remote commands are case insensitive, allowing upper 
+or lower case to be used without affecting operation of the commands. 
+ 
+When the USB interface is selected, all commands sent to the instrument will be echoed including the terminating 
+ASCII <RETURN> character, followed by a <NEWLINE> character when command processing is complete. 
+ 
+V.1.  USB Computer Interface  
+The USB port is accessed through the USB Type B connector on the rear panel of the instrument.  To use the USB 
+interface, you must install a virtual com port on the PC, which then treats the USB interface as a traditional RS-232 
+interface.  The virtual com port driver is available from attocube or from WWW.FTDICHIP.COM .  The APS100 must be 
+configured for the same baud rate as your virtual com port (See the GENERAL setup menu). 
+ 
+V.2.  IEEE -488.2 Computer Interface  
+The APS100 has an IEEE-488.2 computer interface.  The APS100 implements SH1, AH1, T6, L4, SR1, RL1, PP0, DC1, 
+DT0, C0, and E1 options.  The commands are compliant with the IEEE-488.2 standard.  The connector is identified on 
+the rear panel of the instrument. 
+ 
+Reference:   IEEE Standard Codes, Formats, Protocols, and Common Commands (IEEE Std 488.2-1992) 
+provides a detailed description of the IEEE common commands (identifiable in the command list by the 
+asterisk as the first character.)   
+V.3.  Ethernet Interface  
+The APS100 has a IEEE-802.3 10/100 BASE-T Ethernet interface that supports a socket connection.  The IP address, 
+subnet mask, and port address are set in the General Menu (paragraph 4.3.6.)  The Ethernet Interface is supported by 
+PAGE 37
+Page 37  
+ 
+ 
+ 
+the LabVIEW TM  VISA driver which uses a Resource string such as tcpip0::192.168.0.254::4444::socket, where 
+192.168.0.254 is the IP address and 4444 is the port address entered in the General Menu. 
+ 
+PAGE 38
+Page 38 
+ 
+ 
+
+PAGE 39
+Page 39  
+ 
+ 
+ 
+VI.  Theory of Operation  
+The APS100 is a 4 quadrant power supply with glitch free bi-directional output capability and programmable voltage 
+limiting in both polarities.   
+ 
+VI.1.  Circuit Description  
+The APS100 front panel is a microprocessor based unit that handles all display, keyboard, and persistent switch 
+heater operation, and all communications with the outside world, including the power modules.  User data is stored in 
+non-volatile memory external to the processor. 
+ 
+The power modules are microprocessor-based units that only communicate with the front panel. The microprocessor 
+has built-in EEPROM that is used to hold factory calibration.  Consequently, it is not possible to simply change the 
+processor with another.  The unit will not work properly with a new processor until it has been initialized by the factory. 
+ 
+Output current is set by a 20 bit digital-to-analog converter controlled by a software PID algorithm updated at a 15Hz 
+rate.  A 24 bit sigma-delta analog-to-digital converter is used to sense the output current.  The programmable current 
+sweep rate is digitally implemented in the PID algorithm. 
+ 
+The APS100’s display is a bright, full-color 5 1/4” LCD display.  It is capable of graphics and full alphanumerics.  Both 
+voltage and current can easily be read from a significant distance. 
+ 
+  
+PAGE 40
+Page 40 
+ 
+ 
+
+PAGE 41
+Page 41  
+ 
+ 
+ 
+VII.  Limited Warranty Policy  
+attocube systems AG. warrants its products to be fr ee from defects in materials and workmanship.  This  warranty shall 
+be effective for one (1) year after the date of shi pment from attocube.  attocube reserves the right t o elect to repair, 
+replace, or give credit for the purchase price of a ny product subject to warranty adjustment.  Return of all products for 
+warranty adjustment shall be FOB Oak Ridge, TN, and  must have prior authorization for such return from  an authorized 
+attocube systems AG representative. 
+ 
+This warranty shall not apply to any product which has been determined by attocube, Inc. inspection to  have become 
+defective due to abuse, mishandling, accident, alteration, improper installation or other causes.  attocube systems AG 
+products are designed for use by knowledgeable, competent technical personnel. 
+ 
+In any event, the liability of attocube systems AG is strictly limited to the purchase price of the eq uipment supplied by 
+attocube systems AG.  attocube systems AG shall not  assume liability for any consequential damages ass ociated with 
+use or misuse of its equipment.  
+  
+PAGE 42
+Page 42 
+ 
+ 
+
+PAGE 43
+Page 43  
+ 
+ 
+ 
+Appendix A : Factory Calibrations and Certification  
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+Notes:             
+             
+             
+             
+             
+             
+ 
+     Certified:       
+     Date:        
+ 
+  
+PAGE 44
+Page 44 
+ 
+ 
+Appendix B : Computer Interface Command Reference  
+Commands available over the computer interface are identified by availability. Commands that are available only when 
+the operational display is active are noted as "Operate", commands that require remote mode are noted as 
+"Remote".  All queries and IEEE-488.2 specific commands are always available, regardless of whether the state is 
+Local, Remote, or unassigned. Commands that are IEEE 488.2 specific can be recognized by an asterisk (*) as the first 
+character.  All command mnemonics that elicit a response from the instrument (referred to as queries) end with a 
+question (?) character.  A general command format is as follows: 
+ 
+ <subcommand1>;<subcommand2>;<subcommand3><RETURN> 
+ 
+where a subcommand is formatted 
+ 
+ <Command Mnemonic><SPACE><Parameter> 
+ 
+Example: 
+ *IDN?;*ESE 12;*ESE?<RETURN> 
+ 
+Responses to each subcommand are separated by semicolons.  The above example would return: 
+ attocube,APS100,0001,1.14,245;12 <RETURN><LINEFEED > 
+ 
+where the serial number is 0001 and the firmware version number is 1.14,245. 
+ 
+Error Handling and Command Availability  
+The ERROR command allows error messages to be enabled or disabled when the RS-232 interface is used.  The IEEE-
+488.2 status mechanisms may always be used to determine if an error occurred processing a command, and the 
+category of the error.  Some commands are unavailable if the instrument menu is being accessed by an operator at the 
+instrument, or if the instrument is in LOCAL mode.  If a command available only in operate mode is received while the 
+menus are being accessed, or if a command available only in remote mode is received while not in remote mode, a 
+device dependent error is reported in the Extended Status Register(ESR), and the message "Command blocked" will 
+be returned if error reporting is enabled when using the RS-232 interface. 
+ 
+The following table lists the CS-4 commands, shows the modes where the command may be used and provides a short 
+command description.  Command details are provided in the reference that follows. 
+ 
+Table 2.  Computer Interface Command Summary 
+Command  Available  Description  Page  
+CHAN  Remote  Select module for subsequent commands (Dual Supply only)  43  
+CHAN?  Always  Query module selection (Dual Supply only)  44  
+PAGE 45
+Page 45  
+ 
+ 
+ 
+ERROR  Remote  Set error response mode for RS -232 interface  44  
+ERROR?  Always  Query error response mode  44  
+IMAG  Remote  Set magnet persistent current  45  
+IMAG?  Always  Query magnet current  45  
+IOUT?  Always  Query power supply output current  45  
+LLIM  Remote  Set low current sweep limit  46  
+LLIM?  Always  Query current sweep limit  46  
+LOCAL  Always  Return control to front panel (RS -232 Only)  46  
+MODE?  Always  Query selected operating mode  46  
+NAME  Remote  Set magnet coil name  47  
+NAME?  Always  Query magnet coil name  47  
+PSHTR  Remote  Control persistent switch heater  47  
+PSHTR?  Always  Query persistent switch heater state  47  
+QRESET  Remote  Reset quench condition  48  
+RANGE  Remote  Set range limit for sweep rate boundary  48  
+RANGE?  Always  Query range limit for sweep rate boundary  48  
+RATE  Remote  Set sweep rate for selected sweep range  49  
+RATE?  Always  Query sweep rate for selected sweep range  49  
+REMOTE  Operate  Select remote operation (RS -232 Only)  49  
+RWLOCK  Operate  Select remote operation with front panel lock (RS -232 Only)  50  
+SHIM  Remote  Select shim to be queried or changed (shim option only)  50  
+SHIM?  Always  Query shim selection (shim option only)  50  
+SLIM?  Always  Query current limit for selected shim (shim option only)  51  
+SLIM  Remote  Set current limit for selected shim (shim option only)  51  
+SWEEP  Remote  Start output current sweep  51  
+SWEEP?  Always  Query sweep mode  52  
+ULIM  Remote  Set current sweep upper limit  52  
+ULIM?  Always  Query current sweep upper limit  52  
+UNITS  Remote  Select units  52  
+UNITS?  Always  Query selected units  53  
+VLIM  Remote  Set voltage limit  53  
+VLIM?  Always  Query voltage limit  53  
+VMAG?  Always  Query magnet voltage  53  
+VOUT?  Always  Query output voltage  54  
+*CLS  Always  Clear Status Command  54  
+*ESE  Always  Standard Event Status Enable Command  54  
+*ESE?  Always  Standard Event Status Enable Query  54  
+*ESR?  Always  Standard Event Status Register Query  55  
+*IDN?  Always  Identification Query  55  
+*OPC  Always  Operation Complete Command  55  
+*OPC?  Always  Operation Complete Query  56  
+*RST  Always  Reset Command  56  
+*SRE  Always  Service Request Enable Command  56  
+*SRE?  Always  Service Request Enable Query  56  
+PAGE 46
+Page 46 
+ 
+ 
+*STB?  Always  Read Status Byte Query  57  
+*TST?  Always  Self -Test Query  57  
+*WAI  Always  Wait -to -Continue Command  57  
+ 
+Command Reference  
+This section describes how each APS100 command is used and provides a cross reference to related commands.  The 
+command syntax sections show required elements enclosed in <angle brackets> and optional parameters enclosed in 
+[square brackets].  All numbers are decimal (base 10). 
+  
+CHAN?  Query the currently selected module  
+Availability:  Always 
+Command Syntax:  CHAN? 
+Response:  <currently selected module> 
+Response Example:  2 
+Description:  The CHAN ? query returns the power module currently selected for remote commands.  It returns 1 or 2.  A 
+command error is returned if only one module is installed. 
+Related Commands:    CHAN 
+  
+PAGE 47
+Page 47  
+ 
+ 
+ 
+CHAN  Set the module for subsequent remote commands 
+Availability:  Remote Mode 
+Command Syntax:  CHAN [module number] 
+Example:  CHAN 2 
+Default Parameter:  none Parameter Range:   1 to 2 
+Description: The CHAN command selects the module for subsequent remote commands.  A command error  
+is returned if only one module is installed.  
+Related  Commands:   CHAN? 
+  
+ERROR  Set error response mode for USB interface 
+Availability:  Remote Mode 
+Command Syntax:  ERROR <Error Mode> 
+Example:  ERROR 1 
+Parameter Range:    0 or 1 (0 - disable error reporting, 1 - enable error reporting) 
+Description:  The ERROR  command enables or disables error messages when the USB interface is used.  It is much 
+easier to handle errors under program control when using the USB interface if error messages are disabled, but it is 
+desirable to enable error messages if a terminal program is used to interactively control and query the APS100. 
+Related Commands:  ERROR? 
+   
+ERROR?  Query error response mode 
+Availability:  Always 
+Command Syntax:  ERROR?  
+Response:  <Error Mode> 
+Response Example:  0  Response Range:  0 or 1 
+Description:  The ERROR?  query returns the selected error reporting mode. 
+Related Commands:   ERROR 
+  
+PAGE 48
+Page 48 
+ 
+ 
+IMAG?  Query magnet current  (or magnetic field strength)  
+Availability:  Always 
+Command Syntax:  IMAG? 
+Response:  <Magnet Current> <Units> 
+Response Example:  87.9350 A 
+Descripti on:  The IMAG?  query returns the magnet current (or magnetic field strength) in the present units.   If the 
+persistent switch heater is ON the magnet current returned will be the same as the power supply output current.  If the 
+persistent switch heater is off, the magnet current will be the value of the power supply output current when the 
+persistent switch heater was last turned off.  The magnet current will be set to zero if the power supply detects a 
+quench.  If in SHIM mode, the IMAG? query reports the present current of the shim selected by the SHIM command in 
+Amps.  If the optional Shim ID is provided while in shim mode, the present current of the specified shim will be 
+reported. 
+Related Commands:   UNITS, UNITS? 
+  
+IMAG  Sets the magnet current (or magnetic field strengt h).   
+Availability:  Remote Mode 
+Command Syntax:  IMAG [value] 
+ IMAG <shim_id> <value>   (shim mode only) 
+Example:  IMAG 47.1123 
+ IMAG X2 -13.4571  (shim mode only) 
+Default Parameter:  0.0 Parameter Range:   Maximum Magnet Current  Description: 
+The IMAG  command sets the magnet current shown on the display.  The supply must be in standby or a command error 
+will be returned.  The value must be supplied in the selected units  - amperes or field (kG).  If Shim Mode is enabled, 
+the persistent mode current displayed for the named shim is set if the shim parameter is provided. 
+Related Commands:    IMAG? 
+  
+IOUT?  Query power supply output current  
+Availability:  Always 
+Command Syntax:  IOUT? 
+Response:  <Output Current> <Units> 
+Response Example:  87.935 A 
+Description:  The IOUT?  query returns the power supply output current (or magnetic field strength) in the present units.  
+Related Commands:   UNITS, UNITS? 
+LLIM  Set current sweep lower limit 
+Availability:  Remote Mode 
+Command Syntax:  LLIM [Limit] 
+Example:  LLIM 20.1250 
+PAGE 49
+Page 49  
+ 
+ 
+ 
+Default Parameter:  0.0 Parameter Range:   Maximum Magnet Current  Description: 
+The LLIM  command sets the current limit used when the next SWEEP DOWN command is issued.  The value must be 
+supplied in the selected units - amperes or field (kG).  An error will be returned if this value is greater than the upper 
+sweep limit. 
+Related Commands:    LLIM?, ULIM, ULIM?, SWEEP, SWEEP?, UNITS, UNITS?  
+  
+LLIM?  Query current sweep lower limit 
+Availability:  Always 
+Command Syntax:  LLIM? 
+Response:  <Limit> <Units> 
+Response Example:  20.1250 A Response Range:  Maximum Magnet Current 
+Description:  The LLIM? query returns the current limit used with the SWEEP DOWN  command.  It is issued in the 
+selected units - amperes or field (kG). 
+Rel ated Commands:    LLIM, ULIM, ULIM?, SWEEP, SWEEP?, UNITS, UNITS? 
+  
+LOCAL  Return control to front panel 
+Availability:  Always (USB and Ethernet Only) 
+Command Syntax:  LOCAL 
+Description:  The LOCAL command returns control the front panel keypad after remote control has been selected by the 
+REMOTE or RWLOCK commands. 
+Related Commands:   REMOTE, RWLOCK 
+  
+MODE?  Query selected operating mode 
+Availability:  Always 
+Command Syntax:  MODE? 
+Response:  <Operating Mode> 
+Response Example:  Manual Response Range:  Shim or Manual 
+Description:  The MODE?  command returns the present operating mode.   
+Related Commands:  MODE 
+  
+PAGE 50
+Page 50 
+ 
+ 
+NAME  Sets the name of the coil (magnet) on the display. 
+Availability:  Remote Mode 
+Command Syntax:  NAME <name string> 
+Example:  NAME GUN COIL 
+Default Parameter:  None Parameter Range:   0 to 16 characters 
+Description: The NAME  command sets the name of the currently selected module for display.  Upper and lower case is 
+accepted, however the string is converted to upper case.   
+Related Commands:    NAME? 
+  
+NAME?  Query the name of the currently selected coil (mag net) 
+Availability:  Always 
+Command Syntax:  NAME? 
+Response:  0 to 16 characters 
+Description:  The NAME ? query returns the name of the currently selected module. 
+Related Commands:    NAME 
+  
+PSHTR  Control persistent switch heater  
+Availability:  Remote Mode 
+Command Syntax:  PSHTR <State> 
+Example:  PSHTR ON 
+Default Parameter:  None Parameter Range:   On or Off 
+Description: The PSHTR  command turns the persistent switch heater on or off.  Note that the switch heater current can 
+only be set in the Magnet Menu using the keypad.  This command should normally be used only when the supply output 
+is stable and matched to the magnet current.  If in Shim Mode, the heater for the selected shim is controlled instead of 
+the main switch heater.    
+Related Commands:    PSHTR? 
+  
+PSHTR?  Query persistent switch heater state 
+Availability:  Always 
+Command Syntax:  PSHTR? 
+Response:  0 or 1 
+Description:  The PSHTR? query returns 1 if the switch heater is ON or 0 if the switch heater is OFF.  If in Shim Mode, 
+the status of the switch heater for the selected shim is returned. 
+Related Commands:    PSHTR 
+ 
+PAGE 51
+Page 51  
+ 
+ 
+ 
+QRESET  Reset Quench Condition  
+Availability:  Remote Mode 
+Comm and Syntax:  QRESET 
+Description: The QRESET  command resets a power supply quench condition and returns the supply to STANDBY.    
+Related Commands:    None 
+  
+RANGE  Set range limit for sweep rate boundary 
+Availability:  Remote 
+Command Syntax:  RANGE <Select> <Limit> 
+Example:  RANGE 0 25.0 
+Default Parameter:  None Parameter Ranges:   
+ Range Selection:  0 to 4 
+ Limit: 0 to Max Supply Current 
+Description: The RANGE command sets the upper limit for a charge rate range in amps.  Range 0 starts at zero and 
+ends at the limit provided.  Range 1 starts at the Range 0 limit and ends at the Range 1 limit provided.  Range 2 starts 
+at the Range 1 limit and ends at the Range 2 limit provided.  Range 3 starts at the Range 2 limit and ends at the Range 
+3 limit provided.    Range 4 starts at the Range 3 limit and ends at the supply output capacity. 
+Related Commands:   RANGE?, RATE, RATE? 
+  
+RANGE?  Query range limit for sweep rate boundary 
+Availability:  Always 
+Command Syntax:  RANGE? <Select> 
+Example:  RANGE? 1  Parameter Range:  0 to 4 
+Response:  <Limit> 
+Response Example:  75.000 Response Range: 0 to Max Magnet Current 
+Description:  The RANGE? query returns the upper limit for a charge rate range in amps.  See RANGE for further details. 
+Related Commands:   RANGE, RATE, RATE? 
+  
+PAGE 52
+Page 52 
+ 
+ 
+RATE  Set sweep rate for selected sweep range 
+Availability:  Remote 
+Command Syntax:  RATE <Range> <Sweep Rate> 
+Example:  RATE 0 0.250 
+Default Parameter:  None Parameter Ranges:   
+ Range Selection:  0 to 5 
+ Limit: 0 to Max Magnet Current 
+Description: The RATE command sets the charge rate in amps/second for a selected range.  A range parameter of 0, 1, 
+2, 3, and 4 will select Range 1, 2, 3, 4, or 5 sweep rates as displayed in the Rates Menu.  A range parameter of 5 
+selects the Fast mode sweep rate. 
+Related Commands:   RANGE, RANGE?, RATE? 
+  
+RATE?  Query range limit for sweep rate boundary 
+Availability:  Always 
+Command Syntax:  RATE? <Range> 
+Example:  RATE? 1  Parameter Range:  0 to 5 
+Response:  <Rate> 
+Response Example:  0.125 Response Range: 0 to Max Magnet Current 
+Description: The RATE? command queries the charge rate in amps/second for a selected range.  A range parameter of 
+0 to 4 will select Range 1 through 5 sweep rates as displayed in the Rates Menu.  A range parameter of 5 queries the 
+Fast mode sweep rate. 
+Related Commands:   RANGE, RANGE?, RATE 
+  
+REMOTE  Select remote operation  
+Availability:  Operate (USB Only) 
+Command Syntax:  REMOTE 
+Description:  The REMOTE command takes control of the APS100 via the remote interface.  All buttons on the front 
+panel are disabled except the Local button.  This command will be rejected if the menu system is being accessed via 
+the front panel or if LOCAL has been selected via the Local button on the front panel.  Pressing the Local button again 
+when the menu is not selected will allow this command to be executed.  This command is only necessary for USB 
+operation since the IEEE-488 interface provides for bus level control of the Remote and Lock controls. 
+Related Co mmands:   LOCAL, RWLOCK 
+  
+PAGE 53
+Page 53  
+ 
+ 
+ 
+RWLOCK  Select remote operation  
+Availability:  Operate (USB Only) 
+Command Syntax:  RWLOCK 
+Description:  The REMOTE command takes control of the APS100 via the remote interface.  All buttons on the front 
+panel are disabled except the Local button.  This command will be rejected if the menu system is being accessed via 
+the front panel or if LOCAL has been selected via the Local button on the front panel.  Pressing the Local button again 
+when the menu is not selected will allow this command to be executed.  This command is only necessary for USB 
+operation since the IEEE-488 interface provides for bus level control of the Remote and Lock controls. 
+Related Co mmands:   LOCAL, RWLOCK 
+   
+SHIM  Select SHIM to be controlled or queried 
+Availability:  Remote Mode (Shim mode only) 
+Command Syntax:  SHIM [Enable or Disable] <Selection>  
+Examples:  SHIM Z4 SHIM Enable All 
+ SHIM Enable Z3 SHIM Disable All 
+ SHIM Disable Z3 
+Def ault Parameter:  None  
+Parameter Range:    Z, Z2, Z3, Z4, X, Y, ZX, ZY, C2, S2, Z2X, Z2Y 
+Description: The SHIM  command selects a shim to be controlled or queried.  It also allows selected shims or all shims 
+to be disabled or enabled.  The command is only valid when operating in SHIM mode.  The switch heater must be off 
+when making a shim selection. 
+Related Commands:   IMAG?, SHIM?, SLIM, SLIM? 
+  
+SHIM?  Query SHIM selection 
+Availability:  Always (Shim mode only) 
+Command Syntax:  SHIM? [Query selection] 
+Response:  <Shim selection> <Enabled or Disabled> 
+Response Example:  ZX Enabled 
+Response Range:  Z, Z2, Z3, Z4, X, Y, ZX, ZY, C2, S2, Z2X, Z2Y 
+Description:  The SHIM?  command identifies the shim selected to be controlled or queried, and reports the 
+enable/disable status.  If the optional Shim ID is provided as a parameter, the command reports the enable/disable 
+status of the specified shim.  The command is only valid when operating in SHIM mode. 
+Related Commands:   IMAG?, SHIM, SLIM, SLIM? 
+PAGE 54
+Page 54 
+ 
+ 
+SLIM  Set current limit for selected shim 
+Availability:  Remote Mode (Shim mode only) 
+Command Syntax:  SLIM <Limit> 
+Example:  SLIM –5.837 
+Default Parameter:  0.0 Parameter Range:   30.000 
+Description: The SLIM  command sets the current limit for the selected shim.  The command is only valid when 
+operating in SHIM mode with the persistent switch heater off.  The maximum value for the current limit is set in the 
+setup screen of the main menu when in Manual mode.  The SWEEP command is used to sweep the power supply to the 
+target current of the selected shim. 
+Related Commands:   IMAG?, SHIM?, SLIM, SLIM?, SWEEP 
+  
+SLIM?  Query current limit for selected shim 
+Availability:  Always (Shim mode only) 
+Command Syntax:  SLIM? 
+Response:  <Limit> A 
+Response Example:  5.923 A Response Range:  30A  (See 4.3.5.4) 
+Description:  The SLIM?  Query returns the current limit used when the next SWEEP UP or SWEEP DOWN command is 
+issued. 
+Related Commands:   IMAG?, SHIM, SLIM, SLIM?, SWEEP 
+  
+SW EEP  Start output current sweep 
+Availability:  Remote Mode 
+Command Syntax:  SWEEP <Sweep Mode> [fast or slow] 
+Examples:  SWEEP UP 
+ SWEEP UP FAST 
+Default Parameter:  None Parameter Range:  UP, DOWN, PAUSE, or ZERO  
+  Shim Mode Only:  LIMIT  
+Description:  The SWEEP  command causes the power supply to sweep the output current from the present current to 
+the specified limit at the applicable charge rate set by the range and rate commands.  If the FAST parameter is given, 
+the fast mode rate will be used instead of a rate selected from the output current range.  SLOW is required to change 
+from fast sweep.  SWEEP UP sweeps to the Upper limit, SWEEP DOWN sweeps to the Lower limit, and SWEEP ZERO 
+discharges the supply.  If in Shim Mode, SWEEP LIMIT sweeps to the shim target current. 
+Related Commands:   LLIM, LLIM?, SLIM, SLIM?, SWEEP?, ULIM, ULIM?, UNITS, UNITS? 
+ 
+SWEEP?  Query sweep mode 
+Availability:  Always 
+PAGE 55
+Page 55  
+ 
+ 
+ 
+Command Syntax:  SWEEP? 
+Response:  <Mode> [fast] 
+Response Example:  sweep up fast Response Range:  sweep up, sweep down, sweep paused, 
+or zeroing 
+Description:  The SWEEP? query returns the present sweep mode.  If sweep is not active then 'sweep paused' is 
+returned. 
+Related Commands:   LLIM, LLIM?, SLIM, SLIM?, SWEEP, ULIM, ULIM?, UNITS, UNITS? 
+  
+ULIM  Set current sweep upper limit 
+Availability:  Remote Mode 
+Command Syntax:  ULIM [Limit] 
+Example:  ULIM 65.327 
+Default Parameter:  0.0 Parameter Range:   Maximum Supply Current  Description: The 
+ULIM  command sets the current limit used when the next SWEEP UP  command is issued.  The value must be supplied 
+in the selected units - amperes or field (kG).  An error will be returned if this value is less than the lower sweep limit. 
+Related Commands:   LLIM, LLIM?, SWEEP, SWEEP?, ULIM?, UNITS, UNITS? 
+  
+ULIM?  Query current sweep upper limit 
+Avai lability:  Always 
+Command Syntax:  ULIM? 
+Response:  <Limit> <Units> 
+Response Example:  65.327 A Response Range:  Maximum Supply Current 
+Description:  The ULIM? query returns the current limit used for the SWEEP UP  command.  It is issued in the selected 
+units - amperes or field (kG). 
+Related Commands:   LLIM, LLIM?, SWEEP, SWEEP?, ULIM, UNITS, UNITS? 
+  
+UNITS  Select units 
+Availability:  Remote Mode 
+Command Syntax:  UNITS <Unit Selection> 
+Example:  UNITS A   Parameter Range:   A, G 
+Description:  The UNITS  command sets the units to be used for all input and display operations.  Units may be set to 
+Amps or Gauss.  The unit will autorange to display Gauss, Kilogauss or Tesla. 
+Related Commands:   IMAG?, IOUT?, LLIM, LLIM?, ULIM, ULIM?, UNITS?  
+UNITS?  Query selected units 
+Availability:  Always 
+Command Syntax:  UNITS? 
+Response:  <Selected Units> 
+Response Example:  G Response Range: A, G 
+PAGE 56
+Page 56 
+ 
+ 
+Description:  The UNITS?  command returns the units used for all input and display operations.  
+Re lated Commands:  IMAG?, IOUT?, LLIM, LLIM?, ULIM, ULIM?, UNITS 
+  
+VLIM  Set voltage limit 
+Availability:  Remote Mode 
+Command Syntax:  VLIM <Voltage Limit> 
+Example:  VLIM 5.0  Parameter Range:   0.0 to 10.0 
+Description:  The VLIM  command sets the power supply output voltage limit to the voltage provided.  
+Related Commands:  VLIM?, VMAG?, VOUT? 
+  
+VLIM?  Query voltage limit 
+Availability:  Always 
+Command Syntax:  VLIM? 
+Response:  <Voltage Limit> 
+Response Example:  4.75 V Response Range: 0 to 10.00 
+Description:  The VLIM?  command returns the power supply output voltage limit.  
+Related Commands: VLIM, VMAG?, VOUT? 
+  
+VMAG?  Query magnet voltage 
+Availability:  Always 
+Command Syntax:  VMAG? 
+Response:  <Magnet Voltage> 
+Response Example:  4.75 V Respon se Range: -10.00 to +10.00 
+Description:  The VMAG?  command returns the present magnet voltage.  
+Related Commands: VLIM, VLIM?, VOUT? 
+ 
+PAGE 57
+Page 57  
+ 
+ 
+ 
+VOUT?  Query output voltage 
+Availability:  Always 
+Command Syntax:  VOUT? 
+Response:  <Output Voltage> 
+Response Example:  4.75 V Response Range: -12.80 to +12.80 
+Description:  The VOUT?  command returns the present power supply output voltage.  
+Related Commands:  VLIM, VLIM?, VMAG? 
+  
+*CLS  Clear Status Command 
+Availability:  Always 
+Command Syntax:  *CLS 
+Description:  The *CLS  command operates per IEEE Std 488.2-1992 by clearing the Standard Event Status Register 
+(ESR) and resetting the MAV bit in the Status Byte Register (STB). 
+Related Commands:   None 
+  
+*ESE  Standard Event Status Enable Command 
+Availability:  Always 
+Command Sy ntax:  *ESE <mask> 
+Example:  *ESE 255 
+Default Parameter:  0 Parameter Range:   0 to 255 
+Description:  The *ESE  command operates per IEEE Std 488.2-1992 by setting the specified mask into the Standard 
+Event Status Enable Register (ESE). 
+Related Commands:   *ESE? 
+  
+*ESE?  Standard Event Status Enable Query 
+Availability:  Always 
+Command Syntax:  *ESE? 
+Response:  <ESE Mask> 
+Response Example:  255 Response Range:  0 to 255 
+Description:  The *ESE?  command operates per IEEE Std 488.2-1992 by returning the mask set in the Standard Event 
+Status Enable Register (ESE) by a prior *ESE command. 
+Related Commands:   *ESE 
+PAGE 58
+Page 58 
+ 
+ 
+*ESR?  Standard Event Status Register Query 
+Availability:  Always 
+Command Syntax:  *ESR? 
+Response:  <Standard Event Status Register> 
+Response Example:  128 Response Range:  0 to 255 
+Description:  The *ESR?  command operates per IEEE Std 488.2-1992 by returning the contents of the Standard Event 
+Status Register and then clearing the register.  The User Request bit is set any time the Local or Menu buttons on the 
+front panel are depressed.  The remaining bits are defined in the referenced standard. 
+ Status Byte Bit Allocations: 
+ X X X X X X 0 1 
+ | | | | | | | |   Operation Complete 
+ | | | | | | |    Request Control 
+ | | | | | |     Query Error 
+ | | | | |      Device Dependent Error 
+ | | | |       Execution Error 
+ | | |        Command Error 
+ | |         User Request 
+ |          Power On  
+ 
+Related Commands:   *ESE, *ESE? 
+  
+*IDN?  Identification Query 
+Availability:  Always 
+Command Syntax:  *IDN? 
+Response:  <Manufacturer>,<Model>,<Serial #>,<Firmware Level> ,<build number> 
+Response Example:  attocube,APS100,0001,1.02,208 
+Serial # Range:  0001 to 9999 Firmware Level Range:   1.00 to 9.99 
+Description:  The *IDN?  command operates per IEEE Std 488.2-1992 by returning the APS100 manufacturer, model, 
+serial number, firmware level and build level. 
+Related Commands:   None 
+  
+*OPC  Operation Complete Command 
+Availability:  Always 
+Command Syntax:  *OPC 
+Description:  The *OPC  command operates per IEEE Std 488.2-1992 by placing the Operation Complete message in 
+the Standard Event Status Register (ESR).  The APS100 processes each command as it is received and does not defer 
+any commands for later processing. 
+Related Commands:   *OPC? 
+*OPC?  Operation Complete Query 
+Availability:  Always 
+PAGE 59
+Page 59  
+ 
+ 
+ 
+Command Syntax:  *OPC? 
+Description:  The *OPC  command operates per IEEE Std 488.2-1992 by placing an ASCII character "1" in the output 
+queue since the APS100 does not defer any commands for later processing. 
+Related Commands:   *OPC 
+  
+*RST  Reset Command 
+Availability:  Always 
+Command Syntax:  *RST 
+Description:  The *RST  command operates per IEEE Std 488.2-1992 but does not change the power supply operation 
+due to safety concerns. 
+Related Commands:   None 
+  
+*SRE  Service Request Enable Command 
+Availability:  Always 
+Command Syntax:  *SRE <mask> 
+Example:  *SRE 255 
+Default Parameter:  0 Parameter Range:   0 to 255 
+Description:  The *SRE  command operates per IEEE Std 488.2-1992 by setting the specified mask into the Service 
+Request Enable Register (SRE). 
+Related Commands:   *SRE? 
+  
+*SRE?  Service Request Enable Query 
+Availability:  Always 
+Command Syntax:  *SRE? 
+Response:  <SRE Mask> 
+Response Example:  255 Response Range:  0 to 255 
+Description:  The *SRE?  command operates per IEEE Std 488.2-1992 by returning the mask set in the Service 
+Request Enable Register (SRE) by a prior *SRE command. 
+Related Commands:   *SRE 
+PAGE 60
+Page 60 
+ 
+ 
+*STB?  Read Status Byte Query  
+Availability:  Always 
+Command Syntax:  *STB? 
+Response:  <Status Byte> 
+Response Example:  65 Response Range:  0 to 255 
+Description:  The *STB?  command operates per IEEE Std 488.2-1992 by returning the Status Byte. 
+ 
+ Status Byte Bit Allocations: 
+ X X X X X X X X 
+ | | | | | | | |   Sweep Mode Active 
+ | | | | | | |    Standby Mode Active 
+ | | | | | |     Quench condition present 
+ | | | | |      Power Module Failure 
+ | | | |       MAV (Message Available) 
+ | | |        ESB (Extended Status Byte) 
+ | |         MSS (Master Summary Status)  
+ |          Menu Mode (Remote Commands Locked Out)  
+ 
+  
+* TST?  Self-Test Query 
+Availability:  Always 
+Command Syntax:  *TST? 
+Response:  <Self test status> 
+Response Example:  1 Response Range: 1 
+Description:  The *TST?  command operates per IEEE Std 488.2-1992 by returning the self test status.  Explicit tests are 
+not performed in response to this command, but a 1 is returned for compliance with the specification. 
+Related Commands:   None 
+  
+* WAI  Wait-to-Continue Command 
+Availability:  Always 
+Command Syntax:  *WAI 
+Description:  The *WAI?  command operates per IEEE Std 488.2-1992 by accept ing the command without generating 
+an error.  Since the APS100 only implements sequential commands the no-operation-pending flag is always TRUE. 
+Related Commands:   OPC, *OP  
+  
+PAGE 61
+Page 61  
+ 
+ 
+ 
+
+PAGE 62
+Page 62 
+ 
+ 
+Appendix C : Calibration  
+There are currently no calibrations of the APS100 power supply that can be made by the user.  Should 
+calibration of the supply be required, please contact attocube for assistance.  
+ 
+  
+PAGE 63
+Page 63  
+ 
+ 
+ 
+
+PAGE 64
+Page 64 
+ 
+ 
+Appendix D: Shut -down Input  
+ 
+The rear panel Shut-down input can be configured to  accept a +5V signal, +24V signal, or a contact clo sure to put the 
+supply into shutdown.  During shutdown, the output power modules sweep to zero current at the programmed rate, and 
+commands that affect module operation (sweep, limits changes, etc.) are inhibited, both on the keyboard and computer 
+interfaces.  The status words SHUTDOWN COMMAND will  show on the display as long as the input is active .  When 
+deactivated, the commands are re-enabled, however t he modules will continue to sweep the current to ze ro at the 
+programmed rate unless intervened. 
+ 
+To configure the interface, disconnect the power an d remove the top cover of the APS100 by removing si x screws from 
+the top cover (the center front screw is not currently attached internally), and the three screws from the lip of the cover in 
+the rear. 
+ 
+Locate the communication module on the rear panel o f the unit.  On it are four 3-pin headers labeled H 1 through H4, 
+each with two possible positions – ON and OFF.  Use  the following matrix to configure the interface, b y moving the 
+shorting jumpers to the correct positions.  Jumpers not labeled ON must be in the OFF position, or left off altogether. 
+ 
+ 24V MODE  5V MODE  SWITCH MODE  
+H1   ON  ON  
+H2  ON  ON   
+H3    ON  
+H4    ON  
+ 
+Table 3.  Shutdown Input Configuration  
+ 
+CAUTION:  Configurations other than the above could damage the board.  
+ 
+Shut Down I nput Electrical Specifications:  
+5V - Polarity insensitive, optically isolated, approx. 10mA drawn from 5V source. 
+24V - Polarity insensitive, optically isolated, approx. 10mA drawn from 24V source. 
+Switch Contact - Non-isolated, 4.3V open circuit, approx. 10mA passed through the switch.  Positive terminal is on the 
+left. 
+  
+PAGE 65
+Page 65  
+ 
+ 
+ 
+Appendix E : Paralleling Power Modules  
+ 
+The APS100 Dual consists of two independent power supplies with a common front panel and power input module.  
+The dual 100A unit has been tested with the outputs connected in parallel to provide a 200A output capability.  This 
+appendix address issues specific to operation in parallel.   
+Connect one current lead of the load to each module, then connect the remaining modules' terminals together as 
+follows: 
+Figure 1 4.  Parallel Supply Connections  
+ 
+This balances the lead resistance seen by each module, and will provide better current sharing if wall power is lost and 
+the magnet is discharged in the power fail mode. 
+Now set the lower limit on one supply to 0.0A, and sweep it to the low limit to bring it on-line at zero amps.  Then set 
+the upper limit on the second supply, and sweep it to its high limit.  The supplies can be swept together or staggered, 
+but in either case, you must set up the charge rates on each according to that configuration, keeping in mind what 
+each supply is putting out at what time, so the magnet sees the proper combined charge rate vs current. 
+If the supplies are swept together, it is better not to pause both supplies at the same time, since interaction may be 
+seen. 
+When discharging, both supplies should be swept to a limit of 0.0A rather than using the sweep-to-zero function.  This 
+is because both supplies need to be active at 0.0A before entering standby.  After reaching zero, both supplies can be 
+swept-to-zero to enter standby.  
+  
+
+PAGE 66
+Page 66 
+ 
+ 
+
+PAGE 67
+Page 67  
+ 
+ 
+ 
+Appendix F : Revision History  
+FRONT PANEL FIRMWARE  
+ 
+Panel ver. 1.14 Build 247 – 02/16/10 
+ Released Shim option support. 
+Panel ver. 1.13 Build 241 – 09/30/09 
+ Rebuilt with a new compiler release to eliminate a  GPIB related build problem in ver 1.12. 
+Panel ver. 1.12 Build 240 – 08/12/09 
+ Send Rate, Range, and Voltage Limits to the power module when updated remotely. 
+Panel ver. 1.11 Build 238 – 06/02/09 
+ Support Field-to-Current ratios from 0.001 to 3000 .0.  Fixed communication issue with power module.  
+Extended watchdog to 4.5 seconds to tolerate LCD panel delays. 
+Panel ver. 1.10 Build 236 – 01/02/09 
+ Reconfigure FPGA on EEPROM read failure to elimina te power cycling the APS100 after a gyrotron arc. 
+Panel ver. 1.10 Build 235 – 12/17/08 
+ Added watchdog logic for module communications, pa nel communications and fan control tasks.  Fixed a 
+reentrancy problem and module communication problem.  Requires module firmware of R1.16. 
+Panel ver. 1.02 Build 208 initial release. 
+ 
+HARDWARE REVISIONS  
+Beginning with panel PCB version 3, the unit may have the panel software updated without removing the top cover.  To 
+do this, press and hold <Shift> and the top soft key while applying power to the unit.  The Current Present in Leads 
+indicators will be bright yellow while in the programming mode.  Follow the panel firmware upgrade instructions minus 
+removing the cover and positioning the jumper.  To exit the programming mode, power the unit down. 
+ 
+PAGE 68
+Page 68 
+ 
+ 
+POWER MODULE REVISIONS  
+Power Module Rev 2.05 – 02/12/10 
+Modified Master/Slave logic to allow recovery from power failures and to pause with high inductive load.  
+Enhanced recovery logic for both 100A and 200A configurations.   
+Power Module Rev 2.04 – 11/18/09 
+Modified thermal limiting logic to allow higher discharge rates.   
+Power Module Rev 2.03 – 07/18/08 
+Further refinements for sweep convergence.  Upgraded range and inductance commands for master/slave 
+configuration. 
+Power Module Rev 2.02 – 01/24/09 
+Shutdown Vicor on unsafe temperature.  Includes master/slave support for 200A. 
+Power Module Rev 1.16 – 07/18/08 
+Tuned sweep algorithm when on voltage limit. 
+PAGE 69
+Page 69  
+ 
+ 
+ 
+
+PAGE 70
+Page 70 
+ 
+ 
+Appendix G: Firmware Upgrading  
+Upgrades may be done to either the main operating firmware and/or the power module firmware. 
+ 
+To upgrade the main operating firmware, first obtain the upgrade files from attocube.  You will need: 
+ New firmware binary file. 
+ The Flashit programming software. 
+ FTDI virtual COM port software (if not already installed) 
+ 
+Tools needed: 
+ Phillips head screwdriver. 
+ USB cable. 
+ 
+Leave the unit powered off until you complete these first two steps. 
+ 
+Remove the top cover.  It is secured by five screws on the top and three screws on the cover's lip in the rear of the unit. 
+ 
+Locate the circuit board attached to the instrument’s front panel.  At the top near the center is a small slide switch 
+labeled PROG and RUN.  Place this switch in the PROG position. 
+ 
+Power ON the unit.  The display will show the attocube logo but otherwise will be blank. 
+  
+If you already have the FTDI virtual COM port drivers installed on your PC:  When the APS100 Supply is connected to 
+the computer’s USB port, the computer will enumerate it as a new COM port without running the Found New Hardware 
+wizard.  In that case, just go to the control panel/hardware manager and note what COM port it is assigned to. 
+ 
+If you do not have the FTDI virtual COM port drivers installed on your PC:  The APS100 Supply requires FTDI virtual COM 
+port drivers on the PC to communicate.  If they are not installed on your PC, when the APS100 is connected to the 
+computer’s USB port the PC will begin running the Found New Hardware wizard. 
+PAGE 71
+Page 71  
+ 
+ 
+ 
+On a new install, do the following.  These steps were written for Windows XP: 
+ 
+1)  Connect the APS100 to the computer via the USB cable. 
+2)  The computer should find the new hardware. 
+ 
+Select No, not this time, then click Next >. 
+ 
+Tell the wizard to Install from a list or specific location (Advanced) and click Next >  
+
+PAGE 72
+Page 72 
+ 
+ 
+ 
+Browse to the folder containing the virtual COM port software and then click Next > 
+ 
+ 
+The first step is completed when you press Finish. 
+At this point the wizard will run a second time. 
+
+PAGE 73
+Page 73  
+ 
+ 
+ 
+Follow the same steps as before. 
+ 
+Select Install from a list of specific location (Advanced), then click Next > 
+ 
+ 
+Browse to the folder containing the virtual COM port files, then click Next > 
+ 
+  
+
+PAGE 74
+Page 74 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+Click Finish to complete the COM port driver installation. 
+
+PAGE 75
+Page 75  
+ 
+ 
+ 
+Setting up APS100 Supply Communications: 
+To set up communications between your PC and the APS100 Supply, open Control Panel and note which COM port was 
+assigned when the APS100 was connected. 
+ 
+You can right-click the COM port to change the assignment if necessary.  
+ 
+Note:  The FLASHIT program may not be able to find COM port if the ports are not contiguous.  For example, if you have 
+COM1 and COM2, and the APS100 enumerates as a COM4, FLASHIT may not see it.  This is an open issue. 
+ 
+  
+
+PAGE 76
+Page 76 
+ 
+ 
+Installing FlashIt. 
+The FlashIt program is required on your PC to install new firmware into the APS100 Supply.  To install the program, run 
+the _____ installation software. 
+ 
+ 
+Select Next >, then accept the EULA. 
+
+PAGE 77
+Page 77  
+ 
+ 
+ 
+It is recommended that you use the default install file location, then click Next > 
+ 
+ 
+ 
+ 
+
+PAGE 78
+Page 78 
+ 
+ 
+Install the program and run it. 
+ 
+ 
+ 
+  
+
+PAGE 79
+Page 79  
+ 
+ 
+ 
+ 
+ 
+When FlashIt starts up, it attempts to find the APS100 (Rabbit processor) on its selected COM port.  If it is successful, 
+the above details are shown.  If not, you get the below. 
+ 
+ 
+ 
+ 
+
+PAGE 80
+Page 80 
+ 
+ 
+Go to Options and select Detect.  The program will search all available COM ports for the APS100. 
+If that is unsuccessful, go to Options, Serial, and select the APS100's COM port. 
+ 
+ 
+ 
+At this point you should be connected to the APS100.  Click on the Folder Icon.  Browse for the APS100 binary file and 
+select it. 
+ 
+ 
+Press the center button to begin the upload. 
+
+PAGE 81
+Page 81  
+ 
+ 
+ 
+ 
+ 
+When complete, the following is displayed.  You may now exit FlashIt. 
+ 
+ 
+ 
+
+PAGE 82
+Page 82 
+ 
+ 
+Turn off the APS100.  Put the Program/Run switch into the RUN position.  Replace the top cover. 
+ 
+When you power the unit on, you will see a software upgrade message on the APS100 if the software version number is 
+higher than the previous.  The unit is configuring memory with added parameters.  Existing parameters are not 
+affected.  You will need to review the new parameters for your application. 
+ 
+It is also permissible to DOWNGRADE to a lower version.  In this case, you will get a warning saying SOFTWARE 
+ROLLBACK TO vX.XX  SOME SETTINGS WILL BE LOST. 
+<ENTER> TO CONTINUE 
+ 
+Press ENTER to continue with the downgrade.  If you do not desire to downgrade, turn the unit off without continuing 
+and reinstall the previous version.  If you press continue, the parameters that do not exist in the downgrade version will 
+be lost. 
+ 
+PAGE 83
+Page 83  
+ 
+ 
+ 
+Upgrading p ower module firmware  
+ 
+Connect the APS100 to the USB port, and open a terminal program on the PC.  Set the port to that of the APS100.  Set 
+the port to 115200 baud, 8 bits, 1 stop bit, no parity.  Make sure the program is not set to automatically add 
+characters such as line feeds to the outgoing string.  It may be useful to turn on local echo as the modules do not echo 
+characters. 
+ 
+From the main menu on the APS100, enter the following code:  
+<decimal point >48295511.  If this is a dual unit, you 
+will have to select a supply first to get to SETUP.  A single unit has the SETUP key on the main menu. 
+ 
+Select GENERAL. 
+ 
+You should now be on the Power Module Connection Manager screen. 
+Select the module you want to upgrade.  Even on the single module units, this selection must be made. 
+ 
+Press LOAD.  If the module is functioning, you should see 'Direct USB load mode entered' at the bottom. 
+ 
+In the terminal program, type ver?<return>.  You should get a response similar to 1.13 1.09  The first number is the 
+active firmware version, and the second number is the backup version. 
+ 
+If the two numbers are different, it is recommend that you back up the current version, by typing vback<return>.  This 
+copies the current version into the backup location.  This way, if the new version fails to load, or there are issues with 
+the new version, you can fall back to the older one. 
+ 
+Type vload<return> 
+There is no response. 
+ 
+Locate the upgrade file for the module.  Open the 'Send File' dialog of your terminal program and browse to the file 
+and send it.  When it is done, type ver?<return>  If the load was successful, you will now see the new version listed first. 
+ 
+If your terminal program does not have a proper file send function, you can open the upgrade file with a text editor, 
+copy the contents, and paste them into the terminal window. 
+ 
+Press EXIT on the front panel.  The supply will now restart with the new version operational. 
+ 
+PAGE 84
+Page 84 
+ 
+ 
+If there is no response to ver?<return> after sending the file, or ver?<return> returns 0 in the first position, the load has 
+failed.  Press NORMAL on the front panel, ignore any error message, then press LOAD again.  Either repeat the load 
+process or type vrestore<return>.  vrestore<return> will activate the old firmware. 
+  
+PAGE 85
+Page 85  
+ 
+ 
+ 
+
+PAGE 86
+Page 86 
+ 
+ 
+Appendix H : Shim Supply Option  
+H.1  Overview  
+The Shim Supply Option for the APS100 Power Supply is a hardware and software upgrade that provides the user with 
+the capability to control up to 12 independent superconducting shim coils in addition to the main superconducting 
+magnet.  Typical applications for this option are high homogeneity ICR or NMR magnets that incorporate 
+superconducting shims to adjust and optimize central field shape. 
+ 
+Superconducting shim coils are, in effect, complete and self-contained superconducting magnets.  Each 
+consists of its own set of windings, its own persistent switch, and its own quench protection circuits.  The 
+coils are used to superimpose known magnetic field gradients over the homogeneous region of a magnet 
+to correct for error components.  Figure H.1 shows schematically a typical magnet with four 
+superconducting shims (Z, Z2, X, and Y).  These shims are typically referred to as “first order shims”, 
+although technically Z2 generates a second order effect. 
+ 
+ 
+ 
+Figure 15 - Superconducting Magnet with Shims 
+ 
+A comprehensive overview of superconducting shims and shimming is beyond the scope of this Appendix.  
+Considerable documentation exists that describes in detail the various inhomogeneities in magnetic fields and how to 
+correct them.  The purpose of this Appendix is to give a description of how the Shim Supply Option for the APS100 
+PAGE 87
+Page 87  
+ 
+ 
+ 
+Power Supply works, how to connect the Shim Supply Option to a magnet system, how to set up the supply, and how to 
+operate the supply in SHIM mode. 
+ 
+H.2  Sh im Option Description  
+The APS100 power supply shim supply option allows the operator to use the APS100 for energizing and discharging 
+multiple superconducting shim coils.  The option provides the following features: 
+ 
+a)  12 persistent switch heater output channels. 
+b)  Polarity selection to allow shim multiplexing. 
+c)  0 – 100mA heater current range. 
+d)  +/- 30 amp output current range. 
+e)  Automatic shim dumping during main coil energizing/discharging. 
+f)  Independent shim heater enable/disable. 
+ 
+The shim supply option provides the operator with 12 persistent switch heater output channels that are independently 
+controllable through the menus of the APS100.  The heater outputs may be configured in either “standard” or 
+“multiplexed” arrangement.  In the “standard” arrangement, each output channel corresponds to its own shim 
+persistent switch heater.  A common return (ground) line is used for all switches.  This configuration is directly 
+compatible with Figure H.1 above. 
+ 
+Some superconducting magnet systems utilize a multiplexed heater arrangement to reduce the number 
+of heater wires necessary to operate the shims.  A multiplexed heater arrangement is shown 
+schematically in Figure H.2.  Using a simple diode arrangement inside the magnet system, the number of 
+heater wires is reduced by switching polarity of the heater signal to select the appropriate shim. For 
+instance, positive output current on the Z/Z2 line activates the heater on the Z shim, while negative 
+output current activates the heater on the Z2 shim.  For multiplexed shim heater systems, the APS100 
+Shim Supply Option offers the flexibility to be configured according to the user’s needs.  Shims may be 
+mapped to any of the outputs, and may have either positive or negative polarity. 
+  
+PAGE 88
+Page 88 
+ 
+ 
+ 
+Figure 16 - Superconducting Magnet with Multiplexed Shim Persistent Switch Heaters 
+ 
+When the APS100 Shim Supply Option is activated, the APS100 uses its main current outputs to set the shim coil 
+current.  In shim mode the supply is software limited to a maximum current output.  The current limit for each shim, the 
+persistent switch heater current for each shim, and its overall status (enabled or disabled) is controlled through the 
+menu system via the front panel keys. 
+ 
+While the APS100 is operating in Manual Mode (the standard mode used when energizing the main superconducting 
+magnet), the Shim Supply Option will periodically activate the persistent switch heater of each enabled shim coil for a 
+few seconds to “dump” any current that has been induced in the coil due to coupling (mutual inductance) between the 
+main coil and the shim coil.  Without periodic dumping of current induced in superconducting shim coils, current would 
+build to values sufficient to quench the shim coil and possibly the main coil. 
+ 
+Once the main coil has been energized, the user typically will change from Manual Mode to Shim Mode with the 
+APS100.  In most systems, changing from main coil energizing to shim coil energizing requires the user to change to a 
+different set of current leads. 
+ 
+ 
+H.3  Setup  
+PAGE 89
+Page 89  
+ 
+ 
+ 
+The APS100 shim supply option is designed for ease of use and to allow the user to set shim coils using a minimum of 
+keystrokes.  It provides considerable flexibility in setup and operation.  There are built-in interlocks that reduce the risk 
+of accidental dumping of a shim or quenching of a coil.  However, it is still necessary for the operator to be familiar and 
+experienced with shimming to reduce the chance of errors.  It is highly recommended that the operator familiarize 
+himself with the operation of the APS100 shim supply option PRIOR to connecting it to an operating superconducting 
+magnet.   
+ 
+H.3.1  MANUAL Mode  
+Mutual inductance coupling between shim coils and the main superconducting coil is inevitable.  Due to this coupling, 
+if the main coil is energized or discharged while the shim coils are in persistent mode, significant current can be 
+induced in the shim coils.  If this current is not periodically “dumped” during the main coil charge cycle, it can build to 
+the point where a quench of the shim coil and/or the main coil occurs. 
+ 
+The APS100 shim supply option is designed to periodically scan through the shims installed in the system to dump the 
+current induced in them during main coil charge or discharge.  Dumping a shim coil involves activating the persistent 
+switch heater on the shim coil for a period of several seconds.  By effectively quenching the persistent switch, the loop 
+is “opened” and any current induced in the coil is converted to heat and is dissipated.  While dumping shim coils it is 
+usually a good idea to connect a low resistance (~ 5 ohms) load across the main current leads on the shim coils to 
+prevent large voltage spikes from occurring. 
+ 
+The APS100 shim option will step through each of the 12 shim coil heater outputs in the system.  The unit activates 
+each heater for approximately 6 seconds – long enough for the persistent switch to change to its “normal” state.  
+Scanning of the shim coil heaters to dump them during main coil energizing or discharge may be inhibited by 
+activating the global inhibit command while in manual mode.   
+ 
+H.3.2  SHIM Mode  
+The “Shim Mode” setting in the General Menu of the APS100 is used to toggle the supply between MANUAL and SHIM 
+modes.  The user must have the APS100 in an idle (STANDBY) state before a change from MANUAL to SHIM mode will 
+be allowed.  Likewise, returning from SHIM mode to MANUAL mode will be allowed only if all shims in the system are 
+either dumped or disabled and the supply is in an idle (STANDBY) state.  The “Shim Mode” setting only appears in the 
+General Menu when these conditions are met. 
+ 
+The main operating display of the APS100 while in SHIM mode is similar to the main operating display in MANUAL 
+mode.  When in SHIM mode, the selected shim coil appears in the top right corner of the display, and the status of the 
+PAGE 90
+Page 90 
+ 
+ 
+enabled shims appears below the main portion of the display with the selected shim highlighted.  The display indicates 
+the present status of all enabled shim coils in the system.   
+ 
+ 
+Figure 17 - SHIM Mode Operating Display 
+ 
+When operating in SHIM mode as indicated in Figure H.4, the [Down] or [Shift-Up] softkey may be used to select the 
+desired shim.  Disabled shims do not appear in the list.  If the currently selected shim is active (persistent switch 
+heater ON), changing to another shim is inhibited.  While in the Shim Mode Operating Display, the selected shim is the 
+only shim enabled for control and adjustment.  The selected shim’s persistent switch may be activated, the shim may 
+be swept up to the indicated current limit, the persistent switch heater may be turned off, and the supply may be swept 
+back to zero output current leaving the shim in persistent mode at the desired current.  All operations are identical to 
+those found in the operation of the main superconducting magnet in MANUAL mode.  Refer to paragraph H.4 for 
+detailed operating instructions. 
+ 
+H.3.3  Setup  Menu  
+Pressing the [Setup] softkey activates the Shim Setup Menu.  This display shows the limit current and present current 
+setting for each shim, the output channel and polarity, the enable status, and the programmed heater current.  This 
+menu gives access to the General Menu and Info Menu described in the main section of the manual, and gives access 
+to the Shim Edit menu. 
+ 
+
+PAGE 91
+Page 91  
+ 
+ 
+ 
+ 
+Figure 18 - Shim Setup Menu 
+ 
+H.3.4  Edit Menu  
+The Shim Edit Menu is invoked by pressing the [Edit] softkey in the Shim Setup Menu.  The Shim Edit Menu is indicated 
+in Figure H.6.  Target Current, Present Current, Output Channel and Polarity, Enable/Disable, and Persistent Switch 
+Heater Current are fields that may be edited.  The [Down], [Shift-Up], [Right], and [Shift-Left] softkeys may be used to 
+select the desired field.   
+ 
+If the shim name field is selected, the order the shims appear on the display may be changed by pressing [Move], [Up] 
+or [Shift-Down], and finally [Change] to complete the action.  A move may be cancelled by pressing the [ESC] key on 
+the keypad.   
+ 
+When a field is selected for editing by the arrow keys, the desired value is entered on the keypad.  The change is 
+accepted by pressing the [Save] softkey, or cancelled by pressing the [ESC] key.  A shim is enabled or disabled by 
+selecting the field and toggling the value with the [Change] softkey, and accepting the result with the [Save] softkey. 
+
+PAGE 92
+Page 92 
+ 
+ 
+ 
+Figure 19 - Shim Edit Menu 
+ 
+The “Limit” field is the current limit that will be used when operating the shim coil.   
+ 
+The “Setting” field is the value of current the APS100 believes has been left in the shim coil when it was last put into 
+persistent mode.  This is an editable field since it is possible for a quench of the shim to occur without the APS100 
+detecting it.  If this happens, the user may manually reset the present current value to zero. 
+ 
+The “Chan” field allows the user to map the shim to a specified output channel and with a specified polarity.  Valid 
+output channels are 1 through 12 with either + or – polarity.  If the user attempts to exit the Edit Menu with more than 
+one shim set to a channel/polarity already occupied by another shim, the changes in the edit session cannot be saved.  
+The changes may only be discarded, or the edit session may be continued to correct the errors. 
+ 
+The “Heater” field allows a particular shim coil to be enabled or disabled.  This may be used when the particular shim is 
+not present in the system, or when the user wishes to disable it to lock it down and prevent dumping of the shim during 
+main coil field changes. 
+ 
+The “I-Htr” field is the persistent switch heater current for the particular shim.  This current may be anywhere from 0 to 
+100 milliamps.  The current value, along with the channel polarity, determines the polarity and magnitude of the 
+persistent switch heater current applied to the specified channel when the shim is selected.  If only six shim outputs 
+are used, the heater current is allowed to be set up to 150 milliamps, which requires two shim outputs to be wired in 
+parallel. The paired outputs must be 1/7, 2/8, 3/9, 4/10, 5/11, and 6/12.  The firmware assumes the outputs are 
+paralleled if a current greater than 100 milliamps is entered for the switch heater current. 
+
+PAGE 93
+Page 93 
+ 
+ 
+ 
+ 
+H.3.5  Hardware Connections  
+Connection of the APS100 Shim Option to the shim coil persistent switch heaters is done through a DB-15 connector 
+on the rear panel of the supply.  Main output current to the shim coils is provided through the high current output 
+terminals.  Figure H.7 indicates wiring assignments. 
+ 
+                    
+ 
+ 
+Figure 20 -  Superconducting Shim Persistent Switch Heater Connections 
+ 
+H.4  Operation  
+Once the shims have been set up through the menus of the APS100 and all connections are made to the persistent 
+switch heaters and main current leads, the system is ready to operate.  The APS100 power supply shim supply option is 
+intuitive and designed for ease of use. 
+H.4.1  Energizing Shims  
+When starting with fully dumped shims and with the APS100 in SHIM mode (main operating display as indicated in 
+Figure H.4), the user will typically perform the following sequence of events to set the selected shim. 
+ 
+Procedure for Initial Setting of Shim Coil Currents 
+a)  Use the [Down] or [Shift-Up] softkey to select the first shim to be set.   
+b)  Press the [Pers Htr] softkey and [Confirm Htr On] softkey to confirm and  
+turn ON the persistent switch heater. 
+c)  Wait about 10 seconds for the persistent switch to warm. 
+d)  Press the [Limit] softkey to begin energizing the shim coil.  The APS100 will begin sweeping in the direction of 
+the requested current limit.  Once the limit is reached, the APS100 will hold that current. 
+e)  Press the [Pers Htr] softkey and [Confirm Htr Off] softkey to confirm and turn OFF the persistent switch heater. 
+f)  Wait about 10 seconds for the persistent switch to cool. 
+g)  Press the [Zero] key to bring the current in the power leads back to zero.  
+Pin #  Function  Pin #  Function  
+1 Channel 1  9 Channel 7  
+  Channel 2  10  Channel 8  
+3 Channel 3  11  Channel 9  
+4 Channel 4  12  Channel 10  
+5 Channel 5  13  Channel 11  
+6 Channel 6  14  Channel 12  
+7 Common  15  Common  
+8 Common      
+View Facing Rear Panel Connector  
+PAGE 94
+Page 94 
+ 
+ 
+ [Shift-Zero] may be used to more quickly return to zero if desired. 
+ 
+After completing the sequence, the operator will use the [Up] or [Shift-Down] softkey to change to the next shim coil.  
+The procedure will be repeated to set this shim coil current.  Likewise all other shims are set.  Once a first pass setting 
+of each shim coil has been made, typically a second pass is made through the shims to minimize the effects of mutual 
+inductance coupling from shim-to-shim.  In the second and subsequent passes, the procedure is as follows: 
+ 
+Procedure for Resetting Shim Coil Currents 
+a)  Use the [Up] or [Shift-Down] softkey to select the desired shim. 
+b)  Press the limit or shim softkey to bring the current in the power leads back to the current limit (the same value 
+that was left in the shim coil).  Alternatively, the [Shift-Limit] or [Shift-Shim] softkey may be used to fast sweep 
+back to the shim current. 
+c)  Press the [Pers Htr] softkey and [Confirm Htr On] softkey to confirm and turn ON the persistent switch heater. 
+d)  Wait about 10 seconds for the persistent switch to warm and the current in the shim to stabilize at the current 
+limit. 
+e)  Press the [Pers Htr] softkey and [Confirm Htr Off] softkey to confirm and turn OFF the persistent switch heater. 
+f)  Wait about 10 seconds for the persistent switch to cool. 
+g)  At this point, the shim is in persistent mode and the operator has two options – 1) press the [Zero] softkey (or 
+[Shift-Zero]) softkey to bring the current in the power leads back to zero, or 2) use the [Down] or [Shift-Up] 
+softkey to proceed directly to setting the next shim.  It is not necessary to sweep the output current of the 
+supply to zero prior to moving on to the next shim. 
+ 
+This process (b through f) should be repeated for each shim. 
+  
+PAGE 95
+Page 95  
+ 
+ 
+ 
+H.4.1  Discharging Shims  
+The APS100 requires that all shims be either disabled or discharged before it will allow the user to change back to 
+Manual mode for control of the main magnet.  If only a minor change in main coil current is desired (e.g., to fine tune 
+Z0), the user may want to leave the currents in the shim coils while the change in main coil current is made.  To do this, 
+each shim coil that is not set at zero current must be disabled as described in section H.3.4. 
+  
+To discharge a shim coil to zero current, the following sequence is typically followed: 
+ 
+a)  Use the [Up] or [Shift-Down] softkey to select the desired shim. 
+b)  Press the [Limit] or [Shim] softkey to bring the current in the power leads back to the current limit (the same 
+value that was left in the shim coil).  Alternatively, the [Shift-Limit] or [Shift-Shim] softkey may be used to fast 
+sweep back to the current limit or shim current. 
+c)  Press the [Pers Htr] softkey and [Confirm Htr On] softkey to confirm and turn ON the persistent switch heater. 
+d)  Wait about 10 seconds for the persistent switch to warm. 
+e)  Press the [Zero] key to sweep the current in the shim coil back to zero. 
+f)  After the current stabilizes at zero and the APS100 enters STANDBY mode, press the [Pers Htr] softkey and 
+[Confirm Htr Off] softkey to confirm and turn OFF the persistent switch heater. 
+g)  Wait about 10 seconds for the persistent switch to cool. 
+h)  Go to step “a” to select the next shim and repeat the process for each shim. 
+ 
+After zeroing or disabling each shim coil, the user may change the APS100 back to Manual mode if desired. 
+ 
+ 
+ 
+ 
+ 
+CAUTION  
+When changing the APS100 back to MANUAL mode, be aware that the supply’s firmware safety limit 
+(typically +/- 30 amps) is no longer enabled.  The APS100 becomes capable of sourcing its full output 
+current rating (e.g. 100 amps for a APS100-100).  Most shim coils are not designed to handle high 
+currents and could be quenched and/or damaged by them.  Be sure to change the APS100’s power 
+leads back to the main coil’s current terminals whe n changing back to MANUAL mode to avoid 
+damaging the system. 
+ 
+PAGE 96
+Page 96 
+ 
+ 
+ 
+ 
+ 
+ 
+attocube systems AG 
+Eglfinger Weg 2 
+D - 85540 Haar, Germany 
+Phone: +49 89 420 797 0 
+Fax: +49 89 420 797 201 90 
+E-Mail: info@attocube.com   
+www.attocube.com 
+ 
+For technical queries, contact:  
+support@attocube.com 
+ 
+ 
+North America Support Hotlines:  
+ 
++1 21 2 962 6930 (East Coast Office)     
++1 510 649 9245 (West Coast Office)  
+ 
+ 
+South America Support Hotline:     
+ 
++1 510 649 9245  
+ 
