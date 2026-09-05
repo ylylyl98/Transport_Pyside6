@@ -4,6 +4,9 @@ import os
 import json
 import tempfile
 import unittest
+import time
+from unittest.mock import patch
+from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -26,12 +29,98 @@ class BFieldTransportUiTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         connections = Connections()
         manager = DeviceManager(connections)
+        self.manager = manager
         self.tab = BFieldTransportTab(
             SaveRoot(base=self.temporary.name, user="operator", device_id="sample"),
             connections,
             manager,
             get_signal_chain_callable=lambda: SignalChainSnapshot(1000.0, 0.02, 100e-9),
         )
+
+    def test_device_status_panel_tracks_existing_and_future_manager_state(self):
+        for name in ("g1", "g2", "g3", "daq"):
+            self.manager.sessions[name] = object()
+            self.manager._emit_status(name, "ok", "connected")
+        self.app.processEvents()
+
+        for name in ("g1", "g2", "g3", "daq"):
+            self.assertEqual(self.tab.status_panel.label(name).lbl_state.text(), "OK")
+
+        self.manager.sessions["g2"] = None
+        self.manager._emit_status("g2", "idle", "")
+        self.app.processEvents()
+        self.assertEqual(self.tab.status_panel.label("g2").lbl_state.text(), "Disconnected")
+
+    def test_aps100_badge_and_start_readiness_follow_controller(self):
+        class Magnet(QtCore.QObject):
+            connected = QtCore.pyqtSignal(object)
+            disconnected = QtCore.pyqtSignal()
+            snapshot_updated = QtCore.pyqtSignal(object)
+            fault = QtCore.pyqtSignal(str)
+
+            def __init__(self):
+                super().__init__()
+                self.is_connected = True
+                self.latest_snapshot = SimpleNamespace(
+                    monotonic_s=time.monotonic(),
+                    status=SimpleNamespace(quench=False, power_module_failure=False),
+                )
+
+        class Controller(QtCore.QObject):
+            error = QtCore.pyqtSignal(str)
+            state_changed = QtCore.pyqtSignal(str, str)
+            finished = QtCore.pyqtSignal()
+            stopped = QtCore.pyqtSignal(str)
+
+            def __init__(self):
+                super().__init__()
+                self.magnet = Magnet()
+                self.active = False
+                self.thermal_safety = SimpleNamespace(
+                    is_armed=True,
+                    latest_snapshot=object(),
+                    evaluate=lambda _snapshot: SimpleNamespace(magnet_permission=True),
+                )
+
+        for name in ("g1", "g2", "g3", "daq"):
+            self.manager.sessions[name] = object()
+            self.manager._emit_status(name, "ok", "connected")
+        controller = Controller()
+        self.tab.set_execution_controller(controller)
+        self.app.processEvents()
+
+        self.assertEqual(self.tab.status_panel.label("aps100").lbl_state.text(), "OK")
+        self.assertTrue(self.tab.btn_start.isEnabled())
+
+        controller.magnet.is_connected = False
+        controller.magnet.disconnected.emit()
+        self.app.processEvents()
+        self.assertEqual(self.tab.status_panel.label("aps100").lbl_state.text(), "Disconnected")
+        self.assertFalse(self.tab.btn_start.isEnabled())
+
+    def test_transport_final_mode_is_selectable_and_persisted(self):
+        self.assertEqual(self.tab.cbo_final_mode.currentData(), "driven")
+        self.tab.cbo_final_mode.setCurrentIndex(self.tab.cbo_final_mode.findData("persistent"))
+        params = self.tab.collect_params()
+        self.assertEqual(params.final_mode, "persistent")
+        self.tab.close()
+        self.tab.deleteLater()
+        self.app.processEvents()
+        connections = Connections()
+        self.tab = BFieldTransportTab(
+            SaveRoot(base=self.temporary.name, user="operator", device_id="sample"),
+            connections, DeviceManager(connections),
+        )
+        self.assertEqual(self.tab.cbo_final_mode.currentData(), "persistent")
+
+    def test_legacy_persistent_default_migrates_to_driven(self):
+        settings = get_app_settings()
+        settings.beginGroup(self.tab.SETTINGS_PREFIX)
+        settings.setValue("final_mode", "persistent")
+        settings.remove("driven_default_applied")
+        settings.endGroup()
+        self.tab._load_settings()
+        self.assertEqual(self.tab.collect_params().final_mode, "driven")
 
     def tearDown(self):
         self.app.processEvents()
@@ -76,6 +165,55 @@ class BFieldTransportUiTests(unittest.TestCase):
         self.assertFalse(self.tab.btn_condition_add_preview.isEnabled())
         self.assertIn("equal lengths", self.tab.lbl_condition_add_preview.text())
         self.assertEqual(self.tab.condition_table.rowCount(), 1)
+
+    def test_quick_add_vds_and_range_preview_match_saved_conditions(self):
+        self.tab.ed_condition_add_first.setText("-1:1.5:0.5")
+        self.tab.ed_condition_add_second.setText("0")
+        self.tab.ed_condition_add_vds.setText("-1")
+        preview = self.tab.condition_add_preview_table
+        self.assertEqual(preview.rowCount(), 5)
+        self.assertEqual([float(preview.item(i, 1).text()) for i in range(5)], [-1, -0.5, 0, 0.5, 1])
+        self.assertEqual([float(preview.item(i, 3).text()) for i in range(5)], [-1] * 5)
+        self.tab.btn_condition_add_preview.click()
+        params = self.tab.collect_params()
+        self.assertEqual([(c.doping, c.efield, c.vds) for c in params.conditions[1:]], [(d, 0, -1) for d in [-1, -0.5, 0, 0.5, 1]])
+        self.tab._load_settings()
+        self.assertEqual([c.vds for c in self.tab.collect_params().conditions[1:]], [-1] * 5)
+
+    def test_quick_add_lists_pair_vds_by_row_and_broadcast_gates(self):
+        self.tab.ed_condition_add_first.setText("-1,1,5")
+        self.tab.ed_condition_add_second.setText("0")
+        self.tab.ed_condition_add_vds.setText("0.1,0.2,0.3")
+        rows = self.tab._previewed_add_conditions()
+        self.assertEqual([(c.doping, c.vds) for c in rows], [(-1, 0.1), (1, 0.2), (5, 0.3)])
+        self.tab.cbo_condition_add_mode.setCurrentIndex(1)
+        self.tab.ed_condition_add_first.setText("1")
+        self.tab.ed_condition_add_second.setText("0.5")
+        rows = self.tab._previewed_add_conditions()
+        self.assertEqual([(c.vtg, c.vbg, c.vds) for c in rows], [(1, 0.5, v) for v in [0.1, 0.2, 0.3]])
+
+    def test_quick_add_invalid_series_clear_preview(self):
+        for invalid in ("0:1:0", "0:1:-1", "0:101:1", "nan", "np.linspace(-1,1,5)"):
+            self.tab.ed_condition_add_vds.setText(invalid)
+            self.assertFalse(self.tab.btn_condition_add_preview.isEnabled(), invalid)
+            self.assertEqual(self.tab.condition_add_preview_table.rowCount(), 0)
+        self.tab.ed_condition_add_first.setText("0,1,2")
+        self.tab.ed_condition_add_vds.setText("0,1")
+        self.assertFalse(self.tab.btn_condition_add_preview.isEnabled())
+
+    def test_quick_add_checks_connected_voltage_protection(self):
+        with patch.object(self.manager, "is_connected", return_value=True), patch.object(self.manager, "applied_gate_voltage_limit", return_value=0.5):
+            self.tab.ed_condition_add_vds.setText("1")
+            self.assertFalse(self.tab.btn_condition_add_preview.isEnabled())
+            self.assertIn("Vds", self.tab.lbl_condition_add_preview.text())
+
+    def test_quick_add_descending_vds_and_lock(self):
+        self.tab.ed_condition_add_vds.setText("1:-1.5:-0.5")
+        self.assertEqual([c.vds for c in self.tab._previewed_add_conditions()], [1, 0.5, 0, -0.5, -1])
+        self.tab.set_sweep_locked(True)
+        self.assertFalse(self.tab.ed_condition_add_vds.isEnabled())
+        self.tab._refresh_condition_add_preview()
+        self.assertFalse(self.tab.btn_condition_add_preview.isEnabled())
 
     def test_legacy_generated_condition_names_are_shortened_on_load(self):
         self.tab.close()

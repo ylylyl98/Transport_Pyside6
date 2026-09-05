@@ -50,6 +50,9 @@ class MagnetPanel(QtWidgets.QWidget):
         self._last_progress_log_at = None
         self._last_progress_log_key = None
         self._last_progress_label = None
+        self._heater_progress_milestones = {}
+        self._heater_progress_last_value = {}
+        self._heater_progress_active_label = None
         self._refresh_timeout_timer = QtCore.QTimer(self)
         self._refresh_timeout_timer.setSingleShot(True)
         self._refresh_timeout_timer.setInterval(10_000)
@@ -782,6 +785,40 @@ class MagnetPanel(QtWidgets.QWidget):
         self.state_label.setText(label)
         now = time.monotonic()
         key = (label, round(numeric, 3))
+        if seconds_phase and "heater" in lower:
+            # Countdown remains live in the status bar, while durable logs
+            # contain only meaningful milestones rather than every poll.
+            if self._heater_progress_active_label != label:
+                # A new transition (or a new run after a field/lead phase)
+                # gets its own started/milestone record.  Repeated polls for
+                # one transition remain deduplicated.
+                self._heater_progress_milestones.pop(label, None)
+                self._heater_progress_last_value.pop(label, None)
+                self._heater_progress_active_label = label
+            milestones = (120, 90, 60, 30, 10, 0)
+            logged = self._heater_progress_milestones.setdefault(label, set())
+            previous = self._heater_progress_last_value.get(label)
+            if previous is None:
+                self._append_activity(
+                    f"{label}: {numeric:.3f} s (started)", "PROGRESS"
+                )
+            for mark in milestones:
+                crossed = (
+                    previous is None and abs(numeric - mark) <= 1e-6
+                ) or (
+                    previous is not None and numeric <= mark + 1e-6 < previous
+                )
+                if crossed and mark not in logged:
+                    self._append_activity(
+                        f"{label}: {mark:.0f} s milestone", "PROGRESS"
+                    )
+                    logged.add(mark)
+            self._heater_progress_last_value[label] = numeric
+            self._last_progress_log_key = key
+            self._last_progress_label = label
+            self._last_progress_log_at = now
+            return
+        self._heater_progress_active_label = None
         if (
             self._last_progress_log_at is None
             or label != self._last_progress_label
@@ -801,6 +838,9 @@ class MagnetPanel(QtWidgets.QWidget):
         self._last_progress_log_at = None
         self._last_progress_log_key = None
         self._last_progress_label = None
+        self._heater_progress_milestones = {}
+        self._heater_progress_last_value = {}
+        self._heater_progress_active_label = None
 
     def _on_operation(self, name: str):
         self._busy_1000 = False

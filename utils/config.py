@@ -239,6 +239,9 @@ class MagnetConfig:
     safe_control_max_field_t: float = 8.0
     heater_warm_s: float = 60.0
     heater_cool_s: float = 120.0
+    # APS100 PSHTR?=2 transition confirmation watchdog; warm/cool dwell starts
+    # only after a stable 1/0 response is confirmed.
+    heater_transition_timeout_s: float = 30.0
     # Bounds are watchdog/reporting limits only; transport cleanup never
     # releases ownership because a watchdog elapsed without acknowledgement.
     operation_timeout_s: float = 180.0
@@ -379,6 +382,8 @@ class MCDConfig:
     sweep_progress_timeout_s: float = 120.0
     sweep_progress_epsilon_t: float = 0.0001
     endpoint_stable_reads: int = 3
+    transport_endpoint_settling_enabled: bool = False
+    transport_endpoint_settling_timeout_s: float = 120.0
     rotation_tolerance_deg: float = 0.25
     lightfield_ready_timeout_s: float = 15.0
     sweep_mode: str = "one_way"

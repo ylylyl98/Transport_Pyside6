@@ -29,6 +29,10 @@ MAX_DRIVEN_FIELD_T = 6.0
 MAX_RATE_A_PER_S = 0.03430
 MAX_RATE_T_PER_MIN = MAX_RATE_A_PER_S * COIL_CONSTANT_T_PER_A * 60.0
 DEFAULT_VOLTAGE_MARGIN_V = 1.0
+# APS100 field readback/command resolution used by transport endpoint guards.
+# A trajectory shorter than this cannot be distinguished reliably from one
+# field value to the next.
+APS100_FIELD_RESOLUTION_T = 1e-4
 # Backward/short-name aliases for downstream scripts.
 MAX_BFIELD_T = MAX_DRIVEN_FIELD_T
 MAX_RATE_T_MIN = MAX_RATE_T_PER_MIN
@@ -37,6 +41,11 @@ COOLDOWN_POLICY_LABELS = {
     "adaptive": "Adaptive (recommended)",
     "stay_driven": "Stay driven for batch",
     "persistent_each_row": "Persistent after every row",
+}
+FINAL_MODES = ("persistent", "driven")
+FINAL_MODE_LABELS = {
+    "persistent": "Persistent (cool and zero leads)",
+    "driven": "Driven (leave heater ON)",
 }
 
 
@@ -185,6 +194,15 @@ def normalize_cooldown_policy(policy: str | None) -> str:
     return value
 
 
+def normalize_final_mode(mode: str | None) -> str:
+    value = str(mode or "persistent").strip().lower().replace(" ", "_")
+    aliases = {"safe": "persistent", "heater_on": "driven"}
+    value = aliases.get(value, value)
+    if value not in FINAL_MODES:
+        raise BFieldTransportSafetyError("Final APS100 mode must be Persistent or Driven")
+    return value
+
+
 def estimate_transport_times(
     start_field_t: float,
     stop_field_t: float,
@@ -323,6 +341,11 @@ def validate_field_bounds(start_field_t: float, stop_field_t: float, *, max_fiel
         raise BFieldTransportSafetyError(f"Start and stop must be within ±{limit:g} T driven-mode envelope")
     if math.isclose(start, stop, abs_tol=1e-12):
         raise BFieldTransportSafetyError("Start and stop fields must be different")
+    if abs(stop - start) < 2.0 * APS100_FIELD_RESOLUTION_T:
+        raise BFieldTransportSafetyError(
+            "B-field span is below the APS100 transport resolution "
+            f"({2.0 * APS100_FIELD_RESOLUTION_T:g} T minimum)"
+        )
     return start, stop
 
 
@@ -451,7 +474,7 @@ class TransportCsvWriter:
         self.close()
 
 
-def write_series_manifest(path: str, *, params: BFieldTransportParams, validation: Mapping, status: str = "running", results: Iterable[Mapping] = (), cleanup_failures: Iterable[str] = ()) -> None:
+def write_series_manifest(path: str, *, params: BFieldTransportParams, validation: Mapping, status: str = "running", results: Iterable[Mapping] = (), cleanup_failures: Iterable[str] = (), runtime: Mapping | None = None) -> None:
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     params_payload = asdict(params)
     for condition_payload in params_payload.get("conditions", []):
@@ -473,6 +496,8 @@ def write_series_manifest(path: str, *, params: BFieldTransportParams, validatio
         "results": list(results),
         "cleanup_failures": list(cleanup_failures),
     }
+    if runtime is not None:
+        payload["runtime"] = dict(runtime)
     temporary = path + ".tmp"
     with open(temporary, "w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=2, default=str)
@@ -492,6 +517,7 @@ class TransportSweepPlan:
     @classmethod
     def from_params(cls, params: BFieldTransportParams, **validation_kwargs):
         params.cooldown_policy = normalize_cooldown_policy(params.cooldown_policy)
+        params.final_mode = normalize_final_mode(params.final_mode)
         validation = validate_setup(
             params.start_field_t, params.stop_field_t, params.rate_t_per_min,
             **validation_kwargs,
@@ -547,6 +573,7 @@ class BFieldTransportSweep:
 
     def run(self, *, persistent_field_confirmed: bool = False) -> list[dict]:
         params = self.plan.params
+        final_mode = normalize_final_mode(getattr(params, "final_mode", "persistent"))
         started = False
         captured_rates = captured_limits = None
         status = "stopped"
@@ -581,11 +608,17 @@ class BFieldTransportSweep:
                     )
             move = getattr(self.adapter, "safe_move_to_field", None)
             if callable(move):
+                # The safe-move operation may already have matched leads or
+                # changed the heater before reporting an error.  Treat its
+                # invocation as the start of hardware ownership so every
+                # failure path still attempts conservative persistent cleanup.
+                started = True
                 move(
                     params.start_field_t, final_mode="driven", zero_leads=False,
                     persistent_field_confirmed=bool(persistent_field_confirmed),
                 )
-            started = True
+            else:
+                started = True
             for condition_index, condition in enumerate(self.plan.conditions, start=1):
                 self._stop_if_requested()
                 self.apply_condition(condition)
@@ -646,7 +679,12 @@ class BFieldTransportSweep:
                 except TypeError:
                     pause()
             persistent = getattr(self.adapter, "enter_persistent_mode", None)
-            if started and callable(persistent):
+            if started and status == "finished" and final_mode == "driven":
+                # The endpoint is already paused by the transport leg; leave
+                # the confirmed heater ON only for an otherwise successful
+                # recipe. Any exception path retains conservative cleanup.
+                pass
+            elif started and callable(persistent):
                 try:
                     persistent(zero_leads=True)
                 except Exception as exc:
@@ -661,7 +699,12 @@ class BFieldTransportSweep:
                     self.adapter.set_limits_t(*captured_limits)
                 except Exception as exc:
                     self.cleanup_failures.append(f"limit restoration failed: {exc}")
-            self.restoration = {"rates": captured_rates, "limits": captured_limits, "cleanup_failures": list(self.cleanup_failures)}
+            self.restoration = {
+                "rates": captured_rates,
+                "limits": captured_limits,
+                "final_mode": final_mode if status == "finished" else "persistent",
+                "cleanup_failures": list(self.cleanup_failures),
+            }
             for writer in self._writers.values():
                 try:
                     writer.close()

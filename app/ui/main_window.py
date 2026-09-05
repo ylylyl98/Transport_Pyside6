@@ -146,6 +146,10 @@ class MainWindow(QtWidgets.QMainWindow):
             thermal_safety=self.thermal_safety, parent=self,
         )
         self.tab_bfield_transport.set_execution_controller(self.bfield_transport_controller)
+        # If closing the window has to wait for an APS100 Persistent
+        # acknowledgement after a successful Driven transport, retry the
+        # close event automatically once that safety transition completes.
+        self.bfield_transport_controller.shutdown_ready.connect(self.close)
         self.tab_photocurrent = PhotocurrentTab(self.save_root, self.connections, self.device_manager, get_global_rates_callable=self.conn_dock.get_rates, get_ao_items_callable=self.tab_dual.get_ao_items_if_available, get_signal_chain_callable=self.signal_chain_snapshot)
         self.gate_scan_field_batch = GateScanFieldBatch(
             self.magnet1000,
@@ -157,9 +161,11 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.lakeshore335.snapshot_updated.connect(self.gate_scan_field_batch.on_lakeshore_snapshot)
         self.lakeshore335.snapshot_updated.connect(self.bfield_transport_controller.on_lakeshore_snapshot)
+        self.lakeshore335.snapshot_updated.connect(self.tab_bfield_transport.refresh_hardware_readiness)
         self.lakeshore335.disconnected.connect(self._clear_lakeshore_thermal)
         self.lakeshore335.disconnected.connect(self.gate_scan_field_batch.on_lakeshore_disconnected)
         self.lakeshore335.disconnected.connect(self.bfield_transport_controller.on_lakeshore_disconnected)
+        self.lakeshore335.disconnected.connect(self.tab_bfield_transport.refresh_hardware_readiness)
         self.lakeshore335.snapshot_updated.connect(self.magnet_panel._on_lakeshore_snapshot)
         self.lakeshore335.snapshot_updated.connect(self.tab_bfield_gate_scan.set_temperature_safety)
         self.lakeshore335.fault.connect(lambda message: self.tab_bfield_gate_scan.set_temperature_safety(None, message))
@@ -281,11 +287,12 @@ class MainWindow(QtWidgets.QMainWindow):
         # shutdown when that acknowledgement is unavailable.
         self.gate_scan_field_batch.stop()
         if getattr(self, "bfield_transport_controller", None) is not None:
-            self.bfield_transport_controller.stop()
-            if self.bfield_transport_controller.active:
+            controller = self.bfield_transport_controller
+            if not controller.prepare_shutdown():
                 # Keep the window and APS/device ownership in place until the
                 # asynchronous pause, persistent-mode, and RATE/limit restore
-                # acknowledgements have completed.
+                # acknowledgements have completed.  This also covers a
+                # completed Driven run whose heater is still intentionally ON.
                 event.ignore()
                 return
         if getattr(self, "tab_bfield_transport", None) is not None:

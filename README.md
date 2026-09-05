@@ -110,6 +110,14 @@ requirements.txt        Python dependencies
 
 ## Development notes
 
+B-field Transport continuous sweeps accept the first fresh reading inside the endpoint window approached in the commanded direction, save its measured field, and wait for pause acknowledgement before reversing. The window uses `magnet.field_tolerance_t` (default 0.002 T), capped at 1% of the sweep span with an instrument-resolution floor for short spans.
+
+Successful B-field Transport sweeps default to **Driven (leave heater ON)**, holding the final field for the next sweep without persistent-mode cooldown. A round trip finishes at its starting field. The previous saved final-mode selection migrates to Driven once; later explicit selections are remembered. Choose **Persistent (cool and zero leads)** when desired. Stop, error, interlock, and application-shutdown cleanup still use Persistent mode.
+
+Quick-add accepts single numbers, comma-separated lists (`-1,1,5` means three values), and `start:stop:step` ranges with the stop excluded. For five doping values from -1 through +1 use `-1:1.5:0.5`. Doping/E-field (or Vtg/Vbg) and Vds share this syntax; scalar values repeat and lists pair row by row, with at most 100 conditions per addition. The live preview shows every row's Doping, E-field, Vds, Vtg, and Vbg before adding. Quick-added Vds uses Keithley 2400; the source remains editable in the conditions table. Connected voltage protections are checked during preview, and full instrument validation still runs before starting a sweep.
+
+Optional endpoint settling is controlled in the saved configuration's `mcd` section: `transport_endpoint_settling_enabled` defaults to `false`, and `transport_endpoint_settling_timeout_s` defaults to `120.0`. When enabled, `endpoint_stable_reads` (default 3) consecutive in-window readings are required. The sweep advances immediately once they pass; excursions reset the count without restarting the timeout. Restart the app after changing these settings. Existing instrument protections remain active.
+
 The app saves user configuration and plot-mode preferences through Qt settings. Before modifying an instrument driver or measurement worker, test against a controlled setup or suitable hardware simulation—never a device whose limits have not been confirmed.
 
 ## License

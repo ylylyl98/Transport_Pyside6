@@ -23,6 +23,8 @@ from app.engine.bfield_transport_sweep import (
     validate_voltage_margin,
     write_series_manifest,
     normalize_cooldown_policy,
+    normalize_final_mode,
+    APS100_FIELD_RESOLUTION_T,
 )
 from app.run_output import build_planned_output
 from app.utils import safe_ramp
@@ -35,6 +37,9 @@ class BFieldTransportController(QtCore.QObject):
     error = QtCore.pyqtSignal(str)
     finished = QtCore.pyqtSignal()
     stopped = QtCore.pyqtSignal(str)
+    # Emitted only after an application-close Persistent transition has been
+    # acknowledged.  MainWindow uses it to retry the close event safely.
+    shutdown_ready = QtCore.pyqtSignal()
 
     def __init__(self, magnet, tab, device_manager, thermal_safety=None, parent=None):
         super().__init__(parent)
@@ -63,6 +68,14 @@ class BFieldTransportController(QtCore.QObject):
         self._cleanup_in_progress = False
         self._cleanup_status = ""
         self._cleanup_detail = ""
+        self._cleanup_final_mode = "persistent"
+        self._completed_final_mode = "persistent"
+        self._shutdown_persistent_waiting = False
+        self._shutdown_exclusive_acquired = False
+        # MainWindow retries close after the asynchronous Persistent
+        # acknowledgement.  Keep that retry idempotent: once the transition
+        # is confirmed, do not enqueue a second APS100 operation.
+        self._shutdown_complete = False
         self._cleanup_failures = []
         self._cleanup_waiting = ""
         self._cleanup_overdue_phases = set()
@@ -81,6 +94,31 @@ class BFieldTransportController(QtCore.QObject):
         self._calibration = (1e7, 100.0)
         self._signal_chain = None
         self._heater_active = False
+        # ``acquire_exclusive`` deliberately stops the normal APS polling
+        # timer.  Transport owns a separate, explicit measurement phase and
+        # starts that timer only after the sweep command has been accepted.
+        self._measurement_phase = "idle"
+        self._pending_target = None
+        self._last_telemetry_monotonic = None
+        self._last_progress_monotonic = None
+        self._last_progress_field = None
+        self._leg_started_monotonic = None
+        self._endpoint_recorded = False
+        self._endpoint_stable_reads = 0
+        self._endpoint_last_field = None
+        self._endpoint_hold_started = None
+        # Candidate timing is separate from the consecutive-read stability
+        # counter.  A brief excursion outside the endpoint window must reset
+        # stability, but must not make the watchdog wait for an entire leg.
+        self._endpoint_candidate_started = None
+        self._endpoint_pause_requested = False
+        self._endpoint_tolerance = self._endpoint_tolerance_t()
+        self._leg_expected_duration_s = 0.0
+        self._leg_timeout_s = 0.0
+        self._progress_timeout_s = 0.0
+        self._telemetry_watchdog = QtCore.QTimer(self)
+        self._telemetry_watchdog.setInterval(self._watchdog_interval_ms())
+        self._telemetry_watchdog.timeout.connect(self._on_telemetry_watchdog)
         magnet.transport_config_result.connect(self._on_configured)
         magnet.safe_move_result.connect(self._on_safe_move)
         magnet.transport_sweep_result.connect(self._on_sweep_started)
@@ -191,6 +229,11 @@ class BFieldTransportController(QtCore.QObject):
                 self._exclusive_acquired = False
                 raise BFieldTransportSafetyError("Transport devices already in use: " + ", ".join(blocked))
             self._claimed = required
+            # Start a fresh durable heater-transition log lifecycle for every
+            # transport reservation.  Polling cadence remains unchanged; only
+            # the replaceable UI countdown/milestone dedup state is reset.
+            if panel is not None and hasattr(panel, "_reset_activity_throttles"):
+                panel._reset_activity_throttles()
             self._manifest = self._transport_outputs.manifest_path
             self._checkpoint = self._transport_outputs.checkpoint_path
             self._log_path = self._transport_outputs.log_path
@@ -209,6 +252,22 @@ class BFieldTransportController(QtCore.QObject):
             self._results = []
             self._condition_index = 0
             self._leg_index = 0
+            self._measurement_phase = "configuring"
+            self._pending_target = None
+            self._last_telemetry_monotonic = None
+            self._last_progress_monotonic = None
+            self._last_progress_field = None
+            self._leg_started_monotonic = None
+            self._endpoint_recorded = False
+            self._endpoint_stable_reads = 0
+            self._endpoint_last_field = None
+            self._endpoint_hold_started = None
+            self._endpoint_candidate_started = None
+            self._endpoint_pause_requested = False
+            self._endpoint_tolerance = 0.0
+            self._leg_expected_duration_s = 0.0
+            self._leg_timeout_s = 0.0
+            self._progress_timeout_s = 0.0
             self.tab.set_sweep_locked(True)
             self.state_changed.emit("configuring", "Programming APS100 rate and ±6 T limits")
             self.magnet.configure_transport(params.rate_t_per_min, 6.0)
@@ -219,20 +278,114 @@ class BFieldTransportController(QtCore.QObject):
             return False
 
     def stop(self):
+        if self._cleanup_in_progress:
+            # A STOP can race the pause/restore acknowledgement of a
+            # successful Driven completion.  It must strengthen cleanup, not
+            # be ignored because cleanup has already started.
+            self._force_persistent_cleanup()
+            return
         if not self._active:
             return
         self._stop_requested = True
         self._log("Stop requested by user")
         self._cleanup("stopped", "B-field Transport stopped; partial data and checkpoint preserved")
 
+    def prepare_shutdown(self) -> bool:
+        """Ensure APS100 is Persistent before MainWindow disconnects it.
+
+        Successful transport may intentionally finish in Driven mode, but an
+        application close is always conservative.  The method is asynchronous
+        for the real MagnetController and returns True only once its
+        operation acknowledgement has arrived.
+        """
+        if self.__dict__.get("_shutdown_complete", False):
+            return True
+        if self._cleanup_in_progress:
+            self._force_persistent_cleanup()
+            return False
+        if self._active:
+            self._cleanup("stopped", "Application shutdown requested; APS100 persistent cleanup required")
+            return False
+        if self.__dict__.get("_shutdown_persistent_waiting", False):
+            return False
+        # Fence first.  Do not trust a pre-fence snapshot: a manual Driven
+        # command may already be queued in the APS worker.  The Persistent
+        # request below is queued after that command and is idempotent when
+        # the magnet is already safe.
+        if not self._shutdown_exclusive_acquired:
+            try:
+                acquired = self.magnet.acquire_exclusive(self._owner)
+            except Exception as exc:
+                self._log(f"ERROR: APS100 shutdown reservation failed: {exc}")
+                self.error.emit(f"APS100 shutdown reservation failed: {exc}")
+                return False
+            if not acquired:
+                self.error.emit("APS100 is busy; shutdown is waiting for exclusive control")
+                return False
+            self._shutdown_exclusive_acquired = True
+        return self._begin_shutdown_persistent()
+
+    def _begin_shutdown_persistent(self):
+        self._shutdown_persistent_waiting = True
+        self._log("Application shutdown: forcing APS100 persistent cleanup after Driven completion")
+        try:
+            self.magnet.enter_persistent_mode(zero_leads=True)
+        except Exception as exc:
+            self._shutdown_persistent_waiting = False
+            self._cleanup_failures.append(f"shutdown persistent cleanup failed: {exc}")
+            self._log(f"ERROR: shutdown persistent cleanup failed: {exc}")
+            self.error.emit(f"APS100 shutdown cleanup failed: {exc}")
+            return False
+        if not hasattr(self.magnet, "operation_finished"):
+            self._shutdown_persistent_waiting = False
+            self._completed_final_mode = "persistent"
+            self._shutdown_complete = True
+            self.magnet.release_exclusive(self._owner)
+            self._shutdown_exclusive_acquired = False
+            self._log("APS100 shutdown persistent cleanup completed")
+            return True
+        return False
+
+    def _force_persistent_cleanup(self):
+        """Upgrade any in-flight successful cleanup to conservative mode."""
+        if not self._cleanup_in_progress:
+            return
+        if self._cleanup_final_mode != "persistent":
+            self._cleanup_final_mode = "persistent"
+            self._log("APS100 cleanup target upgraded to Persistent by STOP/shutdown")
+        if self._cleanup_waiting == "restore":
+            # Restoration only changes rates/limits; it does not make the
+            # heater safe.  Queue the persistent operation and ignore the late
+            # restore acknowledgement until Persistent has been confirmed.
+            self._begin_persistent_cleanup()
+
     def _on_magnet_operation(self, name):
         name = str(name)
+        if self.__dict__.get("_shutdown_persistent_waiting", False):
+            if name == "enter_persistent_mode":
+                self._shutdown_persistent_waiting = False
+                self._completed_final_mode = "persistent"
+                self._shutdown_complete = True
+                if self._shutdown_exclusive_acquired:
+                    self.magnet.release_exclusive(self._owner)
+                    self._shutdown_exclusive_acquired = False
+                self._log("APS100 shutdown persistent cleanup acknowledged")
+                self.shutdown_ready.emit()
+            elif name == "failed:enter_persistent_mode":
+                self._shutdown_persistent_waiting = False
+                self._cleanup_failures.append(
+                    "shutdown persistent cleanup failed: APS100 operation reported failure"
+                )
+                self._log("ERROR: APS100 shutdown persistent cleanup was not acknowledged")
+                self.error.emit("APS100 shutdown persistent cleanup was not acknowledged")
+            return
         if not self._cleanup_in_progress:
             if self._thermal_pause_pending and name == "pause":
                 self._thermal_pause_pending = False
                 self.state_changed.emit("thermal_hold", "APS100 paused; waiting for Lake Shore recovery dwell")
                 return
             if self._transition_pending and name == "pause":
+                self._log("APS100 endpoint pause acknowledged; advancing transport sequence")
                 self._transition_pending = False
                 next_step = self._transition_next
                 self._transition_next = None
@@ -241,9 +394,7 @@ class BFieldTransportController(QtCore.QObject):
                 elif self._thermal_hold:
                     self._resume_after_thermal_recovery()
                 elif next_step == "return":
-                    self._leg_index = 1
-                    self._target = self.plan.params.start_field_t
-                    self.magnet.start_transport_sweep(self._target)
+                    self._begin_leg(1, self.plan.params.start_field_t)
                 elif next_step == "next":
                     permitted, detail = self._thermal_permission()
                     if not permitted:
@@ -262,15 +413,22 @@ class BFieldTransportController(QtCore.QObject):
                 self._fail(f"APS100 operation failed: {name[7:]}")
             return
         if name == "pause" and self._cleanup_waiting == "pause":
-            self._begin_persistent_cleanup()
+            self._log("APS100 cleanup pause acknowledged")
+            if getattr(self, "_cleanup_final_mode", "persistent") == "driven":
+                self._log("APS100 successful final mode is Driven; heater remains ON")
+                self._request_restore()
+            else:
+                self._begin_persistent_cleanup()
         elif name == "failed:pause" and self._cleanup_waiting == "pause":
             self._cleanup_failures.append("pause cleanup failed: APS100 reported operation failure")
             self._begin_persistent_cleanup()
         elif name == "enter_persistent_mode" and self._cleanup_waiting == "persistent":
+            self._log("APS100 persistent-mode cleanup acknowledged; restoring transport settings")
             self._request_restore()
         elif name == "failed:enter_persistent_mode" and self._cleanup_waiting == "persistent":
-            self._cleanup_failures.append("persistent cleanup failed: APS100 reported operation failure")
-            self._request_restore()
+            self._retain_persistent_cleanup_failure(
+                "persistent cleanup failed: APS100 reported operation failure"
+            )
 
     def _begin_persistent_cleanup(self):
         self._cleanup_waiting = "persistent"
@@ -278,16 +436,36 @@ class BFieldTransportController(QtCore.QObject):
         try:
             self.magnet.enter_persistent_mode(zero_leads=True)
         except Exception as exc:
-            self._cleanup_failures.append(f"persistent cleanup failed: {exc}")
-            self._request_restore()
+            self._retain_persistent_cleanup_failure(f"persistent cleanup failed: {exc}")
+        else:
+            if not hasattr(self.magnet, "operation_finished"):
+                # Synchronous adapters have already completed their own
+                # confirmed OFF/cooling/zero sequence when the call returns.
+                self._request_restore()
+
+    def _retain_persistent_cleanup_failure(self, detail):
+        """Keep APS ownership when heater-OFF/cooling was not confirmed."""
+        detail = str(detail)
+        self._cleanup_failures.append(detail)
+        overdue = "APS100 heater OFF was not confirmed; ownership retained and lead zeroing skipped"
+        self._log(detail)
+        self._log(overdue)
+        self.state_changed.emit("cleanup_overdue", overdue)
+        self._cleanup_timer.start(self._cleanup_watchdog_ms())
 
     def _on_magnet_error(self, message):
         if self._cleanup_in_progress:
             self._cleanup_failures.append(f"APS100 cleanup error: {message}")
-            if self._cleanup_waiting in {"pause", "persistent"}:
-                self._request_restore()
-            else:
-                self._finish_cleanup()
+            self._log(f"APS100 cleanup error while waiting for {self._cleanup_waiting or 'operation'}: {message}")
+            # MagnetController reports a generic error before its
+            # operation_finished("failed:<name>") acknowledgement.  Do not
+            # advance cleanup from this signal: doing so can skip the
+            # persistent/heater-off/zero-leads step before restoration.
+            # The operation acknowledgement owns every cleanup transition;
+            # the cleanup watchdog retains ownership if it never arrives.
+        elif self.__dict__.get("_shutdown_persistent_waiting", False):
+            self._cleanup_failures.append(f"APS100 shutdown cleanup error: {message}")
+            self._log(f"APS100 shutdown cleanup error while waiting for persistent mode: {message}")
         elif self._active:
             self._fail(str(message))
 
@@ -400,13 +578,14 @@ class BFieldTransportController(QtCore.QObject):
             self.magnet.safe_move_to_field(
                 self.plan.params.start_field_t, final_mode="driven", zero_leads=False,
                 persistent_field_confirmed=True,
+                tolerance_t=self._position_tolerance_t(),
             )
         elif self._thermal_resume_action == "next":
             self._thermal_resume_action = None
             self._next_condition()
         else:
             self.state_changed.emit("resuming", "Lake Shore recovery dwell complete; resuming APS100 sweep")
-            self.magnet.start_transport_sweep(self._target)
+            self._begin_leg(self._leg_index, self._target)
 
     def _on_restore_result(self, result):
         if self._cleanup_in_progress and self._cleanup_waiting == "restore":
@@ -418,20 +597,33 @@ class BFieldTransportController(QtCore.QObject):
         if not self._cleanup_in_progress:
             return
         self._cleanup_timer.stop()
+        self._telemetry_watchdog.stop()
         for writer in self._writers.values():
             try: writer.close()
             except Exception as exc: self._cleanup_failures.append(f"CSV close failed: {exc}")
+        final_runtime = {
+            "phase": str(self._cleanup_status),
+            "detail": str(self._cleanup_detail or self._cleanup_status),
+            "condition_index": self._condition_index + 1,
+            "leg_index": self._leg_index,
+            "target_field_t": self._target,
+            "final_mode": self._cleanup_final_mode,
+        }
+        self._completed_final_mode = self._cleanup_final_mode
         self._writers.clear()
         if self._manifest:
-            write_series_manifest(self._manifest, params=self.plan.params, validation=self.plan.validation, status=self._cleanup_status, results=self._results, cleanup_failures=self._cleanup_failures)
+            write_series_manifest(self._manifest, params=self.plan.params, validation=self.plan.validation, status=self._cleanup_status, results=self._results, cleanup_failures=self._cleanup_failures, runtime=final_runtime)
         if self._checkpoint:
-            write_series_manifest(self._checkpoint, params=self.plan.params, validation=self.plan.validation, status=self._cleanup_status, results=self._results, cleanup_failures=self._cleanup_failures)
+            write_series_manifest(self._checkpoint, params=self.plan.params, validation=self.plan.validation, status=self._cleanup_status, results=self._results, cleanup_failures=self._cleanup_failures, runtime=final_runtime)
         if self._claimed: self.device_manager.release(self._claimed)
         self._claimed = []
         if self._exclusive_acquired:
             self.magnet.release_exclusive(self._owner)
             self._exclusive_acquired = False
+            self._log("APS100 transport ownership released; normal telemetry polling resume requested")
         self._active = False
+        self._measurement_phase = self._cleanup_status
+        self._pending_target = None
         self._cleanup_in_progress = False
         self.tab.set_sweep_locked(False)
         if hasattr(self.tab, "reset_output_preview"):
@@ -446,6 +638,7 @@ class BFieldTransportController(QtCore.QObject):
         if not result.get("success"):
             self._fail(result.get("error", "APS100 transport configuration failed")); return
         self._stored_rates, self._stored_limits = result.get("stored_rates"), result.get("stored_limits")
+        self._log("APS100 transport configuration verified")
         try:
             validate_voltage_margin(
                 self.plan.params.rate_t_per_min,
@@ -454,9 +647,13 @@ class BFieldTransportController(QtCore.QObject):
             )
         except Exception as exc:
             self._fail(str(exc)); return
+        self._measurement_phase = "positioning"
+        self._target = None
+        self._checkpoint_runtime("positioning", "Moving APS100 to the first sweep field")
         self.magnet.safe_move_to_field(
             self.plan.params.start_field_t, final_mode="driven", zero_leads=False,
             persistent_field_confirmed=self._persistent_confirmation_granted,
+            tolerance_t=self._position_tolerance_t(),
         )
 
     def _confirm_initial_persistent_field(self, snapshot):
@@ -482,27 +679,109 @@ class BFieldTransportController(QtCore.QObject):
         except Exception as exc:
             self._fail(f"Condition bias transition failed: {exc}"); return
         self._leg_index = 0
-        self._target = self.plan.legs[1][0]
-        self.state_changed.emit("sweeping", f"Condition {self._condition_index + 1}/{len(self.plan.conditions)}")
+        self._target = None
+        self._measurement_phase = "biasing"
+        self._checkpoint_runtime("biasing", f"Applying condition {self._condition_index + 1}/{len(self.plan.conditions)}")
 
     def _on_safe_move(self, result):
         if not self._active or not result.get("success"):
             if self._active: self._fail(result.get("error", "APS100 driven-mode positioning failed"))
             return
         self._note_heater_activation(result)
+        self._log("APS100 initial positioning completed")
         self._start_condition()
         if not self._active:
             return
-        self.magnet.start_transport_sweep(self._target)
+        self._begin_leg(0, self.plan.params.stop_field_t)
+
+    def _begin_leg(self, leg_index, target):
+        """Issue one transport leg and arm polling only after acceptance."""
+        if not self._active or self._cleanup_in_progress:
+            return
+        self._leg_index = int(leg_index)
+        self._target = float(target)
+        self._pending_target = float(target)
+        self._endpoint_recorded = False
+        self._endpoint_stable_reads = 0
+        self._endpoint_last_field = None
+        self._endpoint_hold_started = None
+        self._endpoint_candidate_started = None
+        self._endpoint_pause_requested = False
+        self._endpoint_tolerance = self._endpoint_tolerance_t()
+        self._measurement_phase = "starting_sweep"
+        direction = "forward" if self._leg_index == 0 else "backward"
+        self.state_changed.emit(
+            "starting_sweep",
+            f"Condition {self._condition_index + 1}/{len(self.plan.conditions)}; {direction} leg to {self._target:+.6f} T",
+        )
+        self._checkpoint_runtime("starting_sweep", f"{direction} leg target {self._target:+.6f} T")
+        try:
+            self.magnet.start_transport_sweep(self._target)
+        except Exception as exc:
+            self._fail(f"APS100 sweep command failed: {exc}")
 
     def _on_sweep_started(self, result):
-        if self._active and not result.get("success"):
+        if not self._active or self._cleanup_in_progress:
+            return
+        if not result.get("success"):
             self._fail(result.get("error", "APS100 sweep command failed"))
+            return
+        # This call is queued to the APS worker after the command, avoiding
+        # the old race where exclusive reservation left the timer disabled.
+        self._set_transport_polling(True)
+        # A newly accepted sweep must not wait for a timer interval (which may
+        # still be the stationary 3 s interval) before its first sample.
+        self._refresh_snapshot()
+        now = time.monotonic()
+        self._measurement_phase = "sweeping"
+        self._log(f"APS100 transport {('forward' if self._leg_index == 0 else 'backward')} leg accepted; entering sweeping phase")
+        self._leg_started_monotonic = now
+        self._last_telemetry_monotonic = now
+        self._last_progress_monotonic = now
+        self._last_progress_field = None
+        self._pending_target = None
+        self._leg_expected_duration_s = self._expected_leg_duration_s()
+        communication_timeout = self._communication_timeout_s()
+        configured_timeout = max(1.0, float(getattr(cfg.mcd, "sweep_leg_timeout_s", 3600.0)))
+        # The configured value is a floor; the derived duration prevents a
+        # valid low-rate/long-distance recipe from timing out prematurely.
+        self._progress_timeout_s = max(
+            communication_timeout * 4.0,
+            self._leg_expected_duration_s * 1.5,
+        )
+        self._leg_timeout_s = max(
+            configured_timeout,
+            self._progress_timeout_s + communication_timeout,
+        )
+        direction = "forward" if self._leg_index == 0 else "backward"
+        self.state_changed.emit(
+            "sweeping",
+            f"Condition {self._condition_index + 1}/{len(self.plan.conditions)}; {direction} leg",
+        )
+        self._checkpoint_runtime("sweeping", f"{direction} leg target {self._target:+.6f} T")
+        self._telemetry_watchdog.start()
 
     def _on_snapshot(self, snapshot):
+        """Handle telemetry without allowing a Python exception to escape Qt.
+
+        PyQt 6.11 terminates the process when an exception escapes a signal
+        callback.  APS100 snapshots can arrive in every transport phase, so
+        keep this boundary fail-safe and turn unexpected processing errors
+        into the controller's normal cleanup path.
+        """
+        try:
+            self._process_snapshot(snapshot)
+        except Exception as exc:
+            if self._active:
+                self._fail(f"APS100 telemetry processing failed: {exc}")
+
+    def _process_snapshot(self, snapshot):
         if not self._active or snapshot is None:
             return
         status = getattr(snapshot, "status", None)
+        received_at = time.monotonic()
+        if not self._cleanup_in_progress:
+            self._last_telemetry_monotonic = received_at
         heater = getattr(snapshot, "heater_on", None)
         if heater is not None:
             self._heater_active = bool(heater)
@@ -522,6 +801,11 @@ class BFieldTransportController(QtCore.QObject):
         limit = getattr(snapshot, "voltage_limit_v", None)
         if voltage is not None and limit is not None and abs(float(voltage)) > float(limit) + 1e-9:
             self._fail(f"APS100 magnet voltage {float(voltage):.6g} V exceeds {float(limit):.6g} V limit"); return
+        if self._cleanup_in_progress:
+            # Cleanup telemetry remains safety-checked, but must not request a
+            # second pause/thermal transition while cleanup owns the device.
+            self._thermal_permission()
+            return
         permitted, thermal_detail = self._thermal_permission()
         if not permitted:
             if self._thermal_hold:
@@ -533,30 +817,91 @@ class BFieldTransportController(QtCore.QObject):
             return
         target = self._target
         measured = float(getattr(snapshot, "field_t", 0.0))
-        self._record_snapshot(snapshot)
+        # Configuration and safe positioning also publish snapshots.  Those
+        # are safety telemetry, not sweep samples; _target is deliberately
+        # unset until _start_condition() begins the measurement leg.
+        # Every snapshot is safety-checked above, but positioning, pauses and
+        # cleanup are never measurement samples.  In particular this guard
+        # prevents cached endpoint telemetry from creating duplicate rows.
+        if target is None or self._measurement_phase != "sweeping" or self._cleanup_in_progress:
+            return
         if self._transition_pending:
             return
-        if target is None or abs(measured - target) > 0.002 or getattr(status, "sweep_active", False):
+        sweep_active = bool(getattr(status, "sweep_active", False))
+        tolerance = self._endpoint_tolerance or self._endpoint_tolerance_t()
+        near_target = abs(measured - target) <= tolerance + 1e-9
+        settling = bool(getattr(cfg.mcd, "transport_endpoint_settling_enabled", False))
+        stable_endpoint = (
+            self._endpoint_stability_ready(measured, sweep_active, received_at)
+            if settling else near_target and self._endpoint_approach_ready(measured)
+        )
+        duplicate_endpoint = near_target and self._endpoint_recorded
+        candidate_started = self._endpoint_candidate_started
+        if settling and candidate_started is not None:
+            self._log(
+                f"APS100 endpoint candidate: measured={measured:+.6f} T, "
+                f"target={target:+.6f} T, tolerance={tolerance:.6g} T, "
+                f"stable_reads={self._endpoint_stable_reads}, "
+                f"elapsed={received_at - candidate_started:.3f} s, "
+                f"timeout={self._endpoint_stability_grace_s():.3f} s"
+            )
+        if near_target and not stable_endpoint:
             return
-        if self._leg_index == 0:
-            self._leg_index = 1
-            self._target = self.plan.params.start_field_t
-            if self.plan.params.round_trip:
-                self._transition_pending = True
-                self._transition_next = "return"
-            else:
-                self._transition_pending = True
-                self._transition_next = "next"
-                if self._condition_index < len(self.plan.conditions) - 1 and normalize_cooldown_policy(self.plan.params.cooldown_policy) == "persistent_each_row":
-                    self._persistent_row_transition = True
+        # Always retain the terminal sample even when the previous telemetry
+        # arrived within the normal acquisition throttle interval.
+        if near_target and not duplicate_endpoint:
+            self._last_acquisition = 0.0
+        if not duplicate_endpoint:
+            self._record_snapshot(snapshot)
+        if not self._active or self._cleanup_in_progress:
+            return
+        if near_target and not duplicate_endpoint:
+            self._endpoint_recorded = True
+        epsilon = max(1e-9, float(getattr(cfg.mcd, "sweep_progress_epsilon_t", 0.0001)))
+        if self._last_progress_field is None or abs(measured - self._last_progress_field) >= epsilon:
+            self._last_progress_field = measured
+            self._last_progress_monotonic = received_at
+        if not near_target:
+            return
+        if sweep_active and not stable_endpoint:
+            return
+        self._log(
+            f"APS100 endpoint accepted: measured={measured:+.6f} T, "
+            f"target={target:+.6f} T, tolerance={tolerance:.6g} T"
+        )
+        self._begin_endpoint_hold()
+
+    def _begin_endpoint_hold(self):
+        """Pause at the accepted endpoint; advance only on acknowledgement."""
+        if self._transition_pending or self._endpoint_pause_requested:
+            return
+        if self._leg_index == 0 and self.plan.params.round_trip:
+            next_step = "return"
         else:
-            self._transition_pending = True
-            self._transition_next = "next"
-            if self._condition_index < len(self.plan.conditions) - 1 and normalize_cooldown_policy(self.plan.params.cooldown_policy) == "persistent_each_row":
-                self._persistent_row_transition = True
-        self.magnet.pause()
-        # Simple test doubles may not expose an operation signal.  Production
-        # MagnetController always does, and waits for its acknowledgement.
+            next_step = "next"
+        self._transition_pending = True
+        self._transition_next = next_step
+        if self._condition_index < len(self.plan.conditions) - 1 and normalize_cooldown_policy(self.plan.params.cooldown_policy) == "persistent_each_row":
+            self._persistent_row_transition = True
+        self._measurement_phase = "endpoint_hold"
+        self._endpoint_pause_requested = True
+        detail = (
+            f"Condition {self._condition_index + 1}/{len(self.plan.conditions)} endpoint reached; "
+            "waiting for pause acknowledgement"
+        )
+        self.state_changed.emit("endpoint_hold", detail)
+        if hasattr(self.tab, "set_progress"):
+            legs = 2 if self.plan.params.round_trip else 1
+            self.tab.set_progress((self._leg_index + 1) / legs)
+        self._checkpoint_runtime("endpoint_hold", detail)
+        self._log("APS100 endpoint issuing pause request")
+        try:
+            self.magnet.pause()
+        except Exception as exc:
+            self._fail(f"Unable to pause APS100 at endpoint: {exc}")
+            return
+        # Simple test doubles and synchronous adapters have no acknowledgement
+        # signal. Production MagnetController always waits for one.
         if not hasattr(self.magnet, "operation_finished"):
             self._on_magnet_operation("pause")
 
@@ -611,8 +956,10 @@ class BFieldTransportController(QtCore.QObject):
         writer = self._writers.get(self._condition_index + 1)
         if writer: writer.write(row)
         self._emit_measurement_update(row)
-        if self._checkpoint:
-            write_series_manifest(self._checkpoint, params=self.plan.params, validation=self.plan.validation, results=self._results)
+        self._checkpoint_runtime(
+            "sweeping",
+            f"{row['Direction']} leg sample {len(self._results)} at {row['B_measured_T']:+.6f} T",
+        )
 
     @staticmethod
     def _acquire_daq(daq, averages):
@@ -633,8 +980,15 @@ class BFieldTransportController(QtCore.QObject):
         """Update the visible progress/plot/log from each acquired row."""
         target = float(row.get("B_target_T", 0.0))
         start = float(self.plan.params.start_field_t)
-        span = abs(target - start) or 1.0
-        fraction = min(1.0, max(0.0, abs(float(row.get("B_measured_T", start)) - start) / span))
+        stop = float(self.plan.params.stop_field_t)
+        span = abs(stop - start) or 1.0
+        measured = float(row.get("B_measured_T", start))
+        if self._leg_index == 0:
+            leg_fraction = abs(measured - start) / span
+        else:
+            leg_fraction = abs(measured - stop) / span
+        legs = 2 if self.plan.params.round_trip else 1
+        fraction = (self._leg_index + min(1.0, max(0.0, leg_fraction))) / legs
         if hasattr(self.tab, "set_progress"):
             self.tab.set_progress(fraction)
         if hasattr(self.tab, "plot"):
@@ -656,8 +1010,7 @@ class BFieldTransportController(QtCore.QObject):
         if self._condition_index >= len(self.plan.conditions):
             self._cleanup("finished"); return
         self._start_condition()
-        self._target = self.plan.params.stop_field_t
-        self.magnet.start_transport_sweep(self._target)
+        self._begin_leg(0, self.plan.params.stop_field_t)
 
     def _note_heater_activation(self, result):
         """Record only a real OFF→ON transition for thermal interval gating."""
@@ -684,6 +1037,7 @@ class BFieldTransportController(QtCore.QObject):
         self._thermal_pause_pending = True
         self._thermal_hold = True
         self._row_persistent_ready_at = None
+        self._measurement_phase = "thermal_hold"
         self.state_changed.emit("thermal_warning", "Lake Shore warning; pausing APS100 until recovery dwell completes")
         try:
             self.magnet.pause()
@@ -780,6 +1134,28 @@ class BFieldTransportController(QtCore.QObject):
             return
         self._cleanup_in_progress = True
         self._cleanup_status, self._cleanup_detail = status, detail
+        if status == "finished":
+            try:
+                self._cleanup_final_mode = normalize_final_mode(
+                    getattr(getattr(self.plan, "params", None), "final_mode", "persistent")
+                )
+            except Exception:
+                # A malformed recipe must never weaken successful cleanup.
+                self._cleanup_final_mode = "persistent"
+        else:
+            self._cleanup_final_mode = "persistent"
+        if status == "finished" and not detail:
+            self._cleanup_detail = (
+                f"B-field Transport complete; final APS100 mode: {self._cleanup_final_mode}"
+            )
+        self._measurement_phase = "cleanup"
+        self._telemetry_watchdog.stop()
+        self.state_changed.emit("cleanup", detail or "Stopping APS100 transport safely")
+        self._checkpoint_runtime("cleanup", detail or "Stopping APS100 transport safely")
+        # Stop transport-owned polling before issuing cleanup operations.  The
+        # normal timer is restarted only by release_exclusive after all APS
+        # acknowledgements and restoration have completed.
+        self._set_transport_polling(False)
         self._cleanup_failures = []
         self._cleanup_waiting = "pause"
         self._cleanup_overdue_phases = set()
@@ -807,9 +1183,176 @@ class BFieldTransportController(QtCore.QObject):
         # signal; complete their cleanup immediately while real controllers
         # retain reservations until both operations acknowledge completion.
         if not hasattr(self.magnet, "operation_finished"):
-            try: self.magnet.enter_persistent_mode(zero_leads=True)
-            except Exception as exc: self._cleanup_failures.append(f"persistent cleanup failed: {exc}")
-            self._request_restore()
+            if self._cleanup_final_mode == "driven":
+                self._log("APS100 successful final mode is Driven; heater remains ON")
+                self._request_restore()
+            else:
+                self._begin_persistent_cleanup()
+
+    def _set_transport_polling(self, enabled):
+        setter = getattr(self.magnet, "set_polling_enabled", None)
+        if callable(setter):
+            try:
+                setter(bool(enabled))
+                self._log(f"APS100 transport telemetry polling {'enabled' if enabled else 'disabled'}")
+            except Exception as exc:
+                self._log(f"APS100 polling {'start' if enabled else 'stop'} request failed: {exc}")
+
+    def _refresh_snapshot(self):
+        refresher = getattr(self.magnet, "refresh_snapshot", None)
+        if callable(refresher):
+            try:
+                refresher()
+                self._log("APS100 transport telemetry immediate refresh requested")
+            except Exception as exc:
+                self._log(f"APS100 immediate telemetry refresh request failed: {exc}")
+
+    @staticmethod
+    def _watchdog_interval_ms():
+        interval = max(0.1, float(getattr(cfg.mcd, "field_poll_s", 0.2)))
+        return max(100, int(interval * 1000))
+
+    def _on_telemetry_watchdog(self):
+        if not self._active or self._cleanup_in_progress or self._measurement_phase != "sweeping":
+            return
+        now = time.monotonic()
+        telemetry_timeout = self._communication_timeout_s()
+        progress_timeout = getattr(self, "_progress_timeout_s", 0.0) or max(
+            telemetry_timeout * 4.0,
+            self._expected_leg_duration_s() * 1.5,
+        )
+        leg_timeout = getattr(self, "_leg_timeout_s", 0.0) or max(
+            float(getattr(cfg.mcd, "sweep_leg_timeout_s", 3600.0)),
+            progress_timeout + telemetry_timeout,
+        )
+        leg_started = getattr(self, "_leg_started_monotonic", None)
+        last_telemetry = getattr(self, "_last_telemetry_monotonic", None)
+        last_progress = getattr(self, "_last_progress_monotonic", None)
+        if leg_started is not None and now - leg_started > leg_timeout:
+            self._fail("APS100 sweep leg timed out; pausing magnet and preserving partial data")
+            return
+        if last_telemetry is None or now - last_telemetry > telemetry_timeout:
+            self._fail("APS100 telemetry watchdog timeout during sweep; pausing magnet and preserving partial data")
+            return
+        # Optional settling has its own bounded grace period.
+        # Firmware can report a limit overshoot before settling, but an
+        # oscillating endpoint must not suppress the progress watchdog for the
+        # full (possibly hours-long) derived leg timeout.
+        candidate_started = getattr(self, "_endpoint_candidate_started", None)
+        if candidate_started is not None:
+            endpoint_grace = self._endpoint_stability_grace_s()
+            if now - candidate_started <= endpoint_grace:
+                return
+            # Do not let out-of-window oscillation refresh ordinary field
+            # progress forever. Once this endpoint grace expires, the
+            # endpoint itself is the stalled operation and must fail safely.
+            self._fail("APS100 endpoint did not stabilize during sweep; pausing magnet and preserving partial data")
+            return
+        if last_progress is None or now - last_progress > progress_timeout:
+            self._fail("APS100 field progress watchdog timeout during sweep; pausing magnet and preserving partial data")
+
+    def _communication_timeout_s(self):
+        poll = max(0.1, float(getattr(cfg.magnet, "poll_interval_s", 0.5)))
+        # This is intentionally independent of sweep speed.  A lost serial
+        # poll is detected promptly even when a valid sweep takes hours.
+        return max(5.0, poll * 10.0)
+
+    def _position_tolerance_t(self):
+        """Scale APS positioning tolerance for short transport spans."""
+        plan = getattr(self, "plan", None)
+        if plan is None:
+            return float(cfg.magnet.field_tolerance_t)
+        span = abs(float(plan.params.stop_field_t) - float(plan.params.start_field_t))
+        configured = max(1e-6, float(getattr(cfg.magnet, "field_tolerance_t", 0.002)))
+        # Keep the commissioned default for ordinary spans, but do not let it
+        # accept a materially wrong endpoint on a short ±10 mT recipe.
+        return max(1e-5, min(configured, max(1e-5, span * 0.01)))
+
+    def _endpoint_tolerance_t(self):
+        plan = getattr(self, "plan", None)
+        if plan is None:
+            return float(getattr(cfg.magnet, "field_tolerance_t", 0.002))
+        span = abs(float(plan.params.stop_field_t) - float(plan.params.start_field_t))
+        configured = max(1e-6, float(getattr(cfg.magnet, "field_tolerance_t", 0.002)))
+        # APS100 resolution is better than 0.1 mT in this operating range;
+        # use a span-scaled window and retain the 2 mT ceiling for long scans.
+        return min(configured, max(APS100_FIELD_RESOLUTION_T, span * 0.01))
+
+    def _endpoint_stability_grace_s(self):
+        """Bound time spent waiting for endpoint settling/firmware status."""
+        return max(2.0, float(getattr(cfg.mcd, "transport_endpoint_settling_timeout_s", 120.0)))
+
+    def _endpoint_approach_ready(self, measured):
+        """Require arrival from the commanded direction, allowing readback resolution."""
+        params = self.plan.params
+        source = params.start_field_t if self._leg_index == 0 else params.stop_field_t
+        direction = 1.0 if self._target >= source else -1.0
+        previous = self._last_progress_field
+        if previous is None:
+            previous = source
+        return direction * (measured - previous) >= -APS100_FIELD_RESOLUTION_T - 1e-9
+
+    def _endpoint_stability_ready(self, measured, sweep_active, received_at):
+        tolerance = self._endpoint_tolerance or self._endpoint_tolerance_t()
+        target = self._target
+        if target is None or abs(float(measured) - float(target)) > tolerance + 1e-9:
+            self._endpoint_stable_reads = 0
+            self._endpoint_last_field = None
+            # Preserve the candidate grace timer across a brief overshoot or
+            # excursion.  Stability must restart from fresh in-window reads,
+            # but watchdog protection must remain bounded.
+            self._endpoint_hold_started = None
+            return False
+        low_change = (
+            self._endpoint_last_field is None
+            or abs(float(measured) - float(self._endpoint_last_field)) <= tolerance + 1e-9
+        )
+        self._endpoint_stable_reads = self._endpoint_stable_reads + 1 if low_change else 1
+        self._endpoint_last_field = float(measured)
+        if self._endpoint_candidate_started is None:
+            self._endpoint_candidate_started = received_at
+        if self._endpoint_hold_started is None:
+            self._endpoint_hold_started = received_at
+        reads = max(1, int(getattr(cfg.mcd, "endpoint_stable_reads", 3)))
+        dwell = max(0.0, float(getattr(cfg.mcd, "endpoint_dwell_s", 0.0)))
+        stable = self._endpoint_stable_reads >= reads and received_at - self._endpoint_hold_started >= dwell
+        # The active bit is not authoritative on firmware 1.67: it may remain
+        # set while the field is held at a limit. Conversely, a cleared bit at
+        # an overshoot must not promote that reading to a terminal sample.
+        return bool(stable)
+
+    def _expected_leg_duration_s(self):
+        plan = getattr(self, "plan", None)
+        if plan is None:
+            return 0.0
+        try:
+            rate = float(plan.params.rate_t_per_min)
+            distance = abs(float(plan.params.stop_field_t) - float(plan.params.start_field_t))
+            return distance / rate * 60.0 if rate > 0.0 else 0.0
+        except (TypeError, ValueError, ZeroDivisionError):
+            return 0.0
+
+    def _checkpoint_runtime(self, phase, detail=""):
+        if not self._checkpoint or self.plan is None:
+            return
+        runtime = {
+            "phase": str(phase),
+            "detail": str(detail),
+            "condition_index": self._condition_index + 1,
+            "leg_index": self._leg_index,
+            "target_field_t": self._target,
+        }
+        try:
+            write_series_manifest(
+                self._checkpoint,
+                params=self.plan.params,
+                validation=self.plan.validation,
+                status="running",
+                results=self._results,
+                runtime=runtime,
+            )
+        except OSError as exc:
+            self._log(f"checkpoint update failed: {exc}")
 
     def _log(self, message):
         if not self._log_path:

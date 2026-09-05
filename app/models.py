@@ -197,6 +197,9 @@ class BFieldTransportParams:
     # ``adaptive`` keeps the APS driven between rows whenever thermal
     # permission is safe; the other policies are explicit operator choices.
     cooldown_policy: str = "adaptive"
+    # Successful completion may leave the APS100 driven for a faster follow-up
+    # run; all stop/error/interlock paths still force persistent cleanup.
+    final_mode: str = "driven"
     acquisition_delay_s: float = 0.1
     averages: int = 1
     conditions: list[BFieldTransportCondition] = field(

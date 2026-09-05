@@ -8,7 +8,7 @@ from PyQt6.QtWidgets import QApplication
 
 from app.ui.magnet_panel import MagnetPanel
 from controllers.attodry2100_controller import AttoDRY2100Controller
-from controllers.magnet_controller import MagnetController
+from controllers.magnet_controller import MagnetController, _MagnetWorker
 from utils.config import AttoDRY2100Config
 from utils.config import cfg
 
@@ -92,6 +92,7 @@ class MagnetPanelTests(unittest.TestCase):
         self.assertEqual(self.a.calls[-1], ("connect", cfg.magnet.visa_resource, False))
         panel.deleteLater()
 
+
     def test_real_commands_require_review_and_revocation(self):
         self.panel._set_reviewed(True)
         self.panel._reviewed = False
@@ -162,6 +163,28 @@ class MagnetPanelTests(unittest.TestCase):
         clock[0] = 40.1
         self.panel._on_snapshot("1000", snapshot)
         self.assertEqual(len([line for line in self.panel.activity_log.toPlainText().splitlines() if "telemetry:" in line]), 2)
+
+    def test_heater_countdown_uses_live_updates_and_coarse_deduplicated_milestones(self):
+        self.panel.activity_log.clear()
+        self.panel._reset_activity_throttles()
+        for remaining in (120, 119, 91, 90, 89, 61, 60, 59, 31, 30, 29, 11, 10, 9, 1, 0, 0):
+            self.panel._on_progress("heater cooling", remaining)
+        lines = self.panel.activity_log.toPlainText().splitlines()
+        self.assertEqual(len([line for line in lines if "heater cooling:" in line]), 7)
+        self.assertIn("heater cooling: 0 s milestone", lines[-1])
+        self.assertEqual(self.panel.progress.format(), "heater cooling: 0.000 s")
+
+    def test_heater_countdown_starts_a_new_log_lifecycle_after_a_new_transition(self):
+        self.panel.activity_log.clear()
+        self.panel._reset_activity_throttles()
+        for remaining in (10, 9, 0):
+            self.panel._on_progress("heater cooling", remaining)
+        self.panel._on_progress("zeroing leads", 0.5)
+        for remaining in (10, 9, 0):
+            self.panel._on_progress("heater cooling", remaining)
+        lines = self.panel.activity_log.toPlainText().splitlines()
+        self.assertEqual(len([line for line in lines if "heater cooling: 10.000 s (started)" in line]), 2)
+        self.assertEqual(len([line for line in lines if "heater cooling: 0 s milestone" in line]), 2)
 
     def test_aps_telemetry_logs_state_transitions_but_not_numeric_changes(self):
         self.panel.activity_log.clear()
@@ -319,6 +342,96 @@ class MagnetPanelTests(unittest.TestCase):
         panel.deleteLater()
 
 
+class APS100TransportWorkerTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    @staticmethod
+    def _adapter(*, sweep_active=False, fail_rate=False):
+        class Adapter:
+            connected = True
+
+            def __init__(self):
+                self.calls = []
+
+            def get_rates(self):
+                self.calls.append("get_rates")
+                return {0: (40.0, 0.1)}
+
+            def get_limits_t(self):
+                self.calls.append("get_limits")
+                return (-1.0, 1.0)
+
+            def get_voltage_limit_v(self):
+                return 3.0
+
+            def take_remote(self):
+                self.calls.append("remote")
+
+            def set_rate_t_per_min(self, rate, **_kwargs):
+                self.calls.append(("rate", rate))
+                if fail_rate:
+                    raise RuntimeError("injected RATE failure")
+                return {0: rate}
+
+            def set_limits_t(self, low, high):
+                self.calls.append(("limits", low, high))
+                return (low, high)
+
+            def restore_rates(self, rates):
+                self.calls.append(("restore_rates", rates))
+
+            def get_status(self):
+                self.calls.append("status")
+                return SimpleNamespace(sweep_active=sweep_active)
+
+            def pause(self):
+                self.calls.append("pause")
+
+            def read_snapshot(self):
+                return SimpleNamespace(status=SimpleNamespace(
+                    quench=False, power_module_failure=False
+                ))
+
+        return Adapter()
+
+    def test_transport_configuration_takes_remote_before_rate(self):
+        worker = _MagnetWorker()
+        worker.adapter = self._adapter()
+        results = []
+        worker.transport_config_result.connect(results.append)
+
+        worker.configure_transport(0.05, 6.0)
+
+        self.assertTrue(results[-1]["success"])
+        self.assertLess(worker.adapter.calls.index("remote"), worker.adapter.calls.index(("rate", 0.05)))
+
+    def test_transport_configuration_rolls_back_after_mutation_failure(self):
+        worker = _MagnetWorker()
+        worker.adapter = self._adapter(fail_rate=True)
+        results = []
+        worker.transport_config_result.connect(results.append)
+
+        worker.configure_transport(0.05, 6.0)
+
+        self.assertFalse(results[-1]["success"])
+        self.assertIn(("restore_rates", {0: (40.0, 0.1)}), worker.adapter.calls)
+        self.assertIn(("limits", -1.0, 1.0), worker.adapter.calls)
+
+    def test_idle_pause_is_an_acknowledged_noop(self):
+        worker = _MagnetWorker()
+        worker.adapter = self._adapter(sweep_active=False)
+        finished = []
+        worker.operation_finished.connect(finished.append)
+
+        worker.pause()
+
+        self.assertNotIn("pause", worker.adapter.calls)
+        self.assertNotIn("remote", worker.adapter.calls)
+        self.assertEqual(finished[-1], "pause")
+
+
 class ExplicitMockControllerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -331,6 +444,9 @@ class ExplicitMockControllerTests(unittest.TestCase):
         controller.connect_instrument(use_mock=True)
         for _ in range(30):
             self.app.processEvents()
+            if identities:
+                break
+            QtCore.QThread.msleep(10)
         self.assertTrue(identities)
         controller.shutdown()
 

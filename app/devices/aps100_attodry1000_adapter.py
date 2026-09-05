@@ -80,7 +80,9 @@ class MagnetSnapshot:
     field_t: float
     output_field_t: float
     output_current_a: float
-    heater_on: bool
+    # ``None`` means the APS100 reported its documented transition state
+    # (PSHTR?=2); never turn that state into a false On/Off assertion.
+    heater_on: Optional[bool]
     sweep_state: str
     status: APS100Status
     lower_limit_t: float
@@ -90,14 +92,15 @@ class MagnetSnapshot:
     output_voltage_v: float
     units: str
     operating_mode: str
+    heater_state: Optional[int] = None
 
     @property
     def driven_mode(self) -> bool:
-        return self.heater_on
+        return self.heater_on is True
 
     @property
     def persistent_mode(self) -> bool:
-        return not self.heater_on
+        return self.heater_on is False
 
 
 _VALUE_UNIT_RE = re.compile(
@@ -133,6 +136,22 @@ def voltage_response_to_volts(value: str) -> float:
     return number
 
 
+def parse_heater_state(response: str | int | float) -> int:
+    """Parse the APS100 PSHTR? state without collapsing transition state 2."""
+    text = str(response).strip()
+    try:
+        value = float(text)
+    except (TypeError, ValueError) as exc:
+        raise APS100Error(
+            f"Invalid PSHTR? response {response!r}; expected 0 (OFF), 1 (ON), or 2 (transition)"
+        ) from exc
+    if not math.isfinite(value) or not value.is_integer() or int(value) not in {0, 1, 2}:
+        raise APS100Error(
+            f"Invalid PSHTR? response {response!r}; expected 0 (OFF), 1 (ON), or 2 (transition)"
+        )
+    return int(value)
+
+
 def decode_status_byte(raw: int | str) -> APS100Status:
     value = int(raw)
     if not 0 <= value <= 255:
@@ -165,6 +184,7 @@ class APS100AttoDry1000Adapter:
         maximum_rate_a_per_s: float = 0.0343,
         heater_warm_s: float = 60.0,
         heater_cool_s: float = 120.0,
+        heater_transition_timeout_s: float = 30.0,
         current_match_tolerance_a: float = 0.01,
         expect_echo: bool = True,
         resource_manager=None,
@@ -182,6 +202,7 @@ class APS100AttoDry1000Adapter:
         self.maximum_rate_a_per_s = float(maximum_rate_a_per_s)
         self.heater_warm_s = float(heater_warm_s)
         self.heater_cool_s = float(heater_cool_s)
+        self.heater_transition_timeout_s = max(0.1, float(heater_transition_timeout_s))
         self.current_match_tolerance_a = float(current_match_tolerance_a)
         self.expect_echo = bool(expect_echo)
         self._resource_manager = resource_manager
@@ -383,11 +404,14 @@ class APS100AttoDry1000Adapter:
     def get_sweep_state(self) -> str:
         return self._query("SWEEP?").strip().lower()
 
-    def get_heater_status(self) -> bool:
-        response = self._query("PSHTR?").strip()
-        if response not in {"0", "1"}:
-            raise APS100Error(f"Unexpected PSHTR? response: {response!r}")
-        return response == "1"
+    def get_heater_state(self) -> int:
+        """Return raw PSHTR? state: 0=OFF, 1=ON, 2=transition."""
+        return parse_heater_state(self._query("PSHTR?"))
+
+    def get_heater_status(self) -> Optional[bool]:
+        """Return stable heater state, or ``None`` while PSHTR? reports 2."""
+        state = self.get_heater_state()
+        return {0: False, 1: True}.get(state)
 
     def get_field_t(self) -> float:
         return field_response_to_tesla(
@@ -487,12 +511,13 @@ class APS100AttoDry1000Adapter:
             field_t = self.get_field_t()
             output_field_t = self.get_output_field_t()
             low_t, high_t = self.get_limits_t()
+            heater_state = self.get_heater_state()
             return MagnetSnapshot(
                 monotonic_s=time.monotonic(),
                 field_t=field_t,
                 output_field_t=output_field_t,
                 output_current_a=output_field_t / self.coil_constant_t_per_a,
-                heater_on=self.get_heater_status(),
+                heater_on={0: False, 1: True}.get(heater_state),
                 sweep_state=self.get_sweep_state(),
                 status=self.get_status(),
                 lower_limit_t=low_t,
@@ -502,6 +527,7 @@ class APS100AttoDry1000Adapter:
                 output_voltage_v=self.get_output_voltage_v(),
                 units=units,
                 operating_mode=operating_mode,
+                heater_state=heater_state,
             )
 
     def _validate_field(self, field_t: float) -> float:
@@ -609,7 +635,7 @@ class APS100AttoDry1000Adapter:
 
     def start_sweep_to(self, target_t: float) -> str:
         self._ensure_no_fault()
-        if not self.get_heater_status():
+        if self.get_heater_status() is not True:
             raise APS100SafetyError("Field sweep requires driven mode (heater ON)")
         current = self.get_field_t()
         direction = self._set_directional_target(target_t, current)
@@ -779,6 +805,51 @@ class APS100AttoDry1000Adapter:
             self._ensure_no_fault()
             self._sleep(min(0.5, remaining))
 
+    def _confirm_heater_state(
+        self,
+        expected: int,
+        *,
+        timeout_s: float,
+        stop_event=None,
+        progress: Optional[Callable[[str, float], None]] = None,
+        label: str,
+    ) -> int:
+        """Poll PSHTR? until a stable requested state is confirmed.
+
+        APS100 firmware 1.67 reports ``2`` while the persistent-switch heater
+        is changing state.  State 2 (and the opposite stable state) is safe
+        to observe while waiting, but neither may start a warm/cool dwell.
+        """
+        expected = int(expected)
+        if expected not in {0, 1}:
+            raise ValueError("heater confirmation target must be 0 or 1")
+        timeout = min(
+            max(0.1, float(timeout_s)),
+            max(0.1, float(self.heater_transition_timeout_s)),
+        )
+        deadline = time.monotonic() + timeout
+        last_state: Optional[int] = None
+        while True:
+            self._raise_if_stopped(stop_event)
+            # This also verifies the VISA/session state and APS fault bits on
+            # every confirmation poll; failures remain fail-closed.
+            self._ensure_no_fault()
+            state = self.get_heater_state()
+            last_state = state
+            remaining = max(0.0, deadline - time.monotonic())
+            if progress is not None:
+                progress(label, remaining)
+            if state == expected:
+                return state
+            if remaining <= 0.0:
+                break
+            self._sleep(min(0.2, remaining))
+        state_text = "unknown" if last_state is None else str(last_state)
+        target_text = "ON" if expected == 1 else "OFF"
+        raise APS100TimeoutError(
+            f"Timed out confirming APS100 heater {target_text}; last PSHTR?={state_text}"
+        )
+
     @staticmethod
     def _raise_if_stopped(stop_event) -> None:
         if stop_event is not None and stop_event.is_set():
@@ -794,7 +865,20 @@ class APS100AttoDry1000Adapter:
     ) -> None:
         """Safely match the leads, turn the heater on, and wait for warm-up."""
         self._ensure_no_fault()
-        if self.get_heater_status():
+        heater_state = self.get_heater_state()
+        if heater_state == 1:
+            return
+        if heater_state == 2:
+            self._confirm_heater_state(
+                1,
+                timeout_s=timeout_s,
+                stop_event=stop_event,
+                progress=progress,
+                label="heater transition to ON",
+            )
+            self._hold_transition(self.heater_warm_s, label="heater warming", progress=progress)
+            self._ensure_no_fault()
+            self._raise_if_stopped(stop_event)
             return
         magnet_t = self.get_field_t()
         output_t = self.get_output_field_t()
@@ -821,8 +905,13 @@ class APS100AttoDry1000Adapter:
                 f"Cannot enable heater: current mismatch is {mismatch_a:.6g} A"
             )
         self._write("PSHTR ON")
-        if not self.get_heater_status():
-            raise APS100SafetyError("APS100 did not report heater ON")
+        self._confirm_heater_state(
+            1,
+            timeout_s=timeout_s,
+            stop_event=stop_event,
+            progress=progress,
+            label="heater transition to ON",
+        )
         self._hold_transition(
             self.heater_warm_s,
             label="heater warming",
@@ -847,7 +936,23 @@ class APS100AttoDry1000Adapter:
         status = self.get_status()
         if status.sweep_active:
             self.pause()
-        if not self.get_heater_status():
+        try:
+            heater_state = self.get_heater_state()
+        except APS100Error as exc:
+            # A malformed status cannot authorize lead zeroing. Still issue
+            # the conservative OFF command once so cleanup attempts to leave
+            # the switch safe; the original parse error remains fatal and no
+            # cooling/zeroing path is entered without later confirmation.
+            try:
+                self._write("PSHTR OFF")
+            except Exception as off_exc:
+                raise APS100SafetyError(
+                    f"Invalid PSHTR? response during persistent cleanup; OFF command failed: {off_exc}"
+                ) from exc
+            raise APS100SafetyError(
+                f"Invalid PSHTR? response during persistent cleanup; heater OFF is unconfirmed: {exc}"
+            ) from exc
+        if heater_state == 0:
             if zero_leads and abs(self.get_output_field_t()) > 0.002:
                 self.zero_output(
                     tolerance_t=0.002,
@@ -869,8 +974,13 @@ class APS100AttoDry1000Adapter:
                 f"Cannot disable heater: current mismatch is {mismatch_a:.6g} A"
             )
         self._write("PSHTR OFF")
-        if self.get_heater_status():
-            raise APS100SafetyError("APS100 did not report heater OFF")
+        self._confirm_heater_state(
+            0,
+            timeout_s=timeout_s,
+            stop_event=stop_event,
+            progress=progress,
+            label="heater transition to OFF",
+        )
         self._hold_transition(
             self.heater_cool_s,
             label="heater cooling",
@@ -918,7 +1028,18 @@ class APS100AttoDry1000Adapter:
             self._ensure_no_fault()
         self._raise_if_stopped(stop_event)
 
-        heater_on = self.get_heater_status()
+        heater_state = self.get_heater_state()
+        if heater_state == 2:
+            # Resolve an in-flight switch transition before making any mode
+            # decision; state 2 is never treated as either safe mode.
+            heater_state = self._confirm_heater_state(
+                1 if mode == "driven" else 0,
+                timeout_s=timeout_s,
+                stop_event=stop_event,
+                progress=progress,
+                label=("heater transition to ON" if mode == "driven" else "heater transition to OFF"),
+            )
+        heater_on = heater_state == 1
         field_t = self.get_field_t()
         output_t = self.get_output_field_t()
         if not heater_on and mode == "persistent" and abs(field_t - target) <= abs(
@@ -1004,9 +1125,9 @@ class APS100AttoDry1000Adapter:
             raise APS100SafetyError(
                 f"Final field {snapshot.field_t:.6g} T does not match target {target:.6g} T"
             )
-        if mode == "driven" and not snapshot.heater_on:
+        if mode == "driven" and snapshot.heater_on is not True:
             raise APS100SafetyError("Final APS100 state is not Driven mode")
-        if mode == "persistent" and snapshot.heater_on:
+        if mode == "persistent" and snapshot.heater_on is not False:
             raise APS100SafetyError("Final APS100 state is not Persistent mode")
         if mode == "persistent" and zero_leads and abs(snapshot.output_field_t) > 0.002:
             raise APS100SafetyError("Persistent mode confirmed, but lead current is not zero")
@@ -1184,6 +1305,7 @@ class MockAPS100Adapter:
             output_voltage_v=0.0,
             units="kG",
             operating_mode=self.get_operating_mode(),
+            heater_state=1 if self._heater else 0,
         )
 
     def set_limits_t(self, low_t, high_t):

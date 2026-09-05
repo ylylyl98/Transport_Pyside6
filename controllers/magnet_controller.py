@@ -83,6 +83,7 @@ class _MagnetWorker(QObject):
                 maximum_rate_a_per_s=cfg.magnet.maximum_rate_a_per_s,
                 heater_warm_s=cfg.magnet.heater_warm_s,
                 heater_cool_s=cfg.magnet.heater_cool_s,
+                heater_transition_timeout_s=getattr(cfg.magnet, "heater_transition_timeout_s", 30.0),
                 current_match_tolerance_a=cfg.magnet.current_match_tolerance_a,
             )
             adapter = self.adapter
@@ -194,7 +195,16 @@ class _MagnetWorker(QObject):
     @Slot()
     def pause(self) -> None:
         self._stop_event.set()
-        self._run_simple("pause", lambda: self.adapter.pause())
+        def pause_if_active():
+            # SWEEP PAUSE is a remote-only operation and firmware 1.67 reports
+            # an execution error when it is sent while no sweep is active.
+            # The status byte is the authoritative indication that stopping is
+            # required, so make an idle pause an acknowledged no-op.
+            if self.adapter.get_status().sweep_active:
+                self.adapter.take_remote()
+                self.adapter.pause()
+
+        self._run_simple("pause", pause_if_active)
 
     @Slot()
     def enter_driven_mode(self) -> None:
@@ -234,7 +244,7 @@ class _MagnetWorker(QObject):
             self.error.emit(f"Enter persistent mode failed: {exc}")
             self.operation_finished.emit("failed:enter_persistent_mode")
 
-    @Slot(str, float, str, bool, bool, float, float)
+    @Slot(str, float, str, bool, bool, float, float, float)
     def safe_move_to_field(
         self,
         request_id: str,
@@ -244,6 +254,7 @@ class _MagnetWorker(QObject):
         persistent_field_confirmed: bool,
         settle_s: float,
         timeout_s: float,
+        tolerance_t: float | None = None,
     ) -> None:
         if self.adapter is None:
             message = "APS100 is not connected"
@@ -278,7 +289,10 @@ class _MagnetWorker(QObject):
                 float(target_t),
                 final_mode=str(final_mode),
                 zero_leads=bool(zero_leads),
-                tolerance_t=cfg.magnet.field_tolerance_t,
+                tolerance_t=(
+                    cfg.magnet.field_tolerance_t
+                    if tolerance_t is None else float(tolerance_t)
+                ),
                 settle_s=float(settle_s),
                 timeout_s=float(timeout_s),
                 persistent_field_confirmed=bool(persistent_field_confirmed),
@@ -360,18 +374,52 @@ class _MagnetWorker(QObject):
         if self.adapter is None:
             self.transport_config_result.emit({"success": False, "error": "APS100 is not connected"})
             return
+        rates = None
+        limits = None
+        mutation_started = False
+        phase = "capturing current APS100 settings"
         try:
             rates = self.adapter.get_rates()
             limits = self.adapter.get_limits_t()
             voltage = self.adapter.get_voltage_limit_v()
+            # RATE, LLIM and ULIM are remote-only APS100 commands.  A normal
+            # connection is intentionally read-only, so transport must acquire
+            # remote control explicitly before its first mutation.
+            phase = "taking APS100 remote control"
+            self.adapter.take_remote()
+            mutation_started = True
+            if self.adapter.get_status().sweep_active:
+                phase = "pausing the active APS100 sweep before configuration"
+                self.adapter.pause()
+            phase = "programming APS100 sweep rates"
             changed = self.adapter.set_rate_t_per_min(rate_t_per_min, max_abs_field_t=max_field_t)
+            phase = "programming APS100 field limits"
             actual_limits = self.adapter.set_limits_t(-max_field_t, max_field_t)
             self.transport_config_result.emit({
                 "success": True, "stored_rates": rates, "stored_limits": limits,
                 "voltage_limit_v": voltage, "rates": changed, "limits": actual_limits,
             })
         except Exception as exc:
-            self.transport_config_result.emit({"success": False, "error": str(exc)})
+            rollback_failures = []
+            if mutation_started:
+                try:
+                    self.adapter.restore_rates(rates)
+                except Exception as rollback_exc:
+                    rollback_failures.append(f"RATE rollback failed: {rollback_exc}")
+                try:
+                    self.adapter.set_limits_t(*limits)
+                except Exception as rollback_exc:
+                    rollback_failures.append(f"limit rollback failed: {rollback_exc}")
+            message = f"{phase} failed: {exc}"
+            if phase == "taking APS100 remote control":
+                message += "; close any front-panel menu and allow remote operation"
+            if rollback_failures:
+                message += "; " + "; ".join(rollback_failures)
+            self.transport_config_result.emit({
+                "success": False,
+                "error": message,
+                "rollback_failures": rollback_failures,
+            })
 
     @Slot(float)
     def start_transport_sweep(self, target_t: float) -> None:
@@ -434,7 +482,7 @@ class MagnetController(QObject):
     _pause_requested = Signal()
     _driven_requested = Signal()
     _persistent_requested = Signal(bool)
-    _safe_move_requested = Signal(str, float, str, bool, bool, float, float)
+    _safe_move_requested = Signal(str, float, str, bool, bool, float, float, float)
     _polling_requested = Signal(bool)
     _transport_config_requested = Signal(float, float)
     _transport_sweep_requested = Signal(float)
@@ -540,6 +588,15 @@ class MagnetController(QObject):
     def refresh_rates(self) -> None:
         self._rates_requested.emit()
 
+    def set_polling_enabled(self, enabled: bool) -> None:
+        """Enable/disable APS telemetry polling for an owning workflow.
+
+        Normal clients should not need this hook; transport uses it while it
+        holds the exclusive APS reservation because reservation intentionally
+        pauses the ordinary UI polling timer.
+        """
+        self._polling_requested.emit(bool(enabled))
+
     def take_remote(self) -> None:
         self._remote_requested.emit()
 
@@ -568,6 +625,7 @@ class MagnetController(QObject):
         persistent_field_confirmed: bool = False,
         settle_s: float = 2.0,
         timeout_s: float = 3600.0,
+        tolerance_t: float | None = None,
     ) -> str:
         request_id = uuid.uuid4().hex
         if not cfg.magnet.allow_remote_heater_control:
@@ -604,6 +662,7 @@ class MagnetController(QObject):
             bool(persistent_field_confirmed),
             float(settle_s),
             float(timeout_s),
+            float(cfg.magnet.field_tolerance_t if tolerance_t is None else tolerance_t),
         )
         return request_id
 

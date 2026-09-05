@@ -9,8 +9,10 @@ from __future__ import annotations
 
 from copy import deepcopy
 import json
+import math
 import os
 import re
+import time
 
 from PyQt6 import QtCore, QtWidgets
 
@@ -21,10 +23,12 @@ from app.engine.bfield_transport_sweep import (
     MAX_RATE_T_PER_MIN,
     COOLDOWN_POLICIES,
     COOLDOWN_POLICY_LABELS,
+    FINAL_MODES,
+    FINAL_MODE_LABELS,
     estimate_transport_times,
-    broadcast_condition_series,
     build_transport_output_paths,
     normalize_cooldown_policy,
+    normalize_final_mode,
     parse_condition_series,
     transport_output_summary_parts,
     BFieldTransportSafetyError,
@@ -61,6 +65,9 @@ class BFieldTransportTab(BaseMeasurementTab):
         self._locked = False
         self._execution_controller = None
         super().__init__("START B-FIELD SWEEP", "B-field (T)", "Ids (A)", ["g1", "g2", "g3", "daq"])
+        self.device_manager.status_changed.connect(self._on_device_status_changed)
+        self.device_manager.resources_changed.connect(self.refresh_hardware_readiness)
+        self._sync_measurement_statuses()
         self._load_settings()
         self._refresh_conditions()
         self.btn_start.clicked.connect(self.start_run)
@@ -109,6 +116,15 @@ class BFieldTransportTab(BaseMeasurementTab):
             "performs an acknowledged persistent cooldown between rows."
         )
         form.addRow("Between-row thermal policy:", self.cbo_cooldown_policy)
+        self.cbo_final_mode = SafeComboBox()
+        for mode in FINAL_MODES:
+            self.cbo_final_mode.addItem(FINAL_MODE_LABELS[mode], mode)
+        self.cbo_final_mode.setToolTip(
+            "On successful completion, Persistent cools and zeros the leads; "
+            "Driven leaves the heater ON at the final field. Stops, errors, "
+            "and interlocks always use conservative persistent cleanup."
+        )
+        form.addRow("Successful final APS100 mode:", self.cbo_final_mode)
         self.sp_ratio = SafeDoubleSpinBox()
         self.sp_ratio.setRange(-1e4, 1e4)
         self.sp_ratio.setDecimals(4)
@@ -200,11 +216,36 @@ class BFieldTransportTab(BaseMeasurementTab):
         values_row.addWidget(self.lbl_condition_add_second)
         values_row.addWidget(self.ed_condition_add_second, 1)
         builder_layout.addLayout(values_row)
+        vds_row = QtWidgets.QHBoxLayout()
+        vds_row.addWidget(QtWidgets.QLabel("Vds (V):"))
+        self.ed_condition_add_vds = QtWidgets.QLineEdit("0.1")
+        set_standard_input_height(self.ed_condition_add_vds)
+        vds_row.addWidget(self.ed_condition_add_vds, 1)
+        builder_layout.addLayout(vds_row)
+        syntax_hint = QtWidgets.QLabel(
+            "Single: 0 | List: -1,1,5 | Range: -1:1:0.5 (stop excluded). "
+            "Series pair row by row; single values repeat."
+        )
+        syntax_hint.setWordWrap(True)
+        syntax_hint.setProperty("role", "hint")
+        builder_layout.addWidget(syntax_hint)
+        for editor in (self.ed_condition_add_first, self.ed_condition_add_second, self.ed_condition_add_vds):
+            editor.setToolTip(syntax_hint.text() + " Maximum 100 conditions per addition.")
         self.lbl_condition_add_preview = QtWidgets.QLabel()
         self.lbl_condition_add_preview.setWordWrap(True)
         self.lbl_condition_add_preview.setProperty("role", "hint")
         self.lbl_condition_add_preview.setMinimumWidth(0)
         builder_layout.addWidget(self.lbl_condition_add_preview)
+        self.condition_add_preview_table = QtWidgets.QTableWidget(0, 6)
+        self.condition_add_preview_table.setHorizontalHeaderLabels(
+            ["#", "Doping", "E-field", "Vds (V)", "Vtg (V)", "Vbg (V)"]
+        )
+        self.condition_add_preview_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.condition_add_preview_table.verticalHeader().hide()
+        self.condition_add_preview_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        self.condition_add_preview_table.setMinimumWidth(0)
+        self.condition_add_preview_table.setFixedHeight(155)
+        builder_layout.addWidget(self.condition_add_preview_table)
         self.btn_condition_add_preview = QtWidgets.QPushButton("Add previewed conditions to table")
         builder_layout.addWidget(self.btn_condition_add_preview)
         ctl_layout.addWidget(builder)
@@ -220,6 +261,7 @@ class BFieldTransportTab(BaseMeasurementTab):
         self.cbo_condition_add_mode.currentIndexChanged.connect(self._condition_add_mode_changed)
         self.ed_condition_add_first.textChanged.connect(self._refresh_condition_add_preview)
         self.ed_condition_add_second.textChanged.connect(self._refresh_condition_add_preview)
+        self.ed_condition_add_vds.textChanged.connect(self._refresh_condition_add_preview)
         self.btn_condition_add_preview.clicked.connect(self._add_previewed_conditions)
         self.btn_condition_update.clicked.connect(self._update_selected)
         self.btn_condition_duplicate.clicked.connect(self._duplicate_condition)
@@ -258,7 +300,7 @@ class BFieldTransportTab(BaseMeasurementTab):
         self.lbl_connection_hint.setWordWrap(True)
         self.lbl_connection_hint.setProperty("role", "hint")
         ctl_layout.addWidget(self.lbl_connection_hint)
-        self.status_panel = StatusPanel(["g1", "g2", "g3", "daq"])
+        self.status_panel = StatusPanel(["aps100", "g1", "g2", "g3", "daq"])
         ctl_layout.addWidget(self.status_panel)
         self.sp_start.valueChanged.connect(self._refresh_rate_preview)
         self.sp_stop.valueChanged.connect(self._refresh_rate_preview)
@@ -267,6 +309,7 @@ class BFieldTransportTab(BaseMeasurementTab):
         self.sp_ratio.valueChanged.connect(self._refresh_ratio_preview)
         self.cbo_ratio_target.currentIndexChanged.connect(self._refresh_ratio_preview)
         self.cbo_cooldown_policy.currentIndexChanged.connect(self._refresh_rate_preview)
+        self.cbo_final_mode.currentIndexChanged.connect(self._refresh_rate_preview)
         self.ed_base.textChanged.connect(self.refresh_output_preview)
         self._condition_add_mode_changed()
         self._refresh_rate_preview()
@@ -292,6 +335,16 @@ class BFieldTransportTab(BaseMeasurementTab):
         except ValueError:
             policy = "adaptive"
         self.cbo_cooldown_policy.setCurrentIndex(max(0, self.cbo_cooldown_policy.findData(policy)))
+        # Migrate the old Persistent default once for quick successive sweeps.
+        # Subsequent explicit selections (including Persistent) are preserved.
+        if not settings.value("driven_default_applied", False, type=bool):
+            settings.setValue("final_mode", "driven")
+            settings.setValue("driven_default_applied", True)
+        try:
+            final_mode = normalize_final_mode(str(settings.value("final_mode", "driven")))
+        except ValueError:
+            final_mode = "driven"
+        self.cbo_final_mode.setCurrentIndex(max(0, self.cbo_final_mode.findData(final_mode)))
         self.sp_delay.setValue(float(settings.value("delay_s", self.params.acquisition_delay_s)))
         self.sp_averages.setValue(int(settings.value("averages", self.params.averages)))
         self.ed_base.setText(str(settings.value("base_name", self.params.base_name)))
@@ -330,6 +383,8 @@ class BFieldTransportTab(BaseMeasurementTab):
         settings.setValue("ratio_target", self.cbo_ratio_target.currentData() or RATIO_TARGET_VBG)
         settings.setValue("round_trip", self.chk_round_trip.isChecked())
         settings.setValue("cooldown_policy", self.cbo_cooldown_policy.currentData() or "adaptive")
+        settings.setValue("final_mode", self.cbo_final_mode.currentData() or "driven")
+        settings.setValue("driven_default_applied", True)
         settings.setValue("delay_s", self.sp_delay.value())
         settings.setValue("averages", self.sp_averages.value())
         settings.setValue("base_name", self.ed_base.text())
@@ -402,6 +457,7 @@ class BFieldTransportTab(BaseMeasurementTab):
         self._update_condition_buttons()
         self._refresh_condition_details()
         self.refresh_output_preview()
+        self.refresh_hardware_readiness()
 
     def _condition_from_row(self, row):
         def text(col):
@@ -489,11 +545,15 @@ class BFieldTransportTab(BaseMeasurementTab):
         first_label, second_label = (("Vtg", "Vbg") if gates else ("Doping", "E-field"))
         first = parse_condition_series(self.ed_condition_add_first.text(), first_label)
         second = parse_condition_series(self.ed_condition_add_second.text(), second_label)
-        pairs = broadcast_condition_series(first, second, first_label, second_label)
+        vds = parse_condition_series(self.ed_condition_add_vds.text(), "Vds")
+        count = max(len(first), len(second), len(vds))
+        if any(len(values) not in (1, count) for values in (first, second, vds)):
+            raise ValueError(f"{first_label}, {second_label}, and Vds must have equal lengths, or be single values")
+        columns = [values * count if len(values) == 1 else values for values in (first, second, vds)]
         ratio = float(self.sp_ratio.value())
         target = self.cbo_ratio_target.currentData() or RATIO_TARGET_VBG
         conditions = []
-        for first_value, second_value in pairs:
+        for first_value, second_value, vds_value in zip(*columns):
             if gates:
                 doping, efield = gates_to_derived(first_value, second_value, ratio, target)
             else:
@@ -502,36 +562,46 @@ class BFieldTransportTab(BaseMeasurementTab):
                 name="",
                 doping=doping,
                 efield=efield,
+                vds=vds_value,
                 ratio=ratio,
                 ratio_target=target,
             )
             condition.refresh_gates()
+            for device, label, value in (("g1", "Vtg", condition.vtg), ("g2", "Vbg", condition.vbg), ("g3", "Vds", condition.vds)):
+                if not math.isfinite(value):
+                    raise ValueError(f"{label} must be finite")
+                if self.device_manager.is_connected(device):
+                    limit = self.device_manager.applied_gate_voltage_limit(device)
+                    if abs(value) > limit + 1e-9:
+                        raise ValueError(f"{label} {value:g} V exceeds verified {device.upper()} limit {limit:g} V")
             conditions.append(condition)
         return conditions
 
     def _refresh_condition_add_preview(self, *_args):
         try:
             conditions = self._previewed_add_conditions()
-            lines = [f"Preview ({len(conditions)} condition{'s' if len(conditions) != 1 else ''}):"]
-            for index, condition in enumerate(conditions[:4], start=1):
-                lines.append(
-                    f"{index}. Doping {condition.doping:g}, E-field {condition.efield:g} "
-                    f"→ Vtg {condition.vtg:g} V, Vbg {condition.vbg:g} V"
-                )
-            if len(conditions) > 4:
-                lines.append(f"... {len(conditions) - 4} more")
-            self.lbl_condition_add_preview.setText("\n".join(lines))
+            self.condition_add_preview_table.setRowCount(len(conditions))
+            for index, condition in enumerate(conditions):
+                for column, value in enumerate((index + 1, condition.doping, condition.efield, condition.vds, condition.vtg, condition.vbg)):
+                    item = QtWidgets.QTableWidgetItem(f"{value:g}")
+                    item.setToolTip(f"{value:.12g}")
+                    self.condition_add_preview_table.setItem(index, column, item)
+            self.lbl_condition_add_preview.setText(
+                f"Preview ({len(conditions)} condition{'s' if len(conditions) != 1 else ''}): "
+                "One full B-field trajectory per row. Vds source: Keithley 2400."
+            )
             self.lbl_condition_add_preview.setToolTip(
                 "\n".join(
                     f"{index}. Doping {condition.doping:g}, E-field {condition.efield:g}, "
-                    f"Vtg {condition.vtg:g} V, Vbg {condition.vbg:g} V"
+                    f"Vtg {condition.vtg:g} V, Vbg {condition.vbg:g} V, Vds {condition.vds:g} V"
                     for index, condition in enumerate(conditions, start=1)
                 )
             )
             self.lbl_condition_add_preview.setProperty("role", "hint")
-            self.btn_condition_add_preview.setEnabled(True)
+            self.btn_condition_add_preview.setEnabled(not getattr(self, "_locked", False))
         except Exception as exc:
             self.lbl_condition_add_preview.setText(f"Cannot preview: {exc}")
+            self.condition_add_preview_table.setRowCount(0)
             self.lbl_condition_add_preview.setToolTip("")
             self.lbl_condition_add_preview.setProperty("role", "warning-hint")
             self.btn_condition_add_preview.setEnabled(False)
@@ -600,7 +670,9 @@ class BFieldTransportTab(BaseMeasurementTab):
             self.lbl_preview.setText(
                 "Ready: " + ("round trip" if self.chk_round_trip.isChecked() else "one-way")
                 + f" {self.sp_start.value():+.4g} → {self.sp_stop.value():+.4g} T; "
-                + f"{enabled} enabled condition(s); output preview: {planned.output_dir}"
+                + f"{enabled} enabled condition(s); final mode: "
+                + f"{FINAL_MODE_LABELS.get(self.cbo_final_mode.currentData(), 'Persistent')}; "
+                + f"output preview: {planned.output_dir}"
             )
             self.lbl_preview.setProperty("role", "hint")
             enabled_conditions = [condition for condition in self.conditions if condition.enabled]
@@ -642,6 +714,7 @@ class BFieldTransportTab(BaseMeasurementTab):
             ratio=float(self.sp_ratio.value()),
             ratio_target=normalize_ratio_target(self.cbo_ratio_target.currentData() or RATIO_TARGET_VBG),
             cooldown_policy=normalize_cooldown_policy(self.cbo_cooldown_policy.currentData() or "adaptive"),
+            final_mode=normalize_final_mode(self.cbo_final_mode.currentData() or "driven"),
             acquisition_delay_s=self.sp_delay.value(), averages=self.sp_averages.value(),
             conditions=deepcopy(self.conditions),
         )
@@ -667,6 +740,7 @@ class BFieldTransportTab(BaseMeasurementTab):
             rate_t_per_min=self.sp_rate.value(),
             round_trip=self.chk_round_trip.isChecked(),
             conditions=conditions,
+            final_mode=normalize_final_mode(self.cbo_final_mode.currentData() or "persistent"),
         )
 
     def freeze_output_plan(self, params=None):
@@ -756,11 +830,95 @@ class BFieldTransportTab(BaseMeasurementTab):
         self._locked = bool(locked)
         for widget in (self.sp_start, self.sp_stop, self.sp_rate, self.chk_round_trip, self.condition_table,
                        self.cbo_condition_add_mode, self.ed_condition_add_first,
-                       self.ed_condition_add_second, self.btn_condition_add_preview,
+                       self.ed_condition_add_second, self.ed_condition_add_vds, self.btn_condition_add_preview,
                        self.btn_condition_update, self.btn_condition_duplicate,
                        self.btn_condition_remove, self.btn_condition_up, self.btn_condition_down):
             widget.setEnabled(not self._locked)
         self.btn_stop.setEnabled(self._locked)
+        self.run_panel.set_running(self._locked)
+        self.refresh_hardware_readiness()
+
+    def _required_devices(self):
+        required = ["daq", "g1", "g2"]
+        if any(
+            condition.enabled and condition.vds_source == "Keithley 2400"
+            for condition in self.conditions
+        ):
+            required.append("g3")
+        return required
+
+    def _sync_measurement_statuses(self):
+        for name in ("g1", "g2", "g3", "daq"):
+            state = self.device_manager.state(name)
+            detail = self.device_manager.detail(name) if state in {"err", "warn"} else None
+            self.set_device_status(name, state, detail)
+        self.refresh_hardware_readiness()
+
+    def _on_device_status_changed(self, name, _state, _detail):
+        if name in {"g1", "g2", "g3", "daq"}:
+            self._sync_measurement_statuses()
+
+    def _sync_aps100_status(self, *_args):
+        controller = self._execution_controller
+        magnet = getattr(controller, "magnet", None) if controller is not None else None
+        if magnet is None or not bool(getattr(magnet, "is_connected", False)):
+            self.set_device_status("aps100", "idle")
+            self.refresh_hardware_readiness()
+            return
+        snapshot = getattr(magnet, "latest_snapshot", None)
+        status = getattr(snapshot, "status", None)
+        if bool(getattr(status, "quench", False)) or bool(
+            getattr(status, "power_module_failure", False)
+        ):
+            self.set_device_status("aps100", "err", "APS100 reports a magnet or power-module fault")
+        elif snapshot is None:
+            self.set_device_status("aps100", "warn", "Connected, but no telemetry has been received")
+        else:
+            age = getattr(snapshot, "reading_age_s", None)
+            if age is None and getattr(snapshot, "monotonic_s", None) is not None:
+                age = time.monotonic() - float(snapshot.monotonic_s)
+            if age is not None and (not math.isfinite(float(age)) or float(age) > 3.0):
+                self.set_device_status("aps100", "warn", "APS100 telemetry is stale")
+            else:
+                self.set_device_status("aps100", "ok")
+        self.refresh_hardware_readiness()
+
+    def refresh_hardware_readiness(self, *_args):
+        if not hasattr(self, "run_panel"):
+            return
+        blockers = []
+        missing = [name.upper() for name in self._required_devices() if not self.device_manager.is_connected(name)]
+        if missing:
+            blockers.append("connect " + ", ".join(missing))
+        controller = self._execution_controller
+        magnet = getattr(controller, "magnet", None) if controller is not None else None
+        if magnet is None or not bool(getattr(magnet, "is_connected", False)):
+            blockers.append("connect APS100")
+        else:
+            snapshot = getattr(magnet, "latest_snapshot", None)
+            age = getattr(snapshot, "reading_age_s", None) if snapshot is not None else None
+            if age is None and snapshot is not None and getattr(snapshot, "monotonic_s", None) is not None:
+                age = time.monotonic() - float(snapshot.monotonic_s)
+            if snapshot is None or (age is not None and (not math.isfinite(float(age)) or float(age) > 3.0)):
+                blockers.append("refresh APS100 telemetry")
+        thermal = getattr(controller, "thermal_safety", None) if controller is not None else None
+        if thermal is None or not bool(getattr(thermal, "is_armed", getattr(thermal, "armed", False))):
+            blockers.append("commission Lake Shore safety")
+        elif getattr(thermal, "latest_snapshot", None) is None:
+            blockers.append("refresh Lake Shore telemetry")
+        else:
+            try:
+                decision = thermal.evaluate(thermal.latest_snapshot)
+                if decision is None or not bool(getattr(decision, "magnet_permission", False)):
+                    blockers.append("Lake Shore safety hold")
+            except Exception:
+                blockers.append("Lake Shore safety evaluation failed")
+        self.run_panel.set_start_available(not blockers)
+        self.lbl_connection_hint.setText(
+            "Hardware ready for B-field transport."
+            if not blockers
+            else "Not ready: " + "; ".join(blockers) + "."
+        )
 
     def start_run(self):
         """Validate and freeze the recipe before a transport controller runs it."""
@@ -790,7 +948,37 @@ class BFieldTransportTab(BaseMeasurementTab):
 
     def set_execution_controller(self, controller):
         self._execution_controller = controller
+        magnet = getattr(controller, "magnet", None)
+        if magnet is not None:
+            if hasattr(magnet, "connected"):
+                magnet.connected.connect(self._sync_aps100_status)
+            if hasattr(magnet, "disconnected"):
+                magnet.disconnected.connect(self._sync_aps100_status)
+            if hasattr(magnet, "snapshot_updated"):
+                magnet.snapshot_updated.connect(self._sync_aps100_status)
+            if hasattr(magnet, "fault"):
+                magnet.fault.connect(
+                    lambda message: self.set_device_status("aps100", "err", str(message))
+                )
+        self._sync_aps100_status()
         controller.error.connect(lambda message: self.lbl_preview.setText(f"Transport error: {message}"))
-        controller.state_changed.connect(lambda phase, detail: self.lbl_preview.setText(f"{phase}: {detail}"))
-        controller.finished.connect(lambda: self.lbl_preview.setText("B-field Sweep complete"))
-        controller.stopped.connect(lambda message: self.lbl_preview.setText(str(message)))
+        controller.state_changed.connect(self._on_transport_state_changed)
+        controller.finished.connect(self._on_transport_finished)
+        controller.stopped.connect(self._on_transport_stopped)
+
+    def _on_transport_state_changed(self, phase, detail):
+        """Render controller phases in the run panel as well as the preview."""
+        phase = str(phase)
+        detail = str(detail or "")
+        self.lbl_preview.setText(f"{phase}: {detail}" if detail else phase)
+        state = phase if phase in {"configuring", "positioning", "biasing", "starting_sweep", "sweeping", "endpoint_hold", "transitioning", "cooldown", "thermal_hold", "thermal_warning", "resuming", "cleanup", "cleanup_overdue"} else "idle"
+        self.set_status(detail or phase, state, detail)
+
+    def _on_transport_finished(self):
+        self.lbl_preview.setText("B-field Sweep complete")
+        self.set_status("B-field Sweep complete", "finished")
+
+    def _on_transport_stopped(self, message):
+        text = str(message)
+        self.lbl_preview.setText(text)
+        self.set_status(text, "stopped")

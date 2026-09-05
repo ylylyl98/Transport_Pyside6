@@ -111,6 +111,7 @@ class DeviceStatusItem(QtWidgets.QWidget):
 
 class StatusPanel(QtWidgets.QGroupBox):
     STATUS_TEXT = {
+        "aps100": "APS100",
         "g1": "G1",
         "g2": "G2",
         "g3": "G3 / Vds",
