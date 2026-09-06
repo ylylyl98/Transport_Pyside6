@@ -363,7 +363,10 @@ class GateScanFieldBatch(QtCore.QObject):
                 raise ValueError("Add at least one enabled scan condition")
             self._validate_requests(requests)
             self._base_output_dir = self.tab._planned_output.output_dir
-            self._base_display_stem = self.tab._planned_output.display_stem
+            self._base_display_stem = (
+                f"{self.tab._planned_output.display_stem}_"
+                f"{datetime.now():%Y%m%d_%H%M%S}_{series_id[:12]}"
+            )
             preflight_thermal_hold = self._check_preflight(
                 fields, check_outputs=True, requests=requests
             )

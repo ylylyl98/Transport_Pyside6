@@ -17,6 +17,28 @@ from app.ui.tabs.gate_scan_tab import GateScanTab
 
 
 class GateScanRatioUiTests(unittest.TestCase):
+    def test_derived_coordinates_above_twenty_preserve_input_and_validate_gates(self):
+        tab = self._make_tab()
+        try:
+            tab.rad_mode_derived.setChecked(True)
+            tab.rad_sweep_doping.setChecked(True)
+            tab.cbo_ratio_target.setCurrentIndex(tab.cbo_ratio_target.findData("Vbg"))
+            tab.sp_ratio.setValue(1.15)
+            tab.sp_derived_fixed.setValue(0)
+            tab.sp_derived_start.setValue(30)
+            tab.sp_derived_stop.setValue(40)
+            self.assertEqual(tab.sp_derived_start.value(), 30)
+            self.assertEqual(tab.sp_derived_stop.value(), 40)
+            self.assertEqual(tab._derived_axis_bounds(), (-40, 40))
+            self.assertTrue(tab._validate_params())
+            tab.collect_params()
+            tab.validate_field_batch_request(tab.p)
+            tab.p.derived_stop = 41
+            with self.assertRaisesRegex(RuntimeError, "exceeds limit"):
+                tab.validate_field_batch_request(tab.p)
+        finally:
+            tab.close()
+
     @classmethod
     def setUpClass(cls):
         cls.app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])

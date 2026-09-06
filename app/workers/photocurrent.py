@@ -17,7 +17,7 @@ from app.constants import (
 )
 from app.models import Connections, PhotocurrentBiasCondition, PhotocurrentParams, SaveRoot
 from app.result_channels import KEITHLEY_CHANNEL
-from app.run_output import compose_output_stem, update_run_metadata_status, write_run_metadata
+from app.run_output import new_run_id, compose_output_stem, update_run_metadata_status, write_run_metadata
 from app.signal_chain import signal_chain_filename_parts
 from app.utils import safe_ramp
 from app.workers.base import RunStopped, RunWorker
@@ -130,7 +130,7 @@ class PhotocurrentWorker(RunWorker):
             total_points = len(conditions) * len(wavelengths)
 
             if not csv_path:
-                ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                ts = new_run_id()
                 tag_vds = "noVds"
                 if self.p.use_vds:
                     if self.p.vds_source.startswith("NI DAQ"):

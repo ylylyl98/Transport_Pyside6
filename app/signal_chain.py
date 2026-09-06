@@ -1,6 +1,29 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+import math
+
+
+def _positive(value: float) -> float:
+    value = float(value)
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError("Signal-chain sensitivity must be finite and positive")
+    return value
+
+
+def preamp_gain_v_per_a(sensitivity_a: float) -> float:
+    """Preamp front-panel sensitivity is amperes per volt of output."""
+    return 1.0 / _positive(sensitivity_a)
+
+
+def sr830_xy_output_gain(sensitivity_v: float) -> float:
+    """Analog X/Y BNC gain, with zero offset and unity expansion (SR830 manual)."""
+    return 10.0 / _positive(sensitivity_v)
+
+
+def current_from_lockin_daq_voltage(voltage_v, preamp_sensitivity_a, lockin_sensitivity_v):
+    return float(voltage_v) / (preamp_gain_v_per_a(preamp_sensitivity_a)
+                              * sr830_xy_output_gain(lockin_sensitivity_v))
 
 
 @dataclass(frozen=True)
@@ -14,11 +37,11 @@ class SignalChainSnapshot:
 
     @property
     def preamp_gain_v_per_a(self) -> float:
-        return 1.0 / max(float(self.preamp_sensitivity_a), 1e-30)
+        return preamp_gain_v_per_a(self.preamp_sensitivity_a)
 
     @property
     def lockin_scale(self) -> float:
-        return max(float(self.lockin_sensitivity_v), 1e-30) * 1000.0
+        return sr830_xy_output_gain(self.lockin_sensitivity_v)
 
     def to_dict(self) -> dict[str, object]:
         result = asdict(self)

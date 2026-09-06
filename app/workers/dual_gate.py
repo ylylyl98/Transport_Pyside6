@@ -16,7 +16,7 @@ from app.constants import (
 )
 from app.models import Connections, DualGateParams, SaveRoot
 from app.result_channels import KEITHLEY_CHANNEL
-from app.run_output import compose_output_stem, update_run_metadata_status, write_run_metadata
+from app.run_output import new_run_id, compose_output_stem, update_run_metadata_status, write_run_metadata
 from app.signal_chain import signal_chain_filename_parts
 from app.utils import _frange_inc, safe_ramp
 from app.workers.base import RunStopped, RunWorker
@@ -60,7 +60,7 @@ class DualGateWorker(RunWorker):
                     raise RuntimeError(f"{field} is {value:.3f} V, above the {V_LIMIT:.1f} V limit.")
 
             if not csv_path:
-                ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                ts = new_run_id()
                 tag_src = "VdsKeithley" if self.p.vds_source == "Keithley 2400" else f"VdsDAQ_ao{self.p.ao_channel}"
                 g1_tag = "Tg" if self.g1 else "NoTg"
                 g2_tag = "Bg" if self.g2 else "NoBg"

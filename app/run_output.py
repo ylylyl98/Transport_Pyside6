@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime
 import json
 import os
+import uuid
 from dataclasses import asdict, dataclass, is_dataclass
 from typing import Iterable
 
@@ -31,7 +32,7 @@ class PlannedOutput:
 
 
 def new_run_id() -> str:
-    return datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    return uuid.uuid4().hex[:12] + "_" + datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
 
 def sanitize_segment(value: str, fallback: str) -> str:

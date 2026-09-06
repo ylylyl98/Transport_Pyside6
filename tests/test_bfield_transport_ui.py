@@ -319,7 +319,7 @@ class BFieldTransportUiTests(unittest.TestCase):
         stem = self.tab._planned_output.display_stem
         self.assertIn("B_-1to2T_round_trip_rate_0.2Tpermin_1conditions", stem)
         self.assertIn("freq_1kHz_lia_20mV_preamp_100nA", stem)
-        self.assertIn("C01_Neutral_point.csv", self.tab.lbl_filename_preview.toPlainText())
+        self.assertIn("C01_Neutral_point_Doping_0_Efield_0_r_1xVbg.csv", self.tab.lbl_filename_preview.toPlainText())
         self.assertIn("series_manifest.json", self.tab.lbl_metadata_preview.toPlainText())
         self.assertIn("series_checkpoint.json", self.tab.lbl_metadata_preview.toPlainText())
 

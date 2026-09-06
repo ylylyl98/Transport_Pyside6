@@ -202,7 +202,7 @@ class BaseMeasurementTab(QtWidgets.QWidget):
         ctl_layout.addWidget(wrap)
 
     def set_output_preview_text(self, planned, warning: str = ""):
-        ds = planned.display_stem
+        ds = planned.stem
         self.lbl_filename_preview.setPlainText(ds + ".csv")
         self.lbl_filename_preview.setToolTip(planned.csv_path)
         self.lbl_path_preview.setPlainText(planned.output_dir)

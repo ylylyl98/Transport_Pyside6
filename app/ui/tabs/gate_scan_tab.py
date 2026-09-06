@@ -10,6 +10,7 @@ from app.gate_transform import (
     RATIO_TARGET_VBG,
     RATIO_TARGET_VTG,
     derived_to_gates,
+    derived_axis_limits,
     normalize_ratio_target,
     ratio_formula_text,
 )
@@ -393,6 +394,9 @@ class GateScanTab(BaseMeasurementTab):
             (self.sp_derived_fixed, 0.0),
         ):
             configure_volt_spinbox(spinbox, value)
+            # These are coordinates, not hardware voltages. Physical bounds
+            # depend on the ratio and held axis and are validated below.
+            spinbox.setRange(-1e12, 1e12)
 
         self.lbl_derived_start = QtWidgets.QLabel("Doping start:")
         self.lbl_derived_stop = QtWidgets.QLabel("Doping stop:")
@@ -961,16 +965,19 @@ class GateScanTab(BaseMeasurementTab):
         if self.rad_mode_raw.isChecked():
             return
         try:
+            low, high = self._derived_axis_bounds()
             gate_endpoints = self._derived_gate_endpoints()
             vtg_values = [vtg for vtg, _vbg in gate_endpoints]
             vbg_values = [vbg for _vtg, vbg in gate_endpoints]
             vtg_min, vtg_max = min(vtg_values), max(vtg_values)
             vbg_min, vbg_max = min(vbg_values), max(vbg_values)
             text = f"Vtg: {vtg_min:.3f} to {vtg_max:.3f} V\nVbg: {vbg_min:.3f} to {vbg_max:.3f} V"
-            warn = any(abs(v) > V_LIMIT for v in (*vtg_values, *vbg_values))
+            warn = any(not low - 1e-9 <= v <= high + 1e-9 for v in
+                       (self.sp_derived_start.value(), self.sp_derived_stop.value()))
+            text += f"\nAllowed sweep coordinate: {low:.3f} to {high:.3f}"
             self.lbl_derived_range.setProperty("role", "warning-hint" if warn else "hint")
             if warn:
-                text += f"   exceeds {V_LIMIT:.1f} V limit"
+                text += "   exceeds physical gate limits"
             vtg_step, vbg_step, vds_step = self._derived_gate_steps()
             text += f"\nSteps: Vtg {vtg_step:g} V/point, Vbg {vbg_step:g} V/point"
             if self._derived_vbias_is_swept():
@@ -1236,6 +1243,20 @@ class GateScanTab(BaseMeasurementTab):
         if self._batch_orchestrator is not None:
             self._batch_orchestrator.stop()
 
+    def validate_field_batch_request(self, params):
+        """Check frozen trajectory endpoints before any batch magnet movement."""
+        params = deepcopy(params)
+        # Linear trajectories attain their extrema at their endpoints.
+        params.n_points = 2
+        connections = deepcopy(self.conns)
+        for name, setting in (("g1", "gate1_max_voltage_v"), ("g2", "gate2_max_voltage_v"),
+                              ("g3", "gate3_max_voltage_v")):
+            applied = self.device_manager.applied_gate_voltage_limit(name)
+            if applied > 0:
+                setattr(connections, setting, min(applied, getattr(connections, setting)))
+        worker = LineSweepWorker(params, self.save, connections)
+        worker._validate_trajectory_limits(worker._build_trajectory())
+
     def capture_field_batch_params(self):
         window = self.window()
         if hasattr(window, "refresh_models_from_ui"):
@@ -1334,6 +1355,15 @@ class GateScanTab(BaseMeasurementTab):
         self.batch_start_button.setEnabled(batch_controls_enabled)
         self.batch_stop_button.setEnabled(self._batch_locked)
 
+    def _derived_axis_bounds(self):
+        limits = []
+        for name, setting in (("g1", "gate1_max_voltage_v"), ("g2", "gate2_max_voltage_v")):
+            applied = self.device_manager.applied_gate_voltage_limit(name)
+            limits.append(min(V_LIMIT, getattr(self.conns, setting), applied if applied > 0 else V_LIMIT))
+        return derived_axis_limits(self.sp_ratio.value(), self._ratio_target(),
+                                   "Doping" if self.rad_sweep_doping.isChecked() else "E-field",
+                                   self.sp_derived_fixed.value(), *limits)
+
     def _validate_params(self) -> bool:
         if self.rad_mode_raw.isChecked() and not any((self.chk_raw_vtg_active.isChecked(), self.chk_raw_vbg_active.isChecked(), self.chk_raw_vds_active.isChecked())):
             QtWidgets.QMessageBox.warning(self, "Invalid Sweep", "Raw trajectory needs at least one active variable.")
@@ -1341,6 +1371,15 @@ class GateScanTab(BaseMeasurementTab):
         if self.rad_mode_derived.isChecked() and abs(self.sp_ratio.value()) < 1e-12:
             QtWidgets.QMessageBox.warning(self, "Invalid Sweep", "Derived trajectory requires a non-zero ratio.")
             return False
+        if self.rad_mode_derived.isChecked():
+            try:
+                low, high = self._derived_axis_bounds()
+                if any(not low - 1e-9 <= v <= high + 1e-9 for v in
+                       (self.sp_derived_start.value(), self.sp_derived_stop.value())):
+                    raise ValueError(f"Derived sweep must be between {low:g} and {high:g} for the held coordinate and gate limits.")
+            except ValueError as exc:
+                QtWidgets.QMessageBox.warning(self, "Invalid Sweep", str(exc))
+                return False
         return True
 
     def start_run(self):

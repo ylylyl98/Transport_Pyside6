@@ -19,7 +19,7 @@ from app.keithley_modes import KEITHLEY_MODE_VOLTAGE_2W
 from app.models import CoParams, Connections, SaveRoot
 from app.plot_x_axis import record_x_value, resolve_map_x_axis
 from app.result_channels import KEITHLEY_CHANNEL
-from app.run_output import compose_output_stem, update_run_metadata_status, write_run_metadata
+from app.run_output import new_run_id, compose_output_stem, update_run_metadata_status, write_run_metadata
 from app.signal_chain import signal_chain_filename_parts
 from app.utils import _frange_inc, safe_ramp
 from app.workers.base import RunStopped, RunWorker
@@ -195,7 +195,7 @@ class CoSweepWorker(RunWorker):
             measurement_name = "map_2d" if slow_axis != "None" else "sweep_1d"
 
             if not csv_path:
-                ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                ts = new_run_id()
                 signal_tags = "_".join(signal_chain_filename_parts(self.signal_chain))
                 stem = compose_output_stem(
                     self.save.device_id,

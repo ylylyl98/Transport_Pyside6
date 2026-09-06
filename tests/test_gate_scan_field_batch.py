@@ -249,7 +249,7 @@ class GateScanFieldBatchTests(unittest.TestCase):
         self.magnet.safe_move_result.emit({"request_id": "move-1", "success": False, "error": "stopped"})
         self.assertEqual(self.magnet.owner, "")
 
-        # A fresh batch with an existing first-field CSV must not acquire or move.
+        # A prior run with the same conditions must not block a new series.
         self.magnet = _FakeMagnet()
         self.tab = _FakeTab(self.tmp.name)
         self.batch = GateScanFieldBatch(self.magnet, self.tab)
@@ -258,8 +258,33 @@ class GateScanFieldBatchTests(unittest.TestCase):
         first = os.path.join(self.tmp.name, "device_gate_scan_raw_keithley_g3_forward_B_0.5T.csv")
         open(first, "w", encoding="utf-8").close()
         with patch("app.engine.gate_scan_field_batch.QtWidgets.QMessageBox.question", return_value=QtWidgets.QMessageBox.StandardButton.Yes):
+            self.assertTrue(self.batch.start("0.5"))
+        self.assertTrue(any(call[0] == "move" for call in self.magnet.calls))
+        self.assertTrue(os.path.exists(first))
+
+    def test_current_output_collision_still_blocks_before_movement(self):
+        with patch("app.engine.gate_scan_field_batch.output_blocking_reason", return_value="CSV already exists"):
             self.assertFalse(self.batch.start("0.5"))
         self.assertFalse(any(call[0] == "move" for call in self.magnet.calls))
+
+    def test_repeat_completed_series_preserves_old_files(self):
+        paths = []
+        for _ in range(2):
+            self.batch._on_snapshot(_snapshot(0.0))
+            with patch("app.engine.gate_scan_field_batch.QtWidgets.QMessageBox.question", return_value=QtWidgets.QMessageBox.StandardButton.Yes):
+                self.assertTrue(self.batch.start("0.25"))
+            move = [call for call in self.magnet.calls if call[0] == "move"][-1]
+            self.magnet.safe_move_result.emit({"request_id": move[3], "success": True,
+                                              "snapshot": _snapshot(0.25), "audit": {}})
+            output = [call for call in self.tab.calls if call[0] == "start"][-1][1]
+            with open(output.csv_path, "x", encoding="utf-8") as handle:
+                handle.write("original data")
+            paths.append(output.csv_path)
+            self.tab.batch_run_terminal.emit("finished", output.csv_path)
+        self.assertNotEqual(*paths)
+        for path in paths:
+            with open(path, encoding="utf-8") as handle:
+                self.assertEqual(handle.read(), "original data")
 
     def test_non_aps100_backend_is_rejected_before_magnet_use(self):
         self.magnet = _FakeMagnet()
@@ -328,7 +353,7 @@ class GateScanFieldBatchTests(unittest.TestCase):
         self.assertEqual(len(starts), 2)
         output = starts[0][1]
         self.assertTrue(output.csv_path.endswith("_B_0.25T.csv"))
-        self.assertNotIn("202", os.path.basename(output.csv_path))
+        self.assertRegex(os.path.basename(output.csv_path), r"_\d{8}_\d{6}_[0-9a-f]{12}_B_")
         second_output = starts[1][1]
         self.assertTrue(second_output.csv_path.endswith("_B_-0.5T.csv"))
         self.assertNotIn("_B_0.25T_B_", os.path.basename(second_output.csv_path))
@@ -726,11 +751,8 @@ class GateScanFieldBatchTests(unittest.TestCase):
             "request_id": move[3], "success": True,
             "snapshot": _snapshot(0.25), "audit": {},
         })
+        path = self.batch._batch_log_path
         self.tab.batch_run_terminal.emit("finished", "field.csv")
-        path = os.path.join(
-            self.tmp.name,
-            "device_gate_scan_raw_keithley_g3_forward_bfield_batch_log.txt",
-        )
         with open(path, encoding="utf-8") as handle:
             before = handle.read()
         self.assertTrue(os.path.exists(path))

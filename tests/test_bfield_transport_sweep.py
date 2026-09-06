@@ -619,8 +619,8 @@ class BFieldTransportSweepTests(unittest.TestCase):
         )
         paths = build_transport_output_paths(planned, params.conditions)
         self.assertIn("B_-0.5to0.5T_round_trip_rate_0.1Tpermin_2conditions", planned.stem)
-        self.assertTrue(paths.condition_csv_paths[0].endswith("_C01_Neutral_point.csv"))
-        self.assertTrue(paths.condition_csv_paths[1].endswith("_C02_High_doping.csv"))
+        self.assertTrue(paths.condition_csv_paths[0].endswith("_C01_Neutral_point_Doping_0_Efield_0_r_1xVbg.csv"))
+        self.assertTrue(paths.condition_csv_paths[1].endswith("_C02_High_doping_Doping_0_Efield_0_r_1xVbg.csv"))
         self.assertIn(paths.manifest_path, paths.all_paths)
 
     def test_adaptive_is_default_and_policy_estimates_preserve_trajectory(self):

@@ -22,6 +22,20 @@ from app.ui.tabs.photocurrent_tab import PhotocurrentTab
 
 
 class SignalChainUiTests(unittest.TestCase):
+    def test_dock_calibration_matches_physical_ranges(self):
+        with patch.object(ConnDock, "_start_scan"):
+            dock = ConnDock()
+        try:
+            for sensitivity in (0.001, 0.01, 0.1, 1):
+                for preamp in (1e-9, 1e-7, 1e-5):
+                    dock.sp_amp.setValue(preamp)
+                    dock.sp_lkn.setValue(sensitivity)
+                    amp, lockin = dock.get_rates()
+                    self.assertAlmostEqual(amp * preamp, 1)
+                    self.assertAlmostEqual(lockin * sensitivity, 10)
+        finally:
+            dock.close()
+
     @classmethod
     def setUpClass(cls):
         cls.app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])

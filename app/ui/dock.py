@@ -10,7 +10,7 @@ from app.device_manager import DeviceManager
 from app.hw_discovery import scan_all
 from app.keithley_modes import KEITHLEY_MODE_LABELS, keithley_mode_label, keithley_mode_options
 from app.models import Connections, SaveRoot
-from app.signal_chain import engineering_value
+from app.signal_chain import engineering_value, preamp_gain_v_per_a, sr830_xy_output_gain
 from app.settings import get_app_settings
 from app.ui.helpers import apply_tooltip, configure_volt_spinbox, flash_button_success, set_standard_input_height, style_form_layout
 from app.ui.widgets.collapsible_section import CollapsibleSection
@@ -434,9 +434,7 @@ class ConnDock(QtWidgets.QWidget):
             )
         preamp_sensitivity_a = max(float(self.sp_amp.value()), self.AMP_MIN_A)
         lockin_sensitivity_v = max(float(self.sp_lkn.value()), self.LIA_MIN_V)
-        amp_v_per_a = 1.0 / preamp_sensitivity_a
-        lockin_legacy_scale = lockin_sensitivity_v * 1000.0
-        return amp_v_per_a, lockin_legacy_scale
+        return preamp_gain_v_per_a(preamp_sensitivity_a), sr830_xy_output_gain(lockin_sensitivity_v)
 
     def signal_chain_values(self) -> dict[str, float | str]:
         return {

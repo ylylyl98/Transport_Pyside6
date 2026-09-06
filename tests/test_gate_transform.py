@@ -6,6 +6,7 @@ from app.gate_transform import (
     RATIO_TARGET_VBG,
     RATIO_TARGET_VTG,
     derived_to_gates,
+    derived_axis_limits,
     gates_to_derived,
 )
 from app.models import Connections, LineSweepParams, SaveRoot
@@ -13,6 +14,19 @@ from app.workers.line_sweep import LineSweepWorker
 
 
 class GateTransformTests(unittest.TestCase):
+    def test_derived_bounds_match_physical_gates(self):
+        self.assertEqual(derived_axis_limits(1.15, "Vbg", "Doping", 0, 20, 20), (-40, 40))
+        for target in ("Vtg", "Vbg"):
+            for ratio in (1.15, -0.5, 3):
+                for axis in ("Doping", "E-field"):
+                    low, high = derived_axis_limits(ratio, target, axis, 2, 10, 20)
+                    for value in (low, high):
+                        d, e = (value, 2) if axis == "Doping" else (2, value)
+                        top, bottom = derived_to_gates(d, e, ratio, target)
+                        self.assertLessEqual(abs(top), 10 + 1e-9)
+                        self.assertLessEqual(abs(bottom), 20 + 1e-9)
+                        self.assertTrue(abs(abs(top) - 10) < 1e-9 or abs(abs(bottom) - 20) < 1e-9)
+
     def test_forward_inverse_round_trip_for_both_ratio_targets(self):
         for target in (RATIO_TARGET_VBG, RATIO_TARGET_VTG):
             for ratio in (2.5, -1.25):

@@ -173,7 +173,9 @@ def build_transport_output_paths(
         condition_paths.append(
             os.path.join(
                 planned.output_dir,
-                f"{planned.stem}_C{index:02d}_{condition_name}.csv",
+                f"{planned.stem}_C{index:02d}_{condition_name}"
+                f"_Doping_{condition.doping:g}_Efield_{condition.efield:g}"
+                f"_r_{condition.ratio:g}x{condition.ratio_target}.csv",
             )
         )
     return BFieldTransportOutputPaths(

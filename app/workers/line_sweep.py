@@ -19,7 +19,7 @@ from app.gate_transform import derived_to_gates, gates_to_derived
 from app.models import Connections, LineSweepParams, SaveRoot
 from app.plot_x_axis import record_x_value, resolve_gate_scan_x_axis
 from app.result_channels import KEITHLEY_CHANNEL
-from app.run_output import compose_output_stem, update_run_metadata_status, write_run_metadata
+from app.run_output import new_run_id, compose_output_stem, update_run_metadata_status, write_run_metadata
 from app.signal_chain import signal_chain_filename_parts
 from app.utils import safe_ramp
 from app.workers.base import RunStopped, RunWorker
@@ -72,7 +72,7 @@ class LineSweepWorker(RunWorker):
             self._validate_trajectory_limits(trajectory)
 
             if not csv_path:
-                ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                ts = new_run_id()
                 signal_tags = "_".join(signal_chain_filename_parts(self.signal_chain))
                 stem = compose_output_stem(
                     self.save.device_id,
@@ -303,8 +303,12 @@ class LineSweepWorker(RunWorker):
         for point in trajectory:
             for name in ("vtg", "vbg", "vds"):
                 value = float(point[name])
-                if abs(value) > V_LIMIT:
-                    raise RuntimeError(f"{name.upper()} exceeds limit at {value:.3f} V (limit {V_LIMIT:.1f} V)")
+                gate = {"vtg": "gate1", "vbg": "gate2", "vds": "gate3"}[name]
+                limit = min(V_LIMIT, float(getattr(self.conns, gate + "_max_voltage_v", V_LIMIT)))
+                if name == "vds" and self.p.vds_source != "Keithley 2400":
+                    limit = V_LIMIT
+                if not math.isfinite(value) or abs(value) > limit + 1e-9:
+                    raise RuntimeError(f"{name.upper()} exceeds limit at {value:.3f} V (limit {limit:.1f} V)")
 
     def _build_trajectory(self) -> list[dict[str, float]]:
         return self._build_raw_trajectory() if self.p.mode == "Raw" else self._build_derived_trajectory()

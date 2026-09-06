@@ -468,14 +468,14 @@ class BFieldGateScanTab(GateScanTab):
         self.p = deepcopy(params)
         self._batch_params = deepcopy(params)
 
-    @staticmethod
-    def validate_field_batch_request(params):
+    def validate_field_batch_request(self, params):
         """Validate a frozen condition without depending on current widgets."""
         if params.mode == "Raw":
             if not any((params.raw_vtg_active, params.raw_vbg_active, params.raw_vds_active)):
                 raise ValueError("Raw trajectory needs at least one active variable")
         elif abs(float(params.derived_ratio)) < 1e-12:
             raise ValueError("Derived trajectory requires a non-zero ratio")
+        super().validate_field_batch_request(params)
 
     def _apply_batch_lock(self):
         """Lock every editor while the reserved series owns the instruments."""
