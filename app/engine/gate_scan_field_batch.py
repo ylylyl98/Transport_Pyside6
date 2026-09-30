@@ -11,7 +11,7 @@ import os
 import time
 import uuid
 
-from PyQt6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtWidgets
 
 from app.models import LineSweepParams
 from app.run_output import PlannedOutput, field_output_tag, output_blocking_reason, to_jsonable
@@ -55,14 +55,14 @@ class GateScanFieldBatch(QtCore.QObject):
     frozen for metadata, collision checks, and checkpoint records.
     """
 
-    state_changed = QtCore.pyqtSignal(str, str)
-    progress_changed = QtCore.pyqtSignal(int, int, str)
+    state_changed = QtCore.Signal(str, str)
+    progress_changed = QtCore.Signal(int, int, str)
     # Structured events are consumed by the B-field tab and also persisted in
     # the series log.  The existing signals remain for compatibility.
-    activity = QtCore.pyqtSignal(object)
-    error = QtCore.pyqtSignal(str)
-    finished = QtCore.pyqtSignal()
-    stopped = QtCore.pyqtSignal(str)
+    activity = QtCore.Signal(object)
+    error = QtCore.Signal(str)
+    finished = QtCore.Signal()
+    stopped = QtCore.Signal(str)
 
     # Keep the expansion bounded even when a typo such as ``0:1000000:0.1``
     # is entered.  This is a limit on the complete ordered series, including

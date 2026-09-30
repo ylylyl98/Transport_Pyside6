@@ -19,7 +19,7 @@ from typing import Iterable, Mapping
 
 from app.gate_transform import derived_to_gates
 from app.models import BFieldTransportCondition, BFieldTransportParams
-from app.run_output import PlannedOutput, sanitize_segment
+from app.run_output import PlannedOutput, sanitize_segment, promote_experiment_metadata
 from app.signal_chain import signal_chain_filename_parts
 from utils.config import cfg
 
@@ -128,13 +128,13 @@ def transport_output_summary_parts(
     signal_chain=None,
 ) -> list[str]:
     """Return the filename tags shared by the transport preview and runner."""
-    direction = "round_trip" if params.round_trip else "one_way"
+    direction = "RT" if params.round_trip else "Fwd"
     enabled_count = sum(1 for condition in params.conditions if condition.enabled)
     parts = [
-        f"B_{params.start_field_t:g}to{params.stop_field_t:g}T",
+        f"B{params.start_field_t:g}to{params.stop_field_t:g}T",
         direction,
-        f"rate_{params.rate_t_per_min:g}Tpermin",
-        f"{enabled_count}conditions",
+        f"{params.rate_t_per_min:g}Tpermin",
+        f"{enabled_count}cond",
     ]
     if signal_chain is not None:
         parts.extend(signal_chain_filename_parts(signal_chain))
@@ -173,9 +173,9 @@ def build_transport_output_paths(
         condition_paths.append(
             os.path.join(
                 planned.output_dir,
-                f"{planned.stem}_C{index:02d}_{condition_name}"
-                f"_Doping_{condition.doping:g}_Efield_{condition.efield:g}"
-                f"_r_{condition.ratio:g}x{condition.ratio_target}.csv",
+                f"{planned.display_stem}_C{index:02d}_{condition_name}"
+                f"_Doping{condition.doping:g}_E{condition.efield:g}_Vds{condition.vds:g}V"
+                f"_r{condition.ratio_target}{condition.ratio:g}_{planned.run_id}.csv",
             )
         )
     return BFieldTransportOutputPaths(
@@ -503,7 +503,7 @@ def write_series_manifest(path: str, *, params: BFieldTransportParams, validatio
         payload["runtime"] = dict(runtime)
     temporary = path + ".tmp"
     with open(temporary, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, indent=2, default=str)
+        json.dump(promote_experiment_metadata(payload), handle, indent=2, default=str)
         handle.write("\n")
     os.replace(temporary, path)
 

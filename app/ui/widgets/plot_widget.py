@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from PyQt6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtWidgets
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 
 
 class PlotWidget(QtWidgets.QWidget):
-    y_axis_changed = QtCore.pyqtSignal(str)
-    plot_mode_changed = QtCore.pyqtSignal(str)
+    y_axis_changed = QtCore.Signal(str)
+    plot_mode_changed = QtCore.Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)

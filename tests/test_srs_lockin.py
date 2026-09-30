@@ -7,7 +7,7 @@ from threading import RLock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6 import QtCore, QtTest, QtWidgets
+from PySide6 import QtCore, QtTest, QtWidgets
 
 from app.device_manager import DeviceManager
 from app.models import Connections
@@ -103,6 +103,25 @@ class SRSLockinPanelTests(unittest.TestCase):
     def tearDown(self):
         self.panel.close()
 
+    def test_quiet_gate_read_completion_restores_refresh_without_unlocking_sweep(self):
+        from types import SimpleNamespace
+        self.manager.sessions["lockin"] = object()
+        self.manager._emit_status("lockin", "ok", "Stanford Research Systems,SR830,1,1.07")
+        for locked in (False, True):
+            with self.subTest(locked=locked):
+                if locked:
+                    self.manager.mark_in_use(["lockin"])
+                self.manager._gate_current_worker = SimpleNamespace(
+                    readbacks={}, message="Quiet read finished", quiet=True,
+                    deleteLater=lambda: None)
+                self.panel._update_enabled()
+                self.assertFalse(self.panel.btn_refresh.isEnabled())
+                self.manager._finish_gate_current_read()
+                self.assertEqual(self.panel.btn_refresh.isEnabled(), not locked)
+                self.assertEqual(self.panel.btn_apply.isEnabled(), not locked)
+                if locked:
+                    self.manager.release(["lockin"])
+
     def test_sr850_frequency_is_only_editable_for_plain_internal_reference(self):
         self.panel._apply_capabilities(LOCKIN_PROFILES["SR850"])
         self.assertEqual(
@@ -161,13 +180,13 @@ class SRSLockinPanelTests(unittest.TestCase):
         self.assertEqual(self.panel.cbo_sensitivity.currentIndex(), sensitivity_index)
         stop_requests = QtTest.QSignalSpy(self.panel.stop_sweep_requested)
         self.panel.btn_stop_for_settings.click()
-        self.assertEqual(len(stop_requests), 1)
+        self.assertEqual(stop_requests.count(), 1)
         self.assertFalse(self.panel.btn_stop_for_settings.isEnabled())
         self.assertIn("Safe stop requested", self.panel.lbl_message.text())
 
         self.manager.release(["daq", "lockin"])
 
-        self.assertGreaterEqual(len(usage_changes), 2)
+        self.assertGreaterEqual(usage_changes.count(), 2)
         self.assertFalse(self.panel.cbo_sensitivity.isReadOnly())
         self.assertFalse(self.panel.sp_phase.isReadOnly())
         self.assertTrue(self.panel.btn_apply.isEnabled())

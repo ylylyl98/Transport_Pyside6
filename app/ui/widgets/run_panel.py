@@ -1,13 +1,18 @@
 from __future__ import annotations
 
-from PyQt6 import QtWidgets
-from PyQt6.QtCore import Qt
+from PySide6 import QtWidgets
+from PySide6.QtCore import Qt, Signal
 
 
 class RunPanel(QtWidgets.QWidget):
+    running_changed = Signal(bool)
+    status_changed = Signal()
+    readiness_changed = Signal()
+
     def __init__(self, start_text: str, parent=None):
         super().__init__(parent)
         self._running = False
+        self._phase_state = "idle"
         self._start_available = True
         self._external_start_blocks: set[str] = set()
         layout = QtWidgets.QVBoxLayout(self)
@@ -20,11 +25,11 @@ class RunPanel(QtWidgets.QWidget):
         self.btn_start.setProperty("role", "primary")
         self.btn_start.setMinimumHeight(36)
         self.btn_start.setMaximumHeight(36)
-        self.btn_stop = QtWidgets.QPushButton("STOP")
+        self.btn_stop = QtWidgets.QPushButton("Stop measurement")
+        self.btn_stop.setToolTip("Stop only this measurement using its existing safe shutdown sequence")
         self.btn_stop.setProperty("role", "danger")
         self.btn_stop.setMinimumHeight(36)
         self.btn_stop.setMaximumHeight(36)
-        self.btn_stop.setMaximumWidth(80)
         self.progress = QtWidgets.QProgressBar()
         self.progress.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.progress.setRange(0, 100)
@@ -36,6 +41,9 @@ class RunPanel(QtWidgets.QWidget):
 
         status_row = QtWidgets.QHBoxLayout()
         status_row.setSpacing(6)
+        self.lbl_phase = QtWidgets.QLabel("Idle")
+        self.lbl_phase.setProperty("role", "phase-label")
+        status_row.addWidget(self.lbl_phase)
         self.lbl_status = QtWidgets.QLabel("Idle")
         self.lbl_status.setProperty("role", "run-status")
         self.btn_status_details = QtWidgets.QToolButton()
@@ -52,25 +60,34 @@ class RunPanel(QtWidgets.QWidget):
         self.set_status_text("Idle", "idle")
 
     def set_running(self, running: bool):
+        changed = self._running != bool(running)
         self._running = bool(running)
         self._refresh_start_enabled()
         self.btn_stop.setEnabled(self._running)
+        if changed:
+            self.running_changed.emit(self._running)
 
     def set_start_available(self, available: bool):
         """Set the tab-owned start condition without overriding external gates."""
+        changed = self._start_available != bool(available)
         self._start_available = bool(available)
         self._refresh_start_enabled()
+        if changed:
+            self.readiness_changed.emit()
 
     def set_start_blocked(self, source: str, blocked: bool):
         """Add or remove one independent start block."""
         key = str(source).strip()
         if not key:
             raise ValueError("Start-block source must not be empty")
+        changed = (key in self._external_start_blocks) != bool(blocked)
         if blocked:
             self._external_start_blocks.add(key)
         else:
             self._external_start_blocks.discard(key)
         self._refresh_start_enabled()
+        if changed:
+            self.readiness_changed.emit()
 
     def _refresh_start_enabled(self):
         self.btn_start.setEnabled(
@@ -83,14 +100,45 @@ class RunPanel(QtWidgets.QWidget):
         self.progress.setValue(int(max(0.0, min(1.0, fraction)) * 100))
 
     def set_status_text(self, text: str, state: str = "idle", detail: str = ""):
+        self._phase_state = state
+        self.lbl_phase.setText(self.phase_label(state, text))
         self._status_detail = detail.strip()
         self.lbl_status.setText(text)
+        self.lbl_status.setVisible(str(text).casefold() != self.lbl_phase.text().casefold())
         self.lbl_status.setProperty("state", state)
         self.lbl_status.style().unpolish(self.lbl_status)
         self.lbl_status.style().polish(self.lbl_status)
         self.lbl_status.setToolTip(self._status_detail or text)
         self.btn_status_details.setVisible(bool(self._status_detail))
         self.btn_status_details.setToolTip("Open full status details" if self._status_detail else "")
+        self.status_changed.emit()
+
+    def operation_active(self):
+        # Some workers finish before their asynchronous zero-return completes.
+        return self._running or self._phase_state in {"stopping", "cleanup", "cleanup_overdue"}
+
+    @staticmethod
+    def phase_label(state, text=""):
+        phases = {
+            "idle": "Idle", "preparing": "Preparing", "configuring": "Preparing",
+            "biasing": "Positioning", "positioning": "Positioning", "moving": "Positioning",
+            "starting_sweep": "Preparing", "transitioning": "Positioning", "resuming": "Preparing",
+            "thermal_wait": "Waiting", "settling": "Waiting", "cooldown": "Waiting",
+            "thermal_hold": "Waiting", "thermal_warning": "Waiting", "endpoint_hold": "Waiting",
+            "measuring": "Acquiring", "sweeping": "Acquiring", "stopping": "Stopping",
+            "cleanup": "Stopping", "cleanup_overdue": "Stopping", "finished": "Complete",
+            "complete": "Complete", "stopped": "Stopped", "failed": "Error", "error": "Error",
+        }
+        if state == "done":
+            return "Stopped" if str(text).lower().startswith("stopped") else "Complete"
+        if state == "running":
+            lower = str(text).lower()
+            if lower.startswith("ramping"):
+                return "Positioning"
+            if lower.startswith("point "):
+                return "Acquiring"
+            return "Running"
+        return phases.get(state, str(state).replace("_", " ").capitalize())
 
     def _show_details(self):
         if not self._status_detail:

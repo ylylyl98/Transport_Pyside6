@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6 import QtTest, QtWidgets
+from PySide6 import QtTest, QtWidgets
 
 from app.device_manager import DeviceManager
 from app.models import Connections, SaveRoot
@@ -50,7 +50,7 @@ class SignalChainUiTests(unittest.TestCase):
         self.assertEqual(engineering_value(5e6, "V/A"), "5MV/A")
         self.assertEqual(
             signal_chain_filename_parts(snapshot),
-            ["freq_1kHz", "lia_20mV", "preamp_100nA"],
+            ["1kHz", "LIA20mV", "Pre100nA"],
         )
         metadata = snapshot.to_dict()
         self.assertEqual(metadata["preamp_gain_v_per_a"], 1e7)
@@ -70,11 +70,11 @@ class SignalChainUiTests(unittest.TestCase):
         try:
             for tab in tabs:
                 parts = tab._output_summary_parts()
-                self.assertIn("freq_1kHz", parts)
-                self.assertIn("lia_20mV", parts)
-                self.assertIn("preamp_100nA", parts)
+                tags = ["1kHz", "LIA20mV", "Pre100nA"]
+                for tag in tags:
+                    self.assertIn(tag, parts)
                 tab.refresh_output_preview()
-                self.assertIn("freq_1kHz_lia_20mV_preamp_100nA", tab._planned_output.stem)
+                self.assertIn("_".join(tags), tab._planned_output.stem)
         finally:
             for tab in tabs:
                 tab.close()
@@ -119,7 +119,7 @@ class SignalChainUiTests(unittest.TestCase):
 
         dock.sp_amp.setValue(200e-9)
 
-        self.assertGreaterEqual(len(changed), 1)
+        self.assertGreaterEqual(changed.count(), 1)
         self.assertIn("Active: 200 nA - saved", dock.lbl_amp_status.text())
         self.assertIn("gain 5 MV/A", dock.lbl_amp_status.text())
         self.assertEqual(dock.lbl_amp_status.property("role"), "success-hint")
@@ -128,6 +128,11 @@ class SignalChainUiTests(unittest.TestCase):
     def test_run_start_passes_the_snapshot_and_matching_rates_to_every_worker(self):
         snapshot = SignalChainSnapshot(137.0, 0.02, 500e-9)
         manager = DeviceManager(Connections())
+        # Argument-routing test: provide cached source capabilities so the
+        # independent CoSweep precision preflight can run without hardware.
+        for name in ("g1", "g2", "g3"):
+            manager.sessions[name] = SimpleNamespace(
+                identity="MODEL 2400", cached_source_voltage_range_v=20.0)
         manager.mark_in_use = lambda _devices: (True, [])
         manager.release = lambda _devices: None
         save = SaveRoot()

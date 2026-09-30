@@ -6,7 +6,7 @@ import math
 import os
 import time
 
-from PyQt6 import QtCore
+from PySide6 import QtCore
 
 from app.constants import (
     GATE_BIAS_RAMP_STEP_T,
@@ -20,7 +20,7 @@ from app.models import Connections, LineSweepParams, SaveRoot
 from app.plot_x_axis import record_x_value, resolve_gate_scan_x_axis
 from app.result_channels import KEITHLEY_CHANNEL
 from app.run_output import new_run_id, compose_output_stem, update_run_metadata_status, write_run_metadata
-from app.signal_chain import signal_chain_filename_parts
+from app.measurement_output import gate_scan_filename_parts
 from app.utils import safe_ramp
 from app.workers.base import RunStopped, RunWorker
 
@@ -51,7 +51,7 @@ class LineSweepWorker(RunWorker):
         self._last_vbg = None
         self._last_vds = None
 
-    @QtCore.pyqtSlot()
+    @QtCore.Slot()
     def run(self):
         csv_path = self.p.output_csv_path
         run_status = "error"
@@ -73,12 +73,11 @@ class LineSweepWorker(RunWorker):
 
             if not csv_path:
                 ts = new_run_id()
-                signal_tags = "_".join(signal_chain_filename_parts(self.signal_chain))
                 stem = compose_output_stem(
                     self.save.device_id,
                     "gate_scan",
                     self.p.base_name,
-                    (signal_tags,),
+                    gate_scan_filename_parts(self.p, self.signal_chain),
                     ts,
                 )
                 csv_path = os.path.join(self.save.path(), stem + ".csv")

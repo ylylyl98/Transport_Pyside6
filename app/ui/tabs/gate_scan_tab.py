@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from copy import deepcopy
 
-from PyQt6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtWidgets
 
 from app.constants import V_LIMIT
+from app.measurement_output import gate_scan_filename_parts
 from app.device_manager import DeviceManager
 from app.gate_transform import (
     RATIO_TARGET_VBG,
@@ -26,9 +27,9 @@ from app.plot_x_axis import (
 from app.result_channels import compare_channel_options, plot_channel_options, plot_channel_value
 from app.run_output import build_planned_output, planned_output_warning
 from app.settings import get_app_settings
-from app.signal_chain import SignalChainSnapshot, signal_chain_filename_parts, signal_chain_metadata
+from app.signal_chain import SignalChainSnapshot, signal_chain_metadata
 from app.ui.helpers import apply_tooltip, configure_volt_spinbox, set_standard_input_height, style_form_layout
-from app.ui.tabs.base_tab import BaseMeasurementTab
+from app.ui.tabs.base_tab import BaseMeasurementTab, run_filename_snapshot
 from app.ui.widgets.collapsible_section import CollapsibleSection
 from app.ui.widgets.safe_combo import SafeComboBox
 from app.ui.widgets.safe_spinbox import SafeDoubleSpinBox, SafeSpinBox
@@ -43,8 +44,8 @@ class GateScanTab(BaseMeasurementTab):
     PANEL_MAX_WIDTH = 500
     PANEL_DEFAULT_WIDTH = 420
 
-    batch_run_started = QtCore.pyqtSignal()
-    batch_run_terminal = QtCore.pyqtSignal(str, str)
+    batch_run_started = QtCore.Signal()
+    batch_run_terminal = QtCore.Signal(str, str)
 
     def __init__(self, save: SaveRoot, conns: Connections, device_manager: DeviceManager, get_global_rates_callable=None, get_ao_items_callable=None, get_signal_chain_callable=None, include_field_batch: bool = False, start_text: str = "START SWEEP"):
         self.save = save
@@ -97,7 +98,7 @@ class GateScanTab(BaseMeasurementTab):
         self._update_manual_buttons()
 
     def _build_control_panel(self, ctl_layout: QtWidgets.QVBoxLayout):
-        ctl_layout.addWidget(SectionHeader("Mode"))
+        ctl_layout.addWidget(SectionHeader("1. Sweep mode"))
         grp_mode = QtWidgets.QGroupBox("Gate Scan Mode")
         lay_mode = QtWidgets.QVBoxLayout(grp_mode)
         lay_mode.setContentsMargins(10, 18, 10, 10)
@@ -139,13 +140,20 @@ class GateScanTab(BaseMeasurementTab):
         set_standard_input_height(self.chk_sweep_bidirectional)
         ctl_layout.addWidget(grp_mode)
 
-        ctl_layout.addWidget(SectionHeader("Trajectory"))
+        ctl_layout.addWidget(SectionHeader("2. Sweep range and held biases"))
         self.raw_trajectory_widget = self._build_raw_mode_widget()
         self.derived_trajectory_widget = self._build_derived_mode_widget()
         ctl_layout.addWidget(self.raw_trajectory_widget)
         ctl_layout.addWidget(self.derived_trajectory_widget)
+        source_group = QtWidgets.QWidget()
+        source_form = QtWidgets.QFormLayout(source_group)
+        self.cbo_source = SafeComboBox()
+        self.cbo_source.addItems(["Keithley 2400"])
+        lbl_source = QtWidgets.QLabel("Vds Source:")
+        source_form.addRow(lbl_source, self.cbo_source)
+        ctl_layout.addWidget(source_group)
 
-        ctl_layout.addWidget(SectionHeader("Acquisition"))
+        ctl_layout.addWidget(SectionHeader("3. Acquisition and waiting"))
         grp_acq = QtWidgets.QGroupBox("Timing")
         form_acq = QtWidgets.QFormLayout(grp_acq)
         style_form_layout(form_acq)
@@ -172,12 +180,10 @@ class GateScanTab(BaseMeasurementTab):
         self.exp_timing = CollapsibleSection("Timing", grp_acq, expanded=False)
         ctl_layout.addWidget(self.exp_timing)
 
-        ctl_layout.addWidget(SectionHeader("Output"))
+        ctl_layout.addWidget(SectionHeader("4. Output files"))
         grp_output = QtWidgets.QGroupBox("Output and Plot")
         form_output = QtWidgets.QFormLayout(grp_output)
         style_form_layout(form_output)
-        self.cbo_source = SafeComboBox()
-        self.cbo_source.addItems(["Keithley 2400"])
         self.cbo_x = SafeComboBox()
         for axis in PLOT_X_AXES:
             self.cbo_x.addItem(axis, axis)
@@ -187,11 +193,9 @@ class GateScanTab(BaseMeasurementTab):
         self.cbo_y = SafeComboBox()
         self.cbo_y.addItems(["Ids_DC", "Ids_X", "Ids_Y"])
         self.ed_base = QtWidgets.QLineEdit(self.p.base_name)
-        lbl_source = QtWidgets.QLabel("Vds Source:")
         lbl_x = QtWidgets.QLabel("Plot X Axis:")
         lbl_y = QtWidgets.QLabel("Plot Y Axis:")
         lbl_base = QtWidgets.QLabel("Filename Stem:")
-        form_output.addRow(lbl_source, self.cbo_source)
         form_output.addRow(lbl_x, self.cbo_x)
         form_output.addRow("", self.lbl_x_resolved)
         form_output.addRow(lbl_y, self.cbo_y)
@@ -628,35 +632,22 @@ class GateScanTab(BaseMeasurementTab):
         self.btn_derived_vbias_swept.toggled.connect(self.refresh_output_preview)
 
     def _output_summary_parts(self) -> list[str]:
-        source = "keithley_g3" if self.cbo_source.currentText() == "Keithley 2400" else self.cbo_source.currentText()
-        mode = "raw" if self.rad_mode_raw.isChecked() else "derived"
-        direction = "forward_backward" if self.chk_sweep_bidirectional.isChecked() else "forward"
-        parts = [mode, source, direction]
-        if self.rad_mode_raw.isChecked():
-            for axis, start, stop, active in (
-                ("Vtg", self.sp_raw_vtg_start.value(), self.sp_raw_vtg_stop.value(), self.chk_raw_vtg_active.isChecked()),
-                ("Vbg", self.sp_raw_vbg_start.value(), self.sp_raw_vbg_stop.value(), self.chk_raw_vbg_active.isChecked()),
-                ("Vds", self.sp_raw_vds_start.value(), self.sp_raw_vds_stop.value(), self.chk_raw_vds_active.isChecked()),
-            ):
-                parts.append(f"{axis}_{start:g}to{stop:g}V" if active else f"fixed_{axis}_{start:g}V")
-            parts.extend(signal_chain_filename_parts(self.get_signal_chain()))
-            return parts
-
-        axis = "Doping" if self.rad_sweep_doping.isChecked() else "E-field"
-        fixed_axis = "E-field" if self.rad_sweep_doping.isChecked() else "Doping"
-        parts.extend(
-            [
-                f"ratio_on_{self._ratio_target()}_r_{self.sp_ratio.value():g}",
-                f"{axis}_{self.sp_derived_start.value():g}to{self.sp_derived_stop.value():g}V",
-                f"fixed_{fixed_axis}_{self.sp_derived_fixed.value():g}V",
-            ]
+        params = LineSweepParams(
+            mode="Raw" if self.rad_mode_raw.isChecked() else "Derived",
+            sweep_both_ways=self.chk_sweep_bidirectional.isChecked(),
+            derived_axis="Doping" if self.rad_sweep_doping.isChecked() else "E-field",
+            derived_start=self.sp_derived_start.value(), derived_stop=self.sp_derived_stop.value(),
+            derived_fixed=self.sp_derived_fixed.value(),
+            derived_ratio=self.sp_ratio.value(), derived_ratio_target=self._ratio_target(),
+            derived_vds_mode=self._derived_vbias_mode_text(),
+            derived_vds_start=self.sp_derived_vds_start.value(), derived_vds_stop=self.sp_derived_vds_stop.value(),
+            derived_vds_fixed=self.sp_derived_vds_fixed.value(),
         )
-        if self._derived_vbias_is_swept():
-            parts.append(f"Vds_{self.sp_derived_vds_start.value():g}to{self.sp_derived_vds_stop.value():g}V")
-        else:
-            parts.append(f"fixed_Vds_{self.sp_derived_vds_fixed.value():g}V")
-        parts.extend(signal_chain_filename_parts(self.get_signal_chain()))
-        return parts
+        for axis in ("vtg", "vbg", "vds"):
+            setattr(params, f"raw_{axis}_active", getattr(self, f"chk_raw_{axis}_active").isChecked())
+            for endpoint in ("start", "stop"):
+                setattr(params, f"raw_{axis}_{endpoint}", getattr(self, f"sp_raw_{axis}_{endpoint}").value())
+        return gate_scan_filename_parts(params, self.filename_signal_chain())
 
     def refresh_output_preview(self, *_args) -> None:
         if self._batch_output_override is not None:
@@ -1039,21 +1030,21 @@ class GateScanTab(BaseMeasurementTab):
         missing_modes = self._missing_mode_requirements()
         mode_text = "raw trajectory" if self.rad_mode_raw.isChecked() else "derived trajectory"
         if self.device_manager.is_busy():
-            text = "Hardware is busy with another connection or disconnect operation from Instrument Setup."
+            text = "Hardware is busy with another connection or disconnect operation from Devices."
             self.lbl_connection_hint.setProperty("role", "warning-hint")
             self.btn_start.setToolTip("Wait for the dock connection operation to finish")
         elif missing_required:
-            text = f"Required before start for {mode_text}: {', '.join(missing_required)}. Connect from Instrument Setup."
+            text = f"Required before start for {mode_text}: {', '.join(missing_required)}. Connect from Devices."
             self.lbl_connection_hint.setProperty("role", "warning-hint")
-            self.btn_start.setToolTip(f"Connect required devices from Instrument Setup: {', '.join(missing_required)}")
+            self.btn_start.setToolTip(f"Connect required devices from Devices: {', '.join(missing_required)}")
         elif missing_modes:
             text = (
                 f"{mode_text.capitalize()} requires 2-wire voltage source mode for: "
                 + ", ".join(missing_modes)
-                + ". Update the Keithley mode in Instrument Setup and reconnect."
+                + ". Update the Keithley mode in Devices and reconnect."
             )
             self.lbl_connection_hint.setProperty("role", "warning-hint")
-            self.btn_start.setToolTip("Set the required Keithley mode in Instrument Setup, then reconnect")
+            self.btn_start.setToolTip("Set the required Keithley mode in Devices, then reconnect")
         else:
             text = f"Ready to run {mode_text} with dock-managed sessions."
             self.lbl_connection_hint.setProperty("role", "hint")
@@ -1261,7 +1252,7 @@ class GateScanTab(BaseMeasurementTab):
         window = self.window()
         if hasattr(window, "refresh_models_from_ui"):
             window.refresh_models_from_ui()
-        calibration = self.verified_run_calibration()
+        calibration = self.verified_run_calibration(capture_settings=False)
         if calibration is None:
             raise ValueError("Signal-chain verification failed")
         self.refresh_output_preview()
@@ -1280,6 +1271,18 @@ class GateScanTab(BaseMeasurementTab):
             return False
         self._batch_params = deepcopy(params)
         self.p = deepcopy(params)
+        try:
+            if calibration is None:
+                calibration = self.verified_run_calibration()
+                if calibration is None:
+                    self.release_run_devices()
+                    return False
+            else:
+                calibration = (*calibration[:2], self.capture_run_signal_chain(calibration[2]))
+        except Exception as ex:
+            self.release_run_devices()
+            QtWidgets.QMessageBox.warning(self, "Experiment Conditions", str(ex))
+            return False
         self._batch_calibration = calibration
         self._batch_devices_claimed = True
         self._batch_locked = True
@@ -1382,17 +1385,16 @@ class GateScanTab(BaseMeasurementTab):
                 return False
         return True
 
+    @run_filename_snapshot
     def start_run(self):
         if self.worker_thread:
             return
         mw = self.window()
         if hasattr(mw, "refresh_models_from_ui"):
             mw.refresh_models_from_ui()
-        calibration = self.verified_run_calibration()
+        calibration = self._batch_calibration if self._batch_starting else self.verified_run_calibration()
         if calibration is None:
             return
-        if self._batch_starting and self._batch_calibration is not None:
-            calibration = self._batch_calibration
         amp, lkn, signal_chain = calibration
         self.refresh_output_preview()
         if not self.validate_output_ready(self.save):
@@ -1445,7 +1447,7 @@ class GateScanTab(BaseMeasurementTab):
             self.worker_thread.finished.connect(self._cleanup_thread)
             self._set_mode_selector_enabled(False)
             self.run_panel.set_running(True)
-            self.set_status("Running...", "running")
+            self.set_status("Starting measurement...", "preparing")
             self.progress.setValue(0)
             self.worker_thread.start()
         except Exception as ex:
@@ -1457,7 +1459,7 @@ class GateScanTab(BaseMeasurementTab):
 
     def stop_run(self):
         if self.worker:
-            self.set_status("Stopping safely...", "running", "Stop requested. Waiting for the worker to reach a safe checkpoint and ramp outputs to 0 V.")
+            self.set_status("Stopping safely...", "stopping", "Stop requested. Waiting for the worker to reach a safe checkpoint and ramp outputs to 0 V.")
             self.worker.request_stop()
 
     def _cleanup_thread(self):

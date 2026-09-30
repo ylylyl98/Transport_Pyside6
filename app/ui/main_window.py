@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import sys
 
-from PyQt6 import QtWidgets
-from PyQt6.QtCore import Qt
+from PySide6 import QtWidgets
+from PySide6.QtCore import Qt
 
 from app.app_identity import APP_NAME, configure_qapp, set_windows_app_id
 from app.device_manager import DeviceManager
@@ -16,6 +16,8 @@ from controllers.lakeshore335_controller import LakeShore335Controller
 from app.thermal_safety import ThermalSafetyEvaluator
 from app.signal_chain import SignalChainSnapshot
 from app.ui.dock import ConnDock
+from app.ui.instrument_workspace import InstrumentWorkspace
+from app.ui.measurement_workflow import MeasurementWorkflow
 from app.ui.lockin_panel import LockinPanel
 from app.ui.magnet_panel import MagnetPanel
 from app.ui.style import APP_STYLE
@@ -41,60 +43,26 @@ class MainWindow(QtWidgets.QMainWindow):
         if app is not None and not app.windowIcon().isNull():
             self.setWindowIcon(app.windowIcon())
         self.resize(1400, 860)
-        self.view_menu = self.menuBar().addMenu("View")
+        self.workspace_menu = QtWidgets.QMenuBar()
+        self.view_menu = self.workspace_menu.addMenu("View")
 
         # One owner per physical magnet system for the lifetime of the window.
         # Controllers start worker threads but do not open hardware until the
         # operator passes the panel's commissioning review gate.
         self.magnet1000 = MagnetController(parent=self)
         self.magnet2100 = AttoDRY2100Controller(config=cfg.attodry2100, parent=self)
+        self._experiment_2100_field = None
+        self._experiment_2100_temperature = None
+        self.magnet2100.snapshot_updated.connect(lambda value: setattr(self, "_experiment_2100_field", value))
+        self.magnet2100.temperature_updated.connect(lambda value: setattr(self, "_experiment_2100_temperature", value))
         # LS335 is a read-only external monitor dedicated to the APS100
         # B-field workflow; it is deliberately not shared with the 2100 path.
         self.lakeshore335 = LakeShore335Controller(parent=self)
         self.thermal_safety = ThermalSafetyEvaluator(cfg.lakeshore335)
         self.magnet_panel = MagnetPanel(self.magnet1000, self.magnet2100, self, self.lakeshore335, self.thermal_safety)
-        self.magnet_dock = QtWidgets.QDockWidget("Magnet Control", self)
-        self.magnet_scroll = QtWidgets.QScrollArea()
-        self.magnet_scroll.setWidgetResizable(True)
-        self.magnet_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
-        self.magnet_scroll.setWidget(self.magnet_panel)
-        self.magnet_dock.setWidget(self.magnet_scroll)
-        self.magnet_dock.setMinimumWidth(390)
-        self.magnet_dock.setFeatures(
-            QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetClosable
-            | QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetMovable
-            | QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetFloatable
-        )
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.magnet_dock)
-        self.view_menu.addAction(self.magnet_dock.toggleViewAction())
-
         self.conn_dock = ConnDock()
         self.conn_dock.load_settings()
         self.conn_dock.stop_requested.connect(self.on_emergency_stop)
-
-        self.instrument_dock = QtWidgets.QDockWidget("Instrument Setup", self)
-        self.instrument_scroll = QtWidgets.QScrollArea()
-        self.instrument_scroll.setWidgetResizable(True)
-        self.instrument_scroll.setSizeAdjustPolicy(QtWidgets.QAbstractScrollArea.SizeAdjustPolicy.AdjustIgnored)
-        self.instrument_scroll.setSizePolicy(
-            QtWidgets.QSizePolicy.Policy.Preferred,
-            QtWidgets.QSizePolicy.Policy.Ignored,
-        )
-        self.instrument_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.instrument_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self.instrument_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
-        self.instrument_scroll.setMinimumHeight(0)
-        self.conn_dock.setMinimumHeight(0)
-        self.instrument_scroll.setWidget(self.conn_dock)
-        self.instrument_dock.setWidget(self.instrument_scroll)
-        self.instrument_dock.setMinimumWidth(430)
-        self.instrument_dock.setMinimumHeight(0)
-        self.instrument_dock.setFeatures(
-            QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetClosable
-            | QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetMovable
-        )
-        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.instrument_dock)
-        self.view_menu.addAction(self.instrument_dock.toggleViewAction())
 
         self.save_root = self.conn_dock.save_root
         self.connections = self.conn_dock.conns
@@ -106,26 +74,53 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lockin_panel.sensitivity_read.connect(self.conn_dock.set_lockin_sensitivity_from_sr830)
         self.conn_dock.lockin_sensitivity_verified.connect(self.lockin_panel.set_verified_sensitivity)
         self.lockin_panel.stop_sweep_requested.connect(self._stop_active_sweep_for_lockin_settings)
-        self.lockin_dock = QtWidgets.QDockWidget("SRS Lock-in", self)
-        self.lockin_scroll = QtWidgets.QScrollArea()
-        self.lockin_scroll.setWidgetResizable(True)
-        self.lockin_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
-        self.lockin_scroll.setWidget(self.lockin_panel)
-        self.lockin_dock.setWidget(self.lockin_scroll)
-        self.lockin_dock.setMinimumWidth(360)
-        self.lockin_dock.setFeatures(
-            QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetClosable
-            | QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetMovable
-            | QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetFloatable
+        self.instrument_workspace = InstrumentWorkspace(
+            self.conn_dock, self.magnet_panel, self.lockin_panel, self.device_manager, self
         )
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.lockin_dock)
-        self.view_menu.addAction(self.lockin_dock.toggleViewAction())
-        # Keep the two right-side instruments in one tabbed dock so their
-        # controls do not compete vertically on compact displays.  Magnet
-        # Control is the deliberate initial tab; both View actions remain
-        # available independently.
-        self.tabifyDockWidget(self.magnet_dock, self.lockin_dock)
-        self.magnet_dock.raise_()
+        self.instrument_dock = QtWidgets.QDockWidget("Instruments", self)
+        self.instrument_dock.setObjectName("instrumentWorkspace")
+        self.instrument_dock.setWidget(self.instrument_workspace)
+        self.instrument_dock.setMinimumWidth(370)
+        self.instrument_dock.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea)
+        self.instrument_dock.setFeatures(QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetClosable)
+        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.instrument_dock)
+        self.view_menu.addAction(self.instrument_dock.toggleViewAction())
+        self.command_bar = QtWidgets.QToolBar("Workspace", self)
+        self.command_bar.setMovable(False)
+        self.command_bar.addAction(self.instrument_dock.toggleViewAction())
+        self.command_bar.addAction("Devices...", self.instrument_workspace.show_devices)
+        self.command_bar.addAction("Sample / Files...", self.instrument_workspace.show_experiment)
+        self.command_bar.addAction("Signal chain...", self.instrument_workspace.show_signal_chain)
+        self.active_run_button = QtWidgets.QPushButton("No active measurement")
+        self.active_run_button.setMaximumWidth(270)
+        self.active_run_button.setEnabled(False)
+        self.active_run_button.clicked.connect(self._show_active_measurement)
+        self.command_bar.addWidget(self.active_run_button)
+        spacer = QtWidgets.QWidget()
+        spacer.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Preferred)
+        self.command_bar.addWidget(spacer)
+        # Move the existing button: its original stop_requested routing stays intact.
+        self.conn_dock.layout().removeWidget(self.conn_dock.btn_stop)
+        self.conn_dock.btn_stop.setText("STOP ALL / ZERO VOLTAGES")
+        self.conn_dock.btn_stop.setToolTip("Stop measurements, request safe voltage ramps to 0 V, and pause magnets. This does not mean zero magnetic field.")
+        # A permanent header keeps Stop outside toolbar overflow and away from
+        # the native caption buttons and resizing edges. Hideable tools follow it.
+        self.workspace_header = QtWidgets.QWidget(self)
+        header_layout = QtWidgets.QVBoxLayout(self.workspace_header)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(0)
+        header_layout.addWidget(self.workspace_menu)
+        self.stop_strip = QtWidgets.QWidget()
+        stop_layout = QtWidgets.QHBoxLayout(self.stop_strip)
+        stop_layout.setContentsMargins(24, 12, 24, 12)
+        stop_layout.setSpacing(0)
+        stop_layout.addWidget(self.conn_dock.btn_stop)
+        stop_layout.addSpacing(32)
+        stop_layout.addWidget(self.command_bar, 1)
+        header_layout.addWidget(self.stop_strip)
+        self.setMenuWidget(self.workspace_header)
+        self.conn_dock.btn_stop.setAutoDefault(False)
+        self.conn_dock.btn_stop.setAccessibleName("Stop all measurements and ramp voltages to zero")
 
         self.tabs = QtWidgets.QTabWidget()
         self.sample_temperature_bar = SampleTemperatureBar(self.lakeshore335, cfg.lakeshore335, self)
@@ -191,6 +186,34 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lockin_panel.settings_changed.connect(self._on_signal_chain_changed)
         self._bind_plot_mode_settings()
         self._load_plot_mode_settings()
+        for tab in self._measurement_tabs():
+            tab.refine_parameter_presentation()
+            tab.workflow = MeasurementWorkflow(tab)
+            tab.run_panel.running_changed.connect(self._update_active_measurement)
+            tab.run_panel.status_changed.connect(self._update_active_measurement)
+        self.gate_scan_field_batch.state_changed.connect(self._update_active_measurement)
+        self.gate_scan_field_batch.finished.connect(self._update_active_measurement)
+        self.gate_scan_field_batch.stopped.connect(self._update_active_measurement)
+        self.gate_scan_field_batch.error.connect(self._update_active_measurement)
+        self.resizeDocks([self.instrument_dock], [370], Qt.Orientation.Horizontal)
+        self._update_active_measurement()
+
+    def _active_measurement_tabs(self):
+        return [self.tabs.widget(i) for i in range(self.tabs.count())
+                if self.tabs.widget(i).run_panel.operation_active()
+                or (self.tabs.widget(i) is self.tab_bfield_gate_scan and self.gate_scan_field_batch.active)]
+
+    def _update_active_measurement(self, *_args):
+        active = self._active_measurement_tabs()
+        names = [self.tabs.tabText(self.tabs.indexOf(tab)) + " — " + tab.run_panel.lbl_phase.text() for tab in active]
+        self.active_run_button.setText("Running: " + ", ".join(names) if names else "No active measurement")
+        self.active_run_button.setToolTip(self.active_run_button.text())
+        self.active_run_button.setEnabled(bool(active))
+
+    def _show_active_measurement(self):
+        active = self._active_measurement_tabs()
+        if active:
+            self.tabs.setCurrentWidget(active[0])
 
     def _sync_temperature_start_gate(self, ready):
         """Gate every measurement start only for an opted-in 1000 run."""
@@ -225,6 +248,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.connections.mono = c.mono
         self.connections.lockin = c.lockin
         self.device_manager.sync_addresses()
+        if getattr(self, "tab_cosweep", None) is not None:
+            self.tab_cosweep._update_sweep_summary()
 
     def _clear_lakeshore_thermal(self):
         self.thermal_safety.latest_snapshot = None
@@ -233,17 +258,33 @@ class MainWindow(QtWidgets.QMainWindow):
     def _bind_save_preview_updates(self):
         for widget in (self.conn_dock.ed_user, self.conn_dock.ed_device_id, self.conn_dock.ed_base):
             widget.textChanged.connect(self._on_save_settings_edited)
+        tab = getattr(self, "tab_cosweep", None)
+        if tab is not None:
+            # Read draft settings for the estimate only. sync_addresses can close
+            # live sessions, so hardware text edits must not invoke it here.
+            tab.get_timing_context = lambda: self.conn_dock.to_models()[:2]
+            for widget in (self.conn_dock.cbo_g1, self.conn_dock.cbo_g2,
+                           self.conn_dock.cbo_g3, self.conn_dock.cbo_daq,
+                           self.conn_dock.cbo_lockin, self.conn_dock.cbo_g1_mode,
+                           self.conn_dock.cbo_g2_mode, self.conn_dock.cbo_g3_mode):
+                widget.currentTextChanged.connect(tab._update_sweep_summary)
 
     def _on_save_settings_edited(self):
         self.refresh_models_from_ui()
         for tab in self._measurement_tabs():
             if hasattr(tab, "refresh_output_preview"):
                 tab.refresh_output_preview()
+            if hasattr(tab, "workflow"):
+                tab.workflow.refresh()
 
     def signal_chain_snapshot(self) -> SignalChainSnapshot:
         values = self.conn_dock.signal_chain_values()
+        self.conn_dock.update_ac_voltage_estimate(self.lockin_panel.sp_sine_out.value())
         lockin_connected = self.device_manager.is_connected("lockin")
         return SignalChainSnapshot(
+            ac_contact=str(values.get("ac_contact", "")),
+            ac_voltage_ratio=values.get("ac_voltage_ratio"),
+            lockin_settings=self.lockin_panel.settings_snapshot(),
             frequency_hz=float(self.lockin_panel.sp_frequency.value()),
             lockin_sensitivity_v=float(values["lockin_sensitivity_v"]),
             preamp_sensitivity_a=float(values["preamp_sensitivity_a"]),
@@ -251,6 +292,33 @@ class MainWindow(QtWidgets.QMainWindow):
             lockin_sensitivity_source=str(values["lockin_sensitivity_source"]),
             preamp_sensitivity_source=str(values["preamp_sensitivity_source"]),
         )
+
+    def experiment_context_snapshot(self):
+        """Only copy existing telemetry; never poll hardware to build metadata."""
+        from dataclasses import asdict, is_dataclass
+        from copy import deepcopy
+        import time
+        from app.experiment_metadata import timestamp
+
+        context = {"captured_at": timestamp(), "source": "cached application telemetry",
+                   "scope": "run-start conditions; not per-point telemetry",
+                   "magnet_backend": getattr(self.magnet_panel, "_backend", None),
+                   "device_states": dict(self.device_manager.states)}
+        snapshots = {
+            "magnet1000": getattr(self.magnet1000, "latest_snapshot", None),
+            "magnet2100": self._experiment_2100_field,
+            "temperature2100": self._experiment_2100_temperature,
+            "temperature": getattr(self.thermal_safety, "latest_snapshot", None),
+        }
+        for key, snapshot in snapshots.items():
+            if snapshot is None:
+                context[key] = {"available": False}
+                continue
+            values = asdict(snapshot) if is_dataclass(snapshot) else deepcopy(snapshot) if isinstance(snapshot, dict) else None
+            sample_time = getattr(snapshot, "monotonic_s", None)
+            context[key] = {"available": values is not None, "values": values,
+                            "age_s": max(0.0, time.monotonic() - sample_time) if sample_time is not None else None}
+        return context
 
     def _on_signal_chain_changed(self):
         for tab in tuple(
@@ -410,7 +478,7 @@ class MainWindow(QtWidgets.QMainWindow):
             msg += "- DAQ AO outputs requested: " + ", ".join(f"ao{channel}" for channel in daq_channels) + "\n"
         else:
             msg += "- No connected DAQ AO outputs were available to request.\n"
-        msg += "\nWatch Instrument Setup status for safe-ramp completion."
+        msg += "\nWatch Instruments > Gate / DAQ for safe-ramp completion."
         QtWidgets.QMessageBox.critical(self, "Emergency Stop", msg)
 
 

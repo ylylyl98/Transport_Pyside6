@@ -1,14 +1,30 @@
 from __future__ import annotations
 
 from typing import List, Optional
+from functools import wraps
 
-from PyQt6 import QtCore, QtGui, QtWidgets
-from PyQt6.QtCore import Qt
+from PySide6 import QtCore, QtGui, QtWidgets
+from PySide6.QtCore import Qt
 
 from app.run_output import output_blocking_reason
+from app.experiment_metadata import capture_run_signal_chain
 from app.settings import get_app_settings
 from app.ui.widgets.plot_widget import PlotWidget
 from app.ui.widgets.run_panel import RunPanel
+
+
+def run_filename_snapshot(method):
+    """Use the verified run snapshot for paths created during synchronous start."""
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        self._filename_signal_chain = None
+        self._filename_snapshot_active = True
+        try:
+            return method(self, *args, **kwargs)
+        finally:
+            self._filename_signal_chain = None
+            self._filename_snapshot_active = False
+    return wrapped
 
 
 class _PreviewTextEdit(QtWidgets.QTextEdit):
@@ -76,14 +92,30 @@ class BaseMeasurementTab(QtWidgets.QWidget):
         self.device_manager.release(self._run_claimed_devices)
         self._run_claimed_devices = []
 
-    def verified_run_calibration(self):
+    def capture_run_signal_chain(self, signal_chain):
+        context_getter = getattr(self.window(), "experiment_context_snapshot", None)
+        context = context_getter() if callable(context_getter) else None
+        return capture_run_signal_chain(
+            signal_chain, self.device_manager,
+            owns_lockin="lockin" in self._run_claimed_devices, context=context,
+        )
+
+    def verified_run_calibration(self, *, capture_settings=True):
         try:
             amp_rate, lockin_rate = self.get_global_rates()
             signal_chain = self.get_signal_chain()
+            if capture_settings:
+                signal_chain = self.capture_run_signal_chain(signal_chain)
         except Exception as ex:
             QtWidgets.QMessageBox.warning(self, "Signal Chain Verification", str(ex))
             return None
+        if getattr(self, "_filename_snapshot_active", False):
+            self._filename_signal_chain = signal_chain
         return amp_rate, lockin_rate, signal_chain
+
+    def filename_signal_chain(self):
+        snapshot = getattr(self, "_filename_signal_chain", None)
+        return snapshot if snapshot is not None else self.get_signal_chain()
 
     def _build_base_ui(self, start_text: str):
         main_layout = QtWidgets.QHBoxLayout(self)
@@ -133,7 +165,35 @@ class BaseMeasurementTab(QtWidgets.QWidget):
         self.plot_splitter.setStretchFactor(0, 3)
         self.plot_splitter.setStretchFactor(1, 1)
 
+        controls = QtWidgets.QHBoxLayout()
+        self.parameters_button = QtWidgets.QToolButton()
+        self.parameters_button.setText("Experiment parameters")
+        self.parameters_button.setCheckable(True)
+        self.parameters_button.setChecked(True)
+        self.parameters_button.toggled.connect(self.control_scroll.setVisible)
+        self.log_button = QtWidgets.QToolButton()
+        self.log_button.setText("Detailed log")
+        self.log_button.setCheckable(True)
+        self.log_button.toggled.connect(self.log.setVisible)
+        controls.addWidget(self.parameters_button)
+        controls.addStretch(1)
+        controls.addWidget(self.log_button)
+        right_layout.addLayout(controls)
+        self.log.hide()
         right_layout.addWidget(self.plot_splitter, 1)
+        self.log_summary = QtWidgets.QLabel("No recent messages")
+        self.log_summary.setTextFormat(Qt.TextFormat.PlainText)
+        self.log_summary.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
+        self.log_summary.setProperty("role", "hint")
+        def update_log_summary():
+            message = self.log.document().lastBlock().text()
+            self.log_summary.setText(message or "No recent messages")
+            self.log_summary.setToolTip(message)
+            self.log_summary.setVisible(bool(message) and not self.log_button.isChecked())
+        self.log.textChanged.connect(update_log_summary)
+        self.log_button.toggled.connect(update_log_summary)
+        update_log_summary()
+        right_layout.addWidget(self.log_summary)
         right_layout.addWidget(self.run_panel)
         self.main_splitter.addWidget(self.control_scroll)
         self.main_splitter.addWidget(right_widget)
@@ -143,6 +203,39 @@ class BaseMeasurementTab(QtWidgets.QWidget):
 
     def _build_control_panel(self, ctl_layout: QtWidgets.QVBoxLayout):
         raise NotImplementedError
+
+    def refine_parameter_presentation(self):
+        """Flatten presentation while preserving control objects and wiring."""
+        from app.ui.widgets.status_panel import SectionHeader
+        from app.ui.widgets.collapsible_section import CollapsibleSection
+        for group in self.control_widget.findChildren(QtWidgets.QGroupBox):
+            group.setProperty("role", "parameter-group")
+            group.setAccessibleName(group.title())
+        for index in range(1, self.control_layout.count()):
+            previous = self.control_layout.itemAt(index - 1).widget()
+            group = self.control_layout.itemAt(index).widget()
+            if isinstance(previous, SectionHeader) and isinstance(group, QtWidgets.QGroupBox):
+                group.setTitle("")
+                group.setProperty("untitled", True)
+                if group.layout():
+                    group.layout().setContentsMargins(8, 4, 8, 8)
+        for section in self.control_widget.findChildren(CollapsibleSection):
+            for group in section.content_widget.findChildren(QtWidgets.QGroupBox):
+                if group.title() == section.toggle_button.text() or group.title() in {"Output Settings", "Output and Plot"}:
+                    group.setTitle("")
+                    group.setProperty("untitled", True)
+                    if group.layout():
+                        group.layout().setContentsMargins(8, 4, 8, 8)
+        for name in ("btn_set_vtg", "btn_set_vbg", "btn_set_vds"):
+            button = getattr(self, name, None)
+            if button is not None:
+                button.setText("Apply now")
+                button.setFixedWidth(82)
+                button.setToolTip("Immediately apply this voltage through the existing safe ramp. Editing the value alone does not apply it.")
+        for group in self.control_widget.findChildren(QtWidgets.QGroupBox):
+            group.style().unpolish(group)
+            group.style().polish(group)
+            group.updateGeometry()
 
     def set_status(self, message: str, state: str, detail: str = ""):
         self.run_panel.set_status_text(message, state, detail)

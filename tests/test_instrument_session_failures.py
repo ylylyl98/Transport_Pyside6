@@ -5,8 +5,8 @@ from app.devices.aps100_attodry1000_adapter import APS100AttoDry1000Adapter
 from app.devices.lakeshore335_adapter import LakeShore335Adapter
 from app.thermal_safety import ThermalSafetyEvaluator
 from utils.config import LakeShore335Config
-from PyQt6 import QtCore, QtWidgets
-from PyQt6.QtCore import QCoreApplication
+from PySide6 import QtCore, QtWidgets
+from PySide6.QtCore import QCoreApplication
 from app.ui.magnet_panel import MagnetPanel
 from controllers.magnet_controller import _MagnetWorker
 from unittest.mock import patch
@@ -31,13 +31,13 @@ class _Manager:
 
 
 class _PanelAPS(QtCore.QObject):
-    connected = QtCore.pyqtSignal(object)
-    disconnected = QtCore.pyqtSignal()
-    snapshot_updated = QtCore.pyqtSignal(object)
-    transition_progress = QtCore.pyqtSignal(str, float)
-    operation_finished = QtCore.pyqtSignal(str)
-    error = QtCore.pyqtSignal(str)
-    fault = QtCore.pyqtSignal(str)
+    connected = QtCore.Signal(object)
+    disconnected = QtCore.Signal()
+    snapshot_updated = QtCore.Signal(object)
+    transition_progress = QtCore.Signal(str, float)
+    operation_finished = QtCore.Signal(str)
+    error = QtCore.Signal(str)
+    fault = QtCore.Signal(str)
 
     def __init__(self):
         super().__init__()
@@ -48,13 +48,13 @@ class _PanelAPS(QtCore.QObject):
 
 
 class _Panel2100(QtCore.QObject):
-    connected = QtCore.pyqtSignal(object)
-    disconnected = QtCore.pyqtSignal()
-    snapshot_updated = QtCore.pyqtSignal(object)
-    temperature_updated = QtCore.pyqtSignal(object)
-    operation_finished = QtCore.pyqtSignal(str, bool, object)
-    error = QtCore.pyqtSignal(str)
-    fault = QtCore.pyqtSignal(str)
+    connected = QtCore.Signal(object)
+    disconnected = QtCore.Signal()
+    snapshot_updated = QtCore.Signal(object)
+    temperature_updated = QtCore.Signal(object)
+    operation_finished = QtCore.Signal(str, bool, object)
+    error = QtCore.Signal(str)
+    fault = QtCore.Signal(str)
 
 
 class SessionLifecycleTests(unittest.TestCase):

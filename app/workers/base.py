@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 
-from PyQt6.QtCore import QObject, pyqtSignal
+from PySide6.QtCore import QObject, Signal
 
 
 class RunStopped(RuntimeError):
@@ -10,15 +10,15 @@ class RunStopped(RuntimeError):
 
 
 class RunWorker(QObject):
-    point = pyqtSignal(float, float)
-    point_data = pyqtSignal(object)
-    status = pyqtSignal(str)
-    log = pyqtSignal(str)
-    progress = pyqtSignal(float)
-    finished = pyqtSignal(str)
-    stopped = pyqtSignal(str)
-    error = pyqtSignal(str)
-    clear_plot = pyqtSignal()
+    point = Signal(float, float)
+    point_data = Signal(object)
+    status = Signal(str)
+    log = Signal(str)
+    progress = Signal(float)
+    finished = Signal(str)
+    stopped = Signal(str)
+    error = Signal(str)
+    clear_plot = Signal()
 
     def __init__(self):
         super().__init__()

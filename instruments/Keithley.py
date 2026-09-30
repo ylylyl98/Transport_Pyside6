@@ -40,6 +40,7 @@ class Keithley2400Base(PyvisaInstrument):
         self._init_source_delay = source_delay
         self._operating_mode = KEITHLEY_MODE_VOLTAGE_2W
         self._identity = ""
+        self.cached_source_voltage_range_v = None
         self._connection_start_voltage: float | None = None
         super().__init__(
             name=name,
@@ -51,6 +52,7 @@ class Keithley2400Base(PyvisaInstrument):
         )
 
     def connect(self):
+        self.cached_source_voltage_range_v = None
         try:
             super().connect()
             self._identity = self.get_identity().strip()
@@ -181,6 +183,7 @@ class Keithley2400Base(PyvisaInstrument):
             self._write(":FORM:ELEM VOLT,CURR")
             self._write("TRIG:COUN 1")
             self.set_current_compliance(self._init_curr_comp)
+            self.cached_source_voltage_range_v = None
             self._write(":SOUR:VOLT:RANG %.6e" % self._max_source_voltage)
             self._write("SOUR:DEL %.6e" % self._init_source_delay)
             self._write(":SOUR:VOLT:LEV 0")
@@ -274,7 +277,10 @@ class Keithley2400Base(PyvisaInstrument):
         if self._operating_mode != KEITHLEY_MODE_VOLTAGE_2W:
             raise InstrumentError(self.name, "Keithley is not configured for 2-wire voltage source mode.")
         with self.lock:
-            return float(self._query(":SOUR:VOLT:LEV?"))
+            voltage = float(self._query(":SOUR:VOLT:LEV?"))
+            if not math.isfinite(voltage):
+                raise InstrumentError(self.name, "Voltage setpoint readback is not finite; ramp was aborted.")
+            return voltage
 
     def _write_voltage(self, volt: float):
         volt = float(volt)
@@ -315,6 +321,7 @@ class Keithley2400Base(PyvisaInstrument):
             try:
                 self._write("*CLS")
                 self.set_current_compliance(current_compliance_a)
+                self.cached_source_voltage_range_v = None
                 self._write(":SOUR:VOLT:RANG %.6e" % max_source_voltage_v)
                 self._max_source_voltage = max_source_voltage_v
                 return self.verify_protection_settings()
@@ -327,10 +334,12 @@ class Keithley2400Base(PyvisaInstrument):
 
     def read_protection_settings(self, include_trip: bool = True) -> dict[str, object]:
         with self.lock:
+            self.cached_source_voltage_range_v = None
             current_compliance = float(self._query(":SENS:CURR:PROT?"))
             current_autorange = bool(int(float(self._query(":SENS:CURR:RANG:AUTO?"))))
             current_range = float(self._query(":SENS:CURR:RANG?"))
             source_voltage_range = float(self._query(":SOUR:VOLT:RANG?"))
+            self.cached_source_voltage_range_v = source_voltage_range
             tripped = None
             if include_trip:
                 try:

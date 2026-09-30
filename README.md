@@ -1,6 +1,10 @@
 # Transport Measurement
 
-Desktop application for automated electrical transport and photocurrent measurements. The PyQt6 interface coordinates Keithley 2400 source meters, an NI DAQ device, and an SP-2300 monochromator; it provides live plots while saving each measurement to CSV.
+The project root is the official PySide6 version. Launch `Transport_App.bat`
+from this directory; the retained `tmp/pyside6_migration` copy is no longer the
+release location. See [release and rollback notes](docs/pyside6-release.md).
+
+Desktop application for automated electrical transport and photocurrent measurements. The PySide6 interface coordinates Keithley 2400 source meters, an NI DAQ device, and an SP-2300 monochromator; it provides live plots while saving each measurement to CSV.
 
 > **Laboratory software:** This program can change instrument outputs. Verify cable routing, instrument limits, compliance settings, and the selected hardware addresses before every run. Software safeguards are helpful, but they are not a replacement for laboratory safety procedures or hardware interlocks.
 
@@ -46,7 +50,7 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
-The Python dependencies are listed in [`requirements.txt`](requirements.txt): PyQt6, Matplotlib, NumPy, PyVISA, NI-DAQmx, and pythonnet.
+The Python dependencies are listed in [`requirements.txt`](requirements.txt): PySide6, Matplotlib, NumPy, PyVISA, NI-DAQmx, and pythonnet.
 
 ## Launch
 
@@ -60,13 +64,13 @@ python transport_UI.py
 
 ## Typical measurement workflow
 
-1. Start the application and open **Instrument Setup** in the left dock.
+1. Start the application and open **Devices** in the top command area. Instrument controls are in the left sidebar.
 2. Select the GPIB/serial/DAQ addresses and the operating mode for each Keithley. Use **Scan Hardware** to populate detected resources.
 3. Set the save location, operator name, device ID, amplifier gain, and lock-in gain as appropriate for the experiment.
 4. Click **Connect All** and confirm that the required instruments report an OK status.
 5. Use **Manual Controls** in Instrument Setup when needed: type and ramp a gate target, use the ±0.1 V ramp buttons, read one gate on demand, safely ramp a gate or DAQ AO back to 0 V, or move the monochromator. Gate controls are available only in 2-wire voltage-source mode and while no measurement is active.
 6. Select a measurement tab, set its sweep bounds, timing, averaging, source, and file name, then review any preview or estimated sweep information. The Photocurrent tab supports an editable bias recipe: unchecked rows are retained but skipped, every enabled condition creates its own CSV file, and Vds values are available only when a compatible Vds source is connected and explicitly enabled.
-7. Start the measurement and monitor the live plot and status messages. Use the run-level **STOP** or dock-level **STOP / ZERO ALL** if needed.
+7. Start the measurement and monitor the live plot and status messages. Use **Stop measurement** for the active run or the fixed top **STOP ALL / ZERO VOLTAGES** button when needed.
 8. Review the resulting CSV in the selected save directory.
 
 The application uses dock-managed connections: address or Keithley-mode changes require reconnection before they apply to a measurement.
@@ -99,7 +103,7 @@ Always confirm actual instrument state independently after an error, interrupted
 ## Project layout
 
 ```text
-app/                    PyQt6 UI, application models, workers, and device manager
+app/                    PySide6 UI, application models, workers, and device manager
 app/ui/tabs/            Measurement tabs: Vds Sweep, Gate Scan, 2D Map, Photocurrent
 app/workers/            Background acquisition and CSV-writing workers
 instruments/            Keithley, NI-DAQ, monochromator, and other instrument drivers

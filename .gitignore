@@ -4,3 +4,10 @@
 # Python bytecode and local caches
 __pycache__/
 *.py[cod]
+
+# Local migration copies, rollback backups, and verification artifacts
+tmp/
+offline_results_*.json
+*_preview.png
+workspace_preview*.png
+*.lnk

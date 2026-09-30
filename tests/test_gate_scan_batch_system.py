@@ -1,29 +1,29 @@
 import unittest
 
-from PyQt6 import QtCore
-from PyQt6.QtWidgets import QApplication
+from PySide6 import QtCore
+from PySide6.QtWidgets import QApplication
 
 from app.ui.magnet_panel import MagnetPanel
 
 
 class _Fake1000(QtCore.QObject):
-    connected = QtCore.pyqtSignal(object)
-    disconnected = QtCore.pyqtSignal()
-    snapshot_updated = QtCore.pyqtSignal(object)
-    transition_progress = QtCore.pyqtSignal(str, float)
-    operation_finished = QtCore.pyqtSignal(str)
-    error = QtCore.pyqtSignal(str)
-    fault = QtCore.pyqtSignal(str)
+    connected = QtCore.Signal(object)
+    disconnected = QtCore.Signal()
+    snapshot_updated = QtCore.Signal(object)
+    transition_progress = QtCore.Signal(str, float)
+    operation_finished = QtCore.Signal(str)
+    error = QtCore.Signal(str)
+    fault = QtCore.Signal(str)
 
 
 class _Fake2100(QtCore.QObject):
-    connected = QtCore.pyqtSignal(object)
-    disconnected = QtCore.pyqtSignal()
-    snapshot_updated = QtCore.pyqtSignal(object)
-    temperature_updated = QtCore.pyqtSignal(object)
-    operation_finished = QtCore.pyqtSignal(str, bool, object)
-    error = QtCore.pyqtSignal(str)
-    fault = QtCore.pyqtSignal(str)
+    connected = QtCore.Signal(object)
+    disconnected = QtCore.Signal()
+    snapshot_updated = QtCore.Signal(object)
+    temperature_updated = QtCore.Signal(object)
+    operation_finished = QtCore.Signal(str, bool, object)
+    error = QtCore.Signal(str)
+    fault = QtCore.Signal(str)
 
 
 class MagnetPanelBackendSignalTests(unittest.TestCase):

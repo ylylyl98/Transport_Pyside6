@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from typing import List, Optional
 
-from PyQt6 import QtWidgets
-from PyQt6.QtCore import Qt
+from PySide6 import QtWidgets
+from PySide6.QtCore import Qt
 
 
 class SectionHeader(QtWidgets.QLabel):

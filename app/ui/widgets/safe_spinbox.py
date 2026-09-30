@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import re
 
-from PyQt6 import QtGui, QtWidgets
-from PyQt6.QtCore import Qt
+from PySide6 import QtGui, QtWidgets
+from PySide6.QtCore import Qt
 
 
 class _TypedEntryOnlyMixin:

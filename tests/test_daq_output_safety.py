@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6 import QtWidgets
+from PySide6 import QtWidgets
 
 from app.device_manager import DeviceManager, ManualControlWorker
 from app.models import CoParams, Connections, LineSweepParams, SaveRoot

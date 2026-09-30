@@ -6,7 +6,7 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtWidgets
 
 from app.device_manager import DeviceManager
 from app.gate_transform import RATIO_TARGET_VTG
@@ -92,7 +92,7 @@ class GateScanRatioUiTests(unittest.TestCase):
         tab.sp_derived_stop.setValue(2.0)
         tab.sp_derived_fixed.setValue(0.0)
         self.assertEqual(tab._derived_gate_endpoints(), [(0.0, 0.0), (0.5, 1.0)])
-        self.assertIn("ratio_on_Vtg_r_2", tab._output_summary_parts())
+        self.assertIn("rVtg2", tab._output_summary_parts())
         tab.save_tab_settings()
         tab.close()
 

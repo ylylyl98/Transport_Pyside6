@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6 import QtCore, QtTest, QtWidgets
+from PySide6 import QtCore, QtTest, QtWidgets
 
 from app.device_manager import DeviceManager, GateCurrentReadWorker, ManualControlWorker, ProtectionApplyWorker
 from app.keithley_modes import KEITHLEY_MODE_OHM_4W, KEITHLEY_MODE_VOLTAGE_2W
@@ -628,16 +628,18 @@ class KeithleyProtectionIntegrationTests(unittest.TestCase):
         self.assertEqual(dock.lbl_gate_readback_status.text(), "Reading G1...")
         dock.close()
 
-    def test_gate_step_changes_target_and_uses_safe_ramp(self):
+    def test_gate_step_uses_live_source_instead_of_unapplied_editor(self):
         manager = DeviceManager(Connections())
         dock = ConnDock(manager)
         dock.sp_manual_g1.setValue(0.2)
 
-        with patch.object(manager, "ramp_gate", return_value=True) as ramp_gate:
+        with patch.object(manager, "step_gate", return_value=True) as step_gate:
             dock._on_manual_gate_step("g1", 0.1)
 
-        self.assertAlmostEqual(dock.sp_manual_g1.value(), 0.3)
-        ramp_gate.assert_called_once_with("g1", 0.3)
+        self.assertAlmostEqual(dock.sp_manual_g1.value(), 0.2)
+        step_gate.assert_called_once_with("g1", 0.1)
+        dock._on_manual_gate_progress("g1", 0.6, 0.5)
+        self.assertAlmostEqual(dock.sp_manual_g1.value(), 0.6)
         dock.close()
 
     def test_manual_gate_worker_coalesces_rapid_steps_without_measurement_reads(self):

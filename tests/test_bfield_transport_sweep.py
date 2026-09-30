@@ -6,7 +6,7 @@ import unittest
 import time
 from unittest.mock import patch
 from types import SimpleNamespace
-from PyQt6 import QtCore
+from PySide6 import QtCore
 
 from app.engine.bfield_transport_sweep import (
     build_transport_output_paths,
@@ -38,16 +38,16 @@ class BFieldTransportSweepTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-        from PyQt6 import QtWidgets
+        from PySide6 import QtWidgets
         cls.app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
     def test_transport_polling_is_restarted_only_after_sweep_acceptance(self):
         class Magnet(QtCore.QObject):
-            transport_config_result = QtCore.pyqtSignal(object)
-            safe_move_result = QtCore.pyqtSignal(object)
-            transport_sweep_result = QtCore.pyqtSignal(object)
-            snapshot_updated = QtCore.pyqtSignal(object)
-            fault = QtCore.pyqtSignal(str)
+            transport_config_result = QtCore.Signal(object)
+            safe_move_result = QtCore.Signal(object)
+            transport_sweep_result = QtCore.Signal(object)
+            snapshot_updated = QtCore.Signal(object)
+            fault = QtCore.Signal(str)
 
             def __init__(self):
                 super().__init__()
@@ -83,12 +83,12 @@ class BFieldTransportSweepTests(unittest.TestCase):
 
     def test_endpoint_snapshot_is_recorded_once_before_transition(self):
         class Magnet(QtCore.QObject):
-            transport_config_result = QtCore.pyqtSignal(object)
-            safe_move_result = QtCore.pyqtSignal(object)
-            transport_sweep_result = QtCore.pyqtSignal(object)
-            snapshot_updated = QtCore.pyqtSignal(object)
-            fault = QtCore.pyqtSignal(str)
-            operation_finished = QtCore.pyqtSignal(str)
+            transport_config_result = QtCore.Signal(object)
+            safe_move_result = QtCore.Signal(object)
+            transport_sweep_result = QtCore.Signal(object)
+            snapshot_updated = QtCore.Signal(object)
+            fault = QtCore.Signal(str)
+            operation_finished = QtCore.Signal(str)
 
             def pause(self):
                 pass
@@ -134,12 +134,12 @@ class BFieldTransportSweepTests(unittest.TestCase):
     @patch.object(cfg.mcd, "transport_endpoint_settling_enabled", True)
     def test_active_at_limit_requires_stable_reads_before_pause(self):
         class Magnet(QtCore.QObject):
-            transport_config_result = QtCore.pyqtSignal(object)
-            safe_move_result = QtCore.pyqtSignal(object)
-            transport_sweep_result = QtCore.pyqtSignal(object)
-            snapshot_updated = QtCore.pyqtSignal(object)
-            fault = QtCore.pyqtSignal(str)
-            operation_finished = QtCore.pyqtSignal(str)
+            transport_config_result = QtCore.Signal(object)
+            safe_move_result = QtCore.Signal(object)
+            transport_sweep_result = QtCore.Signal(object)
+            snapshot_updated = QtCore.Signal(object)
+            fault = QtCore.Signal(str)
+            operation_finished = QtCore.Signal(str)
 
             def __init__(self):
                 super().__init__()
@@ -186,12 +186,12 @@ class BFieldTransportSweepTests(unittest.TestCase):
 
     def test_short_span_endpoint_tolerance_rejects_early_and_accepts_overshoot(self):
         class Magnet(QtCore.QObject):
-            transport_config_result = QtCore.pyqtSignal(object)
-            safe_move_result = QtCore.pyqtSignal(object)
-            transport_sweep_result = QtCore.pyqtSignal(object)
-            snapshot_updated = QtCore.pyqtSignal(object)
-            fault = QtCore.pyqtSignal(str)
-            operation_finished = QtCore.pyqtSignal(str)
+            transport_config_result = QtCore.Signal(object)
+            safe_move_result = QtCore.Signal(object)
+            transport_sweep_result = QtCore.Signal(object)
+            snapshot_updated = QtCore.Signal(object)
+            fault = QtCore.Signal(str)
+            operation_finished = QtCore.Signal(str)
 
             def __init__(self):
                 super().__init__()
@@ -244,12 +244,12 @@ class BFieldTransportSweepTests(unittest.TestCase):
 
     def test_endpoint_pause_acknowledgement_starts_reverse_leg(self):
         class Magnet(QtCore.QObject):
-            transport_config_result = QtCore.pyqtSignal(object)
-            safe_move_result = QtCore.pyqtSignal(object)
-            transport_sweep_result = QtCore.pyqtSignal(object)
-            snapshot_updated = QtCore.pyqtSignal(object)
-            fault = QtCore.pyqtSignal(str)
-            operation_finished = QtCore.pyqtSignal(str)
+            transport_config_result = QtCore.Signal(object)
+            safe_move_result = QtCore.Signal(object)
+            transport_sweep_result = QtCore.Signal(object)
+            snapshot_updated = QtCore.Signal(object)
+            fault = QtCore.Signal(str)
+            operation_finished = QtCore.Signal(str)
 
             def __init__(self):
                 super().__init__()
@@ -298,12 +298,12 @@ class BFieldTransportSweepTests(unittest.TestCase):
 
     def test_one_way_endpoint_keeps_forward_runtime_target_until_cleanup(self):
         class Magnet(QtCore.QObject):
-            transport_config_result = QtCore.pyqtSignal(object)
-            safe_move_result = QtCore.pyqtSignal(object)
-            transport_sweep_result = QtCore.pyqtSignal(object)
-            snapshot_updated = QtCore.pyqtSignal(object)
-            fault = QtCore.pyqtSignal(str)
-            operation_finished = QtCore.pyqtSignal(str)
+            transport_config_result = QtCore.Signal(object)
+            safe_move_result = QtCore.Signal(object)
+            transport_sweep_result = QtCore.Signal(object)
+            snapshot_updated = QtCore.Signal(object)
+            fault = QtCore.Signal(str)
+            operation_finished = QtCore.Signal(str)
 
             def pause(self):
                 pass
@@ -351,11 +351,11 @@ class BFieldTransportSweepTests(unittest.TestCase):
 
     def test_telemetry_watchdog_holds_active_leg(self):
         class Magnet(QtCore.QObject):
-            transport_config_result = QtCore.pyqtSignal(object)
-            safe_move_result = QtCore.pyqtSignal(object)
-            transport_sweep_result = QtCore.pyqtSignal(object)
-            snapshot_updated = QtCore.pyqtSignal(object)
-            fault = QtCore.pyqtSignal(str)
+            transport_config_result = QtCore.Signal(object)
+            safe_move_result = QtCore.Signal(object)
+            transport_sweep_result = QtCore.Signal(object)
+            snapshot_updated = QtCore.Signal(object)
+            fault = QtCore.Signal(str)
 
         controller = BFieldTransportController(
             Magnet(), SimpleNamespace(), SimpleNamespace(), thermal_safety=None
@@ -453,11 +453,11 @@ class BFieldTransportSweepTests(unittest.TestCase):
 
     def test_watchdog_uses_derived_duration_for_slow_long_valid_leg(self):
         class Magnet(QtCore.QObject):
-            transport_config_result = QtCore.pyqtSignal(object)
-            safe_move_result = QtCore.pyqtSignal(object)
-            transport_sweep_result = QtCore.pyqtSignal(object)
-            snapshot_updated = QtCore.pyqtSignal(object)
-            fault = QtCore.pyqtSignal(str)
+            transport_config_result = QtCore.Signal(object)
+            safe_move_result = QtCore.Signal(object)
+            transport_sweep_result = QtCore.Signal(object)
+            snapshot_updated = QtCore.Signal(object)
+            fault = QtCore.Signal(str)
 
             def set_polling_enabled(self, _enabled):
                 pass
@@ -499,11 +499,11 @@ class BFieldTransportSweepTests(unittest.TestCase):
 
     def test_sync_persistent_cleanup_failure_retains_ownership_and_skips_restore(self):
         class Magnet(QtCore.QObject):
-            transport_config_result = QtCore.pyqtSignal(object)
-            safe_move_result = QtCore.pyqtSignal(object)
-            transport_sweep_result = QtCore.pyqtSignal(object)
-            snapshot_updated = QtCore.pyqtSignal(object)
-            fault = QtCore.pyqtSignal(str)
+            transport_config_result = QtCore.Signal(object)
+            safe_move_result = QtCore.Signal(object)
+            transport_sweep_result = QtCore.Signal(object)
+            snapshot_updated = QtCore.Signal(object)
+            fault = QtCore.Signal(str)
 
             def __init__(self):
                 super().__init__()
@@ -558,11 +558,11 @@ class BFieldTransportSweepTests(unittest.TestCase):
 
     def test_positioning_snapshot_is_not_recorded_before_sweep_target_exists(self):
         class Magnet(QtCore.QObject):
-            transport_config_result = QtCore.pyqtSignal(object)
-            safe_move_result = QtCore.pyqtSignal(object)
-            transport_sweep_result = QtCore.pyqtSignal(object)
-            snapshot_updated = QtCore.pyqtSignal(object)
-            fault = QtCore.pyqtSignal(str)
+            transport_config_result = QtCore.Signal(object)
+            safe_move_result = QtCore.Signal(object)
+            transport_sweep_result = QtCore.Signal(object)
+            snapshot_updated = QtCore.Signal(object)
+            fault = QtCore.Signal(str)
 
         thermal = SimpleNamespace(
             is_armed=True,
@@ -607,8 +607,8 @@ class BFieldTransportSweepTests(unittest.TestCase):
         )
         signal_chain = SignalChainSnapshot(1000.0, 0.02, 100e-9)
         parts = transport_output_summary_parts(params, signal_chain)
-        self.assertEqual(parts[:4], ["B_-0.5to0.5T", "round_trip", "rate_0.1Tpermin", "2conditions"])
-        self.assertEqual(parts[-3:], ["freq_1kHz", "lia_20mV", "preamp_100nA"])
+        self.assertEqual(parts[:4], ["B-0.5to0.5T", "RT", "0.1Tpermin", "2cond"])
+        self.assertEqual(parts[-3:], ["1kHz", "LIA20mV", "Pre100nA"])
 
         planned = build_planned_output(
             SaveRoot(base=".", user="operator", device_id="sample"),
@@ -618,9 +618,9 @@ class BFieldTransportSweepTests(unittest.TestCase):
             run_id="run",
         )
         paths = build_transport_output_paths(planned, params.conditions)
-        self.assertIn("B_-0.5to0.5T_round_trip_rate_0.1Tpermin_2conditions", planned.stem)
-        self.assertTrue(paths.condition_csv_paths[0].endswith("_C01_Neutral_point_Doping_0_Efield_0_r_1xVbg.csv"))
-        self.assertTrue(paths.condition_csv_paths[1].endswith("_C02_High_doping_Doping_0_Efield_0_r_1xVbg.csv"))
+        self.assertIn("B-0.5to0.5T_RT_0.1Tpermin_2cond", planned.stem)
+        self.assertTrue(paths.condition_csv_paths[0].endswith("_C01_Neutral_point_Doping0_E0_Vds0V_rVbg1_run.csv"))
+        self.assertTrue(paths.condition_csv_paths[1].endswith("_C02_High_doping_Doping0_E0_Vds0V_rVbg1_run.csv"))
         self.assertIn(paths.manifest_path, paths.all_paths)
 
     def test_adaptive_is_default_and_policy_estimates_preserve_trajectory(self):
@@ -816,12 +816,12 @@ class BFieldTransportSweepTests(unittest.TestCase):
 
     def test_shutdown_after_driven_completion_waits_for_persistent_ack(self):
         class Magnet(QtCore.QObject):
-            transport_config_result = QtCore.pyqtSignal(object)
-            safe_move_result = QtCore.pyqtSignal(object)
-            transport_sweep_result = QtCore.pyqtSignal(object)
-            snapshot_updated = QtCore.pyqtSignal(object)
-            fault = QtCore.pyqtSignal(str)
-            operation_finished = QtCore.pyqtSignal(str)
+            transport_config_result = QtCore.Signal(object)
+            safe_move_result = QtCore.Signal(object)
+            transport_sweep_result = QtCore.Signal(object)
+            snapshot_updated = QtCore.Signal(object)
+            fault = QtCore.Signal(str)
+            operation_finished = QtCore.Signal(str)
 
             def __init__(self):
                 super().__init__()
@@ -859,12 +859,12 @@ class BFieldTransportSweepTests(unittest.TestCase):
 
     def test_shutdown_detects_external_driven_state_with_default_bookkeeping(self):
         class Magnet(QtCore.QObject):
-            transport_config_result = QtCore.pyqtSignal(object)
-            safe_move_result = QtCore.pyqtSignal(object)
-            transport_sweep_result = QtCore.pyqtSignal(object)
-            snapshot_updated = QtCore.pyqtSignal(object)
-            fault = QtCore.pyqtSignal(str)
-            operation_finished = QtCore.pyqtSignal(str)
+            transport_config_result = QtCore.Signal(object)
+            safe_move_result = QtCore.Signal(object)
+            transport_sweep_result = QtCore.Signal(object)
+            snapshot_updated = QtCore.Signal(object)
+            fault = QtCore.Signal(str)
+            operation_finished = QtCore.Signal(str)
 
             def __init__(self):
                 super().__init__()
@@ -926,11 +926,11 @@ class BFieldTransportSweepTests(unittest.TestCase):
 
     def test_shutdown_already_persistent_queues_idempotent_quick_cleanup(self):
         class Magnet(QtCore.QObject):
-            transport_config_result = QtCore.pyqtSignal(object)
-            safe_move_result = QtCore.pyqtSignal(object)
-            transport_sweep_result = QtCore.pyqtSignal(object)
-            snapshot_updated = QtCore.pyqtSignal(object)
-            fault = QtCore.pyqtSignal(str)
+            transport_config_result = QtCore.Signal(object)
+            safe_move_result = QtCore.Signal(object)
+            transport_sweep_result = QtCore.Signal(object)
+            snapshot_updated = QtCore.Signal(object)
+            fault = QtCore.Signal(str)
 
             def __init__(self):
                 super().__init__()
@@ -1002,11 +1002,11 @@ class BFieldTransportSweepTests(unittest.TestCase):
 
     def test_qt_controller_start_reserves_configures_and_stops_safely(self):
         class Magnet(QtCore.QObject):
-            transport_config_result = QtCore.pyqtSignal(object)
-            safe_move_result = QtCore.pyqtSignal(object)
-            transport_sweep_result = QtCore.pyqtSignal(object)
-            snapshot_updated = QtCore.pyqtSignal(object)
-            fault = QtCore.pyqtSignal(str)
+            transport_config_result = QtCore.Signal(object)
+            safe_move_result = QtCore.Signal(object)
+            transport_sweep_result = QtCore.Signal(object)
+            snapshot_updated = QtCore.Signal(object)
+            fault = QtCore.Signal(str)
             def __init__(self):
                 super().__init__(); self.events = []; self.is_connected = True; self.latest_snapshot = type("Snapshot", (), {"heater_on": True, "field_t": 0.0})()
             def acquire_exclusive(self, owner): self.events.append(("claim", owner)); return True

@@ -6,7 +6,7 @@ import os
 import re
 import time
 
-from PyQt6 import QtCore
+from PySide6 import QtCore
 
 from app.constants import (
     GATE_BIAS_RAMP_STEP_T,
@@ -44,16 +44,19 @@ class PhotocurrentWorker(RunWorker):
         base_csv_path: str,
         condition: PhotocurrentBiasCondition,
         use_vds: bool,
+        condition_index: int | None = None,
     ) -> str:
         """Return the base output path dedicated to one applied bias combination."""
         stem, extension = os.path.splitext(base_csv_path)
         extension = extension or ".csv"
         parts = [
-            f"Vtg_{condition.vtg:+.3f}V",
-            f"Vbg_{condition.vbg:+.3f}V",
-            f"Vds_{condition.vds:+.3f}V" if use_vds else "Vds_Off",
+            f"Vtg{condition.vtg:g}V",
+            f"Vbg{condition.vbg:g}V",
+            f"Vds{condition.vds:g}V" if use_vds else "VdsOff",
         ]
-        timestamp_match = re.search(r"_(\d{8}_\d{6})$", stem)
+        if condition_index is not None:
+            parts.insert(0, f"C{condition_index:02d}")
+        timestamp_match = re.search(r"_(\d{8}_\d{6}(?:_\d+)?)$", stem)
         if timestamp_match:
             prefix = stem[: timestamp_match.start()]
             timestamp = timestamp_match.group(0)
@@ -67,27 +70,11 @@ class PhotocurrentWorker(RunWorker):
         conditions: list[PhotocurrentBiasCondition],
         use_vds: bool,
     ) -> list[str]:
-        """Build unique paths, suffixing repeated applied bias combinations."""
-        paths: list[str] = []
-        occurrences: dict[str, int] = {}
-        for condition in conditions:
-            base_path = cls.condition_csv_path(base_csv_path, condition, use_vds)
-            occurrences[base_path] = occurrences.get(base_path, 0) + 1
-            occurrence = occurrences[base_path]
-            if occurrence == 1:
-                paths.append(base_path)
-                continue
-            stem, extension = os.path.splitext(base_path)
-            timestamp_match = re.search(r"_(\d{8}_\d{6})$", stem)
-            if timestamp_match:
-                prefix = stem[: timestamp_match.start()]
-                timestamp = timestamp_match.group(0)
-                paths.append(f"{prefix}_repeat_{occurrence:02d}{timestamp}{extension}")
-            else:
-                paths.append(f"{stem}_repeat_{occurrence:02d}{extension}")
-        return paths
+        """Keep recipe order explicit and distinguish repeated bias conditions."""
+        return [cls.condition_csv_path(base_csv_path, condition, use_vds, index)
+                for index, condition in enumerate(conditions, start=1)]
 
-    @QtCore.pyqtSlot()
+    @QtCore.Slot()
     def run(self):
         csv_path = self.p.output_csv_path
         condition_paths: list[str] = []
@@ -131,20 +118,11 @@ class PhotocurrentWorker(RunWorker):
 
             if not csv_path:
                 ts = new_run_id()
-                tag_vds = "noVds"
-                if self.p.use_vds:
-                    if self.p.vds_source.startswith("NI DAQ"):
-                        tag_vds = f"ao{self.p.ao_channel}"
-                    elif self.p.vds_source == "Keithley 2400":
-                        tag_vds = "Keithley"
-                g1_tag = "Tg" if self.g1 else "NoTg"
-                g2_tag = "Bg" if self.g2 else "NoBg"
-                signal_tags = "_".join(signal_chain_filename_parts(self.signal_chain))
                 stem = compose_output_stem(
                     self.save.device_id,
                     "photocurrent",
                     self.p.base_name,
-                    (g1_tag, g2_tag, tag_vds, f"{len(conditions)}conditions", signal_tags),
+                    (f"WL{self.p.wl_start:g}to{self.p.wl_stop:g}nm", *signal_chain_filename_parts(self.signal_chain)),
                     ts,
                     "PC",
                 )
@@ -302,10 +280,7 @@ class PhotocurrentWorker(RunWorker):
                 wl = next_wl
 
     def _source_voltage(self, session) -> float:
-        try:
-            return float(session.get_voltage_setpoint())
-        except Exception:
-            return getattr(session, "voltage", None) or 0.0
+        return float(session.get_voltage_setpoint())
 
     def _ramp_gate(self, session, label: str, target: float, required: bool):
         if not required:

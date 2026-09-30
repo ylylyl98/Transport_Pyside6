@@ -14,10 +14,8 @@ from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import Any, Callable, Optional
 
-from PyQt6.QtCore import QObject, QThread, QTimer, Qt, pyqtSignal, pyqtSlot
+from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal, Slot
 
-Signal = pyqtSignal
-Slot = pyqtSlot
 
 from app.devices.attodry2100_adapter import (
     AttoDRY2100Adapter,

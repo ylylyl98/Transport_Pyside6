@@ -2,9 +2,9 @@ import unittest
 from unittest.mock import patch
 from types import SimpleNamespace
 
-from PyQt6 import QtCore
-from PyQt6 import QtWidgets
-from PyQt6.QtWidgets import QApplication
+from PySide6 import QtCore
+from PySide6 import QtWidgets
+from PySide6.QtWidgets import QApplication
 
 from app.ui.magnet_panel import MagnetPanel
 from controllers.attodry2100_controller import AttoDRY2100Controller
@@ -14,13 +14,13 @@ from utils.config import cfg
 
 
 class _Fake1000(QtCore.QObject):
-    connected = QtCore.pyqtSignal(object)
-    disconnected = QtCore.pyqtSignal()
-    snapshot_updated = QtCore.pyqtSignal(object)
-    transition_progress = QtCore.pyqtSignal(str, float)
-    operation_finished = QtCore.pyqtSignal(str)
-    error = QtCore.pyqtSignal(str)
-    fault = QtCore.pyqtSignal(str)
+    connected = QtCore.Signal(object)
+    disconnected = QtCore.Signal()
+    snapshot_updated = QtCore.Signal(object)
+    transition_progress = QtCore.Signal(str, float)
+    operation_finished = QtCore.Signal(str)
+    error = QtCore.Signal(str)
+    fault = QtCore.Signal(str)
 
     def __init__(self):
         super().__init__()
@@ -38,13 +38,13 @@ class _Fake1000(QtCore.QObject):
 
 
 class _Fake2100(QtCore.QObject):
-    connected = QtCore.pyqtSignal(object)
-    disconnected = QtCore.pyqtSignal()
-    snapshot_updated = QtCore.pyqtSignal(object)
-    temperature_updated = QtCore.pyqtSignal(object)
-    operation_finished = QtCore.pyqtSignal(str, bool, object)
-    error = QtCore.pyqtSignal(str)
-    fault = QtCore.pyqtSignal(str)
+    connected = QtCore.Signal(object)
+    disconnected = QtCore.Signal()
+    snapshot_updated = QtCore.Signal(object)
+    temperature_updated = QtCore.Signal(object)
+    operation_finished = QtCore.Signal(str, bool, object)
+    error = QtCore.Signal(str)
+    fault = QtCore.Signal(str)
 
     def __init__(self):
         super().__init__()
@@ -491,14 +491,11 @@ class MainWindowMagnetLifecycleTests(unittest.TestCase):
         window = MainWindow()
         self.assertIs(window.magnet_panel.magnet1000, window.magnet1000)
         self.assertIs(window.magnet_panel.magnet2100, window.magnet2100)
-        self.assertIn(window.lockin_dock, window.tabifiedDockWidgets(window.magnet_dock))
-        self.assertEqual(
-            window.dockWidgetArea(window.magnet_dock),
-            window.dockWidgetArea(window.lockin_dock),
-        )
+        self.assertTrue(window.instrument_workspace.isAncestorOf(window.lockin_panel))
+        self.assertTrue(window.instrument_workspace.isAncestorOf(window.magnet_panel))
+        self.assertEqual(window.instrument_workspace.pages.count(), 3)
         view_actions = {action.text() for action in window.view_menu.actions()}
-        self.assertIn(window.magnet_dock.windowTitle(), view_actions)
-        self.assertIn(window.lockin_dock.windowTitle(), view_actions)
+        self.assertIn(window.instrument_dock.windowTitle(), view_actions)
         window.magnet1000.shutdown()
         self.assertTrue(window.magnet2100.shutdown(0.5))
         window.deleteLater()

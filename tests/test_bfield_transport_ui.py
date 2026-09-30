@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtWidgets
 
 from app.device_manager import DeviceManager
 from app.models import Connections, SaveRoot
@@ -54,10 +54,10 @@ class BFieldTransportUiTests(unittest.TestCase):
 
     def test_aps100_badge_and_start_readiness_follow_controller(self):
         class Magnet(QtCore.QObject):
-            connected = QtCore.pyqtSignal(object)
-            disconnected = QtCore.pyqtSignal()
-            snapshot_updated = QtCore.pyqtSignal(object)
-            fault = QtCore.pyqtSignal(str)
+            connected = QtCore.Signal(object)
+            disconnected = QtCore.Signal()
+            snapshot_updated = QtCore.Signal(object)
+            fault = QtCore.Signal(str)
 
             def __init__(self):
                 super().__init__()
@@ -68,10 +68,10 @@ class BFieldTransportUiTests(unittest.TestCase):
                 )
 
         class Controller(QtCore.QObject):
-            error = QtCore.pyqtSignal(str)
-            state_changed = QtCore.pyqtSignal(str, str)
-            finished = QtCore.pyqtSignal()
-            stopped = QtCore.pyqtSignal(str)
+            error = QtCore.Signal(str)
+            state_changed = QtCore.Signal(str, str)
+            finished = QtCore.Signal()
+            stopped = QtCore.Signal(str)
 
             def __init__(self):
                 super().__init__()
@@ -317,9 +317,9 @@ class BFieldTransportUiTests(unittest.TestCase):
         self.tab.refresh_output_preview()
 
         stem = self.tab._planned_output.display_stem
-        self.assertIn("B_-1to2T_round_trip_rate_0.2Tpermin_1conditions", stem)
-        self.assertIn("freq_1kHz_lia_20mV_preamp_100nA", stem)
-        self.assertIn("C01_Neutral_point_Doping_0_Efield_0_r_1xVbg.csv", self.tab.lbl_filename_preview.toPlainText())
+        self.assertIn("B-1to2T_RT_0.2Tpermin_1cond", stem)
+        self.assertIn("1kHz_LIA20mV_Pre100nA", stem)
+        self.assertIn("C01_Neutral_point_Doping0_E0_Vds0V_rVbg1_", self.tab.lbl_filename_preview.toPlainText())
         self.assertIn("series_manifest.json", self.tab.lbl_metadata_preview.toPlainText())
         self.assertIn("series_checkpoint.json", self.tab.lbl_metadata_preview.toPlainText())
 

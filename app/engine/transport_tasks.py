@@ -2,12 +2,12 @@
 from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
 
-from PyQt6 import QtCore
+from PySide6 import QtCore
 
 
 class TaskLane(QtCore.QObject):
-    completed = QtCore.pyqtSignal(object, object, object)
-    failed = QtCore.pyqtSignal(str)
+    completed = QtCore.Signal(object, object, object)
+    failed = QtCore.Signal(str)
 
     def __init__(self, name, parent=None):
         super().__init__(parent)

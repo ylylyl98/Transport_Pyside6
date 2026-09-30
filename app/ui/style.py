@@ -429,3 +429,21 @@ QFrame[role="separator"] {
     max-height: 1px;
 }
 """
+
+# Validation uses the existing warning and keyboard-focus palette.
+APP_STYLE += """
+QWidget[invalid="true"] { border: 1px solid #B91C1C; }
+QWidget[invalid="true"]:focus { border: 2px solid #2563EB; }
+QLabel[role="phase-label"] { font-weight: 600; color: #374151; }
+QGroupBox[role="parameter-group"] {
+    background: transparent;
+    border: none;
+    border-radius: 0px;
+    margin-top: 10px;
+    padding-top: 4px;
+}
+QGroupBox[role="parameter-group"][untitled="true"] {
+    margin-top: 0px;
+    padding-top: 0px;
+}
+"""

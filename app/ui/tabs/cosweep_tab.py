@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from PyQt6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtWidgets
 
 from app.constants import GATE_BIAS_RAMP_STEP_T, GATE_BIAS_RAMP_STEP_V, SAFE_RAMP_STEP_T, SAFE_RAMP_STEP_V
 from app.device_manager import DeviceManager
+from app.cosweep_output import map_filename_parts
 from app.gate_transform import (
     RATIO_TARGET_VBG,
     RATIO_TARGET_VTG,
@@ -25,15 +26,20 @@ from app.plot_x_axis import (
 )
 from app.result_channels import compare_channel_options, plot_channel_options, plot_channel_value
 from app.run_output import build_planned_output, planned_output_warning
-from app.signal_chain import SignalChainSnapshot, signal_chain_filename_parts, signal_chain_metadata
+from app.signal_chain import SignalChainSnapshot, signal_chain_metadata
 from app.ui.helpers import apply_tooltip, configure_volt_spinbox, flash_button_success, set_standard_input_height, style_form_layout
-from app.ui.tabs.base_tab import BaseMeasurementTab
+from app.ui.tabs.base_tab import BaseMeasurementTab, run_filename_snapshot
 from app.ui.widgets.collapsible_section import CollapsibleSection
 from app.ui.widgets.safe_combo import SafeComboBox
-from app.ui.widgets.safe_spinbox import SafeDoubleSpinBox, SafeSpinBox
+from app.ui.widgets.safe_spinbox import SafeDoubleSpinBox, SafeSpinBox, TrimmedDoubleSpinBox
 from app.ui.widgets.status_panel import SectionHeader, StatusPanel
 from app.utils import _frange_inc, safe_ramp
-from app.workers.cosweep import CoSweepWorker, build_cosweep_points, validate_cosweep_params
+from app.workers.cosweep import CoSweepWorker, build_cosweep_points, validate_cosweep_params, sequence_point_count
+from app.voltage_resolution import source_resolution, validate_voltage_points
+from app.workers.cosweep_timing import (
+    estimate_cosweep_seconds, format_cosweep_duration, historical_cosweep_match,
+    estimate_cosweep_cleanup_seconds, LiveCoSweepTiming, cosweep_calibration_description,
+)
 
 SET_BUTTON_WIDTH = 48
 COSWEEP_PANEL_MIN_WIDTH = 380
@@ -68,10 +74,21 @@ class CoSweepTab(BaseMeasurementTab):
         self.control_scroll.setMinimumWidth(COSWEEP_PANEL_MIN_WIDTH)
         self.control_scroll.setMaximumWidth(COSWEEP_PANEL_MAX_WIDTH)
         self.main_splitter.setSizes([430, 830])
+        self._live_eta = None
+        self._eta_outcome = "Running"
+        self._eta_detail = ""
+        self.lbl_eta = QtWidgets.QLabel("ETA (estimated total): --")
+        self.lbl_eta.setWordWrap(True)
+        eta_font = self.lbl_eta.font()
+        eta_font.setBold(True)
+        self.lbl_eta.setFont(eta_font)
+        self.run_panel.layout().insertWidget(1, self.lbl_eta)
         self._wire()
         self.btn_start.setToolTip("Connect instruments first")
         self.device_manager.status_changed.connect(self._on_device_status_changed)
         self.device_manager.operation_changed.connect(self._on_operation_changed)
+        self.device_manager.protection_changed.connect(lambda *_: self._update_sweep_summary())
+        self.device_manager.gate_currents_read.connect(self._on_precision_readback)
         self._sync_sessions_from_manager()
         self._load_tab_settings()
         self._bind_tab_settings()
@@ -79,7 +96,7 @@ class CoSweepTab(BaseMeasurementTab):
         self.on_fast_combo_changed()
 
     def _build_control_panel(self, ctl_layout: QtWidgets.QVBoxLayout):
-        ctl_layout.addWidget(SectionHeader("Sweep Setup"))
+        ctl_layout.addWidget(SectionHeader("1. Sweep mode"))
         grp_setup = QtWidgets.QGroupBox("Sweep Setup")
         form_setup = QtWidgets.QFormLayout(grp_setup)
         style_form_layout(form_setup)
@@ -133,10 +150,15 @@ class CoSweepTab(BaseMeasurementTab):
         form_setup.addRow("Ratio multiplies:", self.cbo_ratio_target)
         form_setup.addRow(lbl_ratio, self.sp_ratio)
         form_setup.addRow("", self.lbl_ratio_formula)
-        form_setup.addRow(QtWidgets.QLabel("Summary:"), self.lbl_sweep_summary)
+        preview_content = QtWidgets.QWidget()
+        preview_layout = QtWidgets.QVBoxLayout(preview_content)
+        preview_layout.setContentsMargins(0, 0, 0, 0)
+        preview_layout.addWidget(self.lbl_sweep_summary)
+        self.trajectory_preview_section = CollapsibleSection("Trajectory preview", preview_content, expanded=False)
+        form_setup.addRow(self.trajectory_preview_section)
         ctl_layout.addWidget(grp_setup)
 
-        ctl_layout.addWidget(SectionHeader("Axis Values"))
+        ctl_layout.addWidget(SectionHeader("2. Sweep range and fixed biases"))
         grp_vars = QtWidgets.QGroupBox("Axis Values")
         lay_vars = QtWidgets.QGridLayout(grp_vars)
         lay_vars.setContentsMargins(8, 16, 8, 8)
@@ -147,19 +169,19 @@ class CoSweepTab(BaseMeasurementTab):
         lay_vars.addWidget(QtWidgets.QLabel("Start / Fixed"), 0, 2)
         lay_vars.addWidget(QtWidgets.QLabel("Stop"), 0, 3)
         lay_vars.addWidget(QtWidgets.QLabel("Step"), 0, 4)
-        lay_vars.addWidget(QtWidgets.QLabel("Set"), 0, 5)
+        lay_vars.addWidget(QtWidgets.QLabel("Apply now"), 0, 5)
         lay_vars.setColumnMinimumWidth(0, 34)
         lay_vars.setColumnMinimumWidth(1, 48)
         lay_vars.setColumnStretch(2, 1)
         lay_vars.setColumnStretch(3, 1)
         lay_vars.setColumnStretch(4, 1)
 
-        self.sp_vtg_start = SafeDoubleSpinBox()
-        self.sp_vtg_stop = SafeDoubleSpinBox()
-        self.sp_vtg_step = SafeDoubleSpinBox()
-        configure_volt_spinbox(self.sp_vtg_start, 0.0)
-        configure_volt_spinbox(self.sp_vtg_stop, 1.0)
-        configure_volt_spinbox(self.sp_vtg_step, 0.1)
+        self.sp_vtg_start = TrimmedDoubleSpinBox()
+        self.sp_vtg_stop = TrimmedDoubleSpinBox()
+        self.sp_vtg_step = TrimmedDoubleSpinBox()
+        configure_volt_spinbox(self.sp_vtg_start, 0.0, decimals=6)
+        configure_volt_spinbox(self.sp_vtg_stop, 1.0, decimals=6)
+        configure_volt_spinbox(self.sp_vtg_step, 0.1, decimals=6)
         self.btn_set_vtg = QtWidgets.QPushButton("Set")
         self.btn_set_vtg.setFixedWidth(SET_BUTTON_WIDTH)
         self.lbl_vtg_mode = QtWidgets.QLabel()
@@ -170,12 +192,12 @@ class CoSweepTab(BaseMeasurementTab):
         lay_vars.addWidget(self.sp_vtg_step, 1, 4)
         lay_vars.addWidget(self.btn_set_vtg, 1, 5)
 
-        self.sp_vbg_start = SafeDoubleSpinBox()
-        self.sp_vbg_stop = SafeDoubleSpinBox()
-        self.sp_vbg_step = SafeDoubleSpinBox()
-        configure_volt_spinbox(self.sp_vbg_start, 0.0)
-        configure_volt_spinbox(self.sp_vbg_stop, 1.0)
-        configure_volt_spinbox(self.sp_vbg_step, 0.1)
+        self.sp_vbg_start = TrimmedDoubleSpinBox()
+        self.sp_vbg_stop = TrimmedDoubleSpinBox()
+        self.sp_vbg_step = TrimmedDoubleSpinBox()
+        configure_volt_spinbox(self.sp_vbg_start, 0.0, decimals=6)
+        configure_volt_spinbox(self.sp_vbg_stop, 1.0, decimals=6)
+        configure_volt_spinbox(self.sp_vbg_step, 0.1, decimals=6)
         self.btn_set_vbg = QtWidgets.QPushButton("Set")
         self.btn_set_vbg.setFixedWidth(SET_BUTTON_WIDTH)
         self.lbl_vbg_mode = QtWidgets.QLabel()
@@ -186,12 +208,12 @@ class CoSweepTab(BaseMeasurementTab):
         lay_vars.addWidget(self.sp_vbg_step, 2, 4)
         lay_vars.addWidget(self.btn_set_vbg, 2, 5)
 
-        self.sp_vds_start = SafeDoubleSpinBox()
-        self.sp_vds_stop = SafeDoubleSpinBox()
-        self.sp_vds_step = SafeDoubleSpinBox()
-        configure_volt_spinbox(self.sp_vds_start, 0.0)
-        configure_volt_spinbox(self.sp_vds_stop, 0.0)
-        configure_volt_spinbox(self.sp_vds_step, 0.01)
+        self.sp_vds_start = TrimmedDoubleSpinBox()
+        self.sp_vds_stop = TrimmedDoubleSpinBox()
+        self.sp_vds_step = TrimmedDoubleSpinBox()
+        configure_volt_spinbox(self.sp_vds_start, 0.0, decimals=6)
+        configure_volt_spinbox(self.sp_vds_stop, 0.0, decimals=6)
+        configure_volt_spinbox(self.sp_vds_step, 0.01, decimals=6)
         self.btn_set_vds = QtWidgets.QPushButton("Set")
         self.btn_set_vds.setFixedWidth(SET_BUTTON_WIDTH)
         self.lbl_vds_mode = QtWidgets.QLabel()
@@ -201,16 +223,20 @@ class CoSweepTab(BaseMeasurementTab):
         lay_vars.addWidget(self.sp_vds_stop, 3, 3)
         lay_vars.addWidget(self.sp_vds_step, 3, 4)
         lay_vars.addWidget(self.btn_set_vds, 3, 5)
+        self.lbl_precision = QtWidgets.QLabel("Source resolution unconfirmed")
+        self.lbl_precision.setWordWrap(True)
+        self.lbl_precision.setProperty("role", "hint")
+        lay_vars.addWidget(self.lbl_precision, 6, 0, 1, 6)
         self.lbl_doping_mode = QtWidgets.QLabel()
         self.lbl_efield_mode = QtWidgets.QLabel()
-        self.sp_doping_start = SafeDoubleSpinBox()
-        self.sp_doping_stop = SafeDoubleSpinBox()
-        self.sp_doping_step = SafeDoubleSpinBox()
-        self.sp_efield_start = SafeDoubleSpinBox()
-        self.sp_efield_stop = SafeDoubleSpinBox()
-        self.sp_efield_step = SafeDoubleSpinBox()
+        self.sp_doping_start = TrimmedDoubleSpinBox()
+        self.sp_doping_stop = TrimmedDoubleSpinBox()
+        self.sp_doping_step = TrimmedDoubleSpinBox()
+        self.sp_efield_start = TrimmedDoubleSpinBox()
+        self.sp_efield_stop = TrimmedDoubleSpinBox()
+        self.sp_efield_step = TrimmedDoubleSpinBox()
         for spinbox, value in ((self.sp_doping_start, 0.0), (self.sp_doping_stop, 1.0), (self.sp_doping_step, 0.1), (self.sp_efield_start, 0.0), (self.sp_efield_stop, 1.0), (self.sp_efield_step, 0.1)):
-            spinbox.setDecimals(4)
+            spinbox.setDecimals(6)
             spinbox.setRange(-1e4, 1e4)
             spinbox.setValue(value)
         lay_vars.addWidget(QtWidgets.QLabel("Doping"), 4, 0)
@@ -230,7 +256,7 @@ class CoSweepTab(BaseMeasurementTab):
         row_tools.addWidget(self.btn_preview)
         ctl_layout.addLayout(row_tools)
 
-        ctl_layout.addWidget(SectionHeader("Acquisition"))
+        ctl_layout.addWidget(SectionHeader("3. Acquisition and waiting"))
         grp_time = QtWidgets.QGroupBox("Timing")
         form_time = QtWidgets.QFormLayout(grp_time)
         style_form_layout(form_time)
@@ -248,7 +274,7 @@ class CoSweepTab(BaseMeasurementTab):
         self.exp_timing = CollapsibleSection("Timing", grp_time, expanded=False)
         ctl_layout.addWidget(self.exp_timing)
 
-        ctl_layout.addWidget(SectionHeader("Output"))
+        ctl_layout.addWidget(SectionHeader("4. Output files"))
         grp_output = QtWidgets.QGroupBox("Output Settings")
         form_output = QtWidgets.QFormLayout(grp_output)
         style_form_layout(form_output)
@@ -310,7 +336,7 @@ class CoSweepTab(BaseMeasurementTab):
             spinbox.setMinimumWidth(64)
 
         apply_tooltip("Choose whether this run is a single sweep or a two-axis map.", lbl_mode, self.cbo_sweep_dim)
-        apply_tooltip("Raw voltages preserves the original Vtg/Vbg/Vds grid. Doping/E-field drives both gates as a coordinated 2D map.", lbl_coordinates, self.cbo_coordinates)
+        apply_tooltip("Raw voltages preserves the original Vtg/Vbg/Vds grid. Doping/E-field drives both gates together; select Vds as an axis to sweep bias while holding the unused gate coordinate fixed.", lbl_coordinates, self.cbo_coordinates)
         apply_tooltip("Axis that moves for every point in the inner loop.", lbl_fast, self.cbo_fast)
         apply_tooltip("Axis that steps between fast-axis passes. Choose 1D sweep to hold all other axes fixed.", lbl_slow, self.cbo_slow)
         apply_tooltip("Choose Keithley G3 or an NI AO channel as the Vds source.", lbl_source, self.cbo_source)
@@ -373,9 +399,12 @@ class CoSweepTab(BaseMeasurementTab):
             self.sp_doping_start, self.sp_doping_stop, self.sp_doping_step,
             self.sp_efield_start, self.sp_efield_stop, self.sp_efield_step,
         ):
-            widget.valueChanged.connect(self.refresh_output_preview)
+            widget.valueChanged.connect(self._update_sweep_summary)
         for widget in (self.cbo_source, self.cbo_fast, self.cbo_slow, self.cbo_sweep_dim, self.cbo_coordinates):
             widget.currentIndexChanged.connect(self.refresh_output_preview)
+        self.sp_delay.valueChanged.connect(self._update_sweep_summary)
+        self.sp_nsamp.valueChanged.connect(self._update_sweep_summary)
+        self.cbo_source.currentIndexChanged.connect(self._update_sweep_summary)
         self.cbo_ratio_target.currentIndexChanged.connect(self.refresh_output_preview)
         self.chk_link.toggled.connect(self.refresh_output_preview)
         self.refresh_output_preview()
@@ -415,40 +444,14 @@ class CoSweepTab(BaseMeasurementTab):
         return [start] if abs(step) < 1e-9 else _frange_inc(start, stop, step)
 
     def _point_count(self) -> int:
-        fast_count = len(self._axis_sequence(self.cbo_fast.currentText()))
+        fast_count = sequence_point_count(*self._axis_values(self.cbo_fast.currentText()))
         if not self._is_2d_map():
             return fast_count
-        slow_count = len(self._axis_sequence(self.cbo_slow.currentText()))
+        slow_count = sequence_point_count(*self._axis_values(self.cbo_slow.currentText()))
         return fast_count * slow_count
 
     def _output_summary_parts(self) -> list[str]:
-        swept_axes = self._swept_axes()
-        source = "keithley_g3" if self.cbo_source.currentText() == "Keithley 2400" else self.cbo_source.currentText()
-        parts = [
-            f"coords_{'derived' if self._is_derived() else 'raw'}",
-            f"fast_{self.cbo_fast.currentText()}",
-            f"slow_{self.cbo_slow.currentText() if self._is_2d_map() else 'None'}",
-            source,
-        ]
-        if self._is_derived():
-            for axis in ("Doping", "E-field"):
-                start, stop, _step = self._axis_values(axis)
-                parts.append(f"{axis}_{start:g}to{stop:g}")
-            vds_start, _vds_stop, _vds_step = self._axis_values("Vds")
-            parts.append(f"fixed_Vds_{vds_start:g}V")
-        else:
-            for axis in ("Vtg", "Vbg", "Vds"):
-                start, stop, _step = self._axis_values(axis)
-                if axis in swept_axes:
-                    parts.append(f"{axis}_{start:g}to{stop:g}V")
-                else:
-                    parts.append(f"fixed_{axis}_{start:g}V")
-        if self.chk_link.isChecked() and not self._is_derived():
-            parts.append(f"ratio_on_{self._ratio_target()}_r_{self.sp_ratio.value():g}")
-        if self._is_derived():
-            parts.append(f"ratio_on_{self._ratio_target()}_r_{self.sp_ratio.value():g}")
-        parts.extend(signal_chain_filename_parts(self.get_signal_chain()))
-        return parts
+        return map_filename_parts(self._params_for_summary(), self.filename_signal_chain())
 
     def refresh_output_preview(self, *_args):
         measurement = "map_2d" if self._is_2d_map() else "sweep_1d"
@@ -505,7 +508,7 @@ class CoSweepTab(BaseMeasurementTab):
                 fast_choices, slow_choices = {"Vtg", "Vbg", "Vds"}, {"Vtg", "Vbg", "Vds"}
                 fast_key, slow_key = "raw_fast_axis", "raw_slow_axis"
             else:
-                fast_choices, slow_choices = {"Doping", "E-field"}, {"Doping", "E-field"}
+                fast_choices, slow_choices = {"Doping", "E-field", "Vds"}, {"Doping", "E-field", "Vds"}
                 fast_key, slow_key = "derived_fast_axis", "derived_slow_axis"
             if mode == "Raw":
                 legacy_fast = settings.value(f"{self.SETTINGS_PREFIX}/fast_axis", fallback[0])
@@ -531,7 +534,7 @@ class CoSweepTab(BaseMeasurementTab):
         # Keep both coordinate-mode orientations so toggling modes does not
         # overwrite the user's preferred fast/slow pair.
         current_fast, current_slow = self.cbo_fast.currentText(), self.cbo_slow.currentText()
-        choices = {"Doping", "E-field"} if self._is_derived() else {"Vtg", "Vbg", "Vds"}
+        choices = {"Doping", "E-field", "Vds"} if self._is_derived() else {"Vtg", "Vbg", "Vds"}
         if current_fast in choices and current_slow in choices and current_fast != current_slow:
             self._axis_memory["Derived" if self._is_derived() else "Raw"] = (current_fast, current_slow)
         self._save_tab_widget_settings(self.SETTINGS_PREFIX, self._settings_widgets())
@@ -600,6 +603,7 @@ class CoSweepTab(BaseMeasurementTab):
         if name in {"g1", "g2", "g3", "daq"}:
             self._sync_sessions_from_manager()
             self._update_manual_buttons()
+            self._update_sweep_summary()
 
     def _on_operation_changed(self, busy: bool, message: str):
         if busy:
@@ -692,15 +696,15 @@ class CoSweepTab(BaseMeasurementTab):
         if self.cbo_source.currentText() == "Keithley 2400" and self.device_manager.is_connected("g3") and not self.device_manager.is_voltage_source_mode("g3"):
             missing_required.append("G3 mode")
         if self.device_manager.is_busy():
-            text = "Hardware is busy with another connection or disconnect operation from Instrument Setup."
+            text = "Hardware is busy with another connection or disconnect operation from Devices."
             self.lbl_connection_hint.setProperty("role", "warning-hint")
             self.btn_start.setToolTip("Wait for the dock connection operation to finish")
         elif missing_required:
-            text = f"Required before start: {', '.join(missing_required)}. Connect from Instrument Setup."
+            text = f"Required before start: {', '.join(missing_required)}. Connect from Devices."
             if missing_optional:
                 text += f" Optional gate controls unavailable: {', '.join(missing_optional)}."
             self.lbl_connection_hint.setProperty("role", "warning-hint")
-            self.btn_start.setToolTip(f"Connect required devices from Instrument Setup: {', '.join(missing_required)}")
+            self.btn_start.setToolTip(f"Connect required devices from Devices: {', '.join(missing_required)}")
         else:
             text = "Ready to run with dock-managed sessions."
             if missing_optional:
@@ -721,11 +725,11 @@ class CoSweepTab(BaseMeasurementTab):
 
     def on_sweep_type_changed(self):
         mode = "Derived" if self._is_derived() else "Raw"
-        desired = ["Doping", "E-field"] if mode == "Derived" else ["Vtg", "Vbg", "Vds"]
+        desired = ["Doping", "E-field", "Vds"] if mode == "Derived" else ["Vtg", "Vbg", "Vds"]
         previous_mode = self._last_coordinate_mode
         if mode != previous_mode:
             old_fast, old_slow = self.cbo_fast.currentText(), self.cbo_slow.currentText()
-            old_choices = {"Doping", "E-field"} if previous_mode == "Derived" else {"Vtg", "Vbg", "Vds"}
+            old_choices = {"Doping", "E-field", "Vds"} if previous_mode == "Derived" else {"Vtg", "Vbg", "Vds"}
             if old_fast in old_choices and old_slow in old_choices and old_fast != old_slow:
                 self._axis_memory[previous_mode] = (old_fast, old_slow)
             target_fast, target_slow = self._axis_memory[mode]
@@ -752,7 +756,7 @@ class CoSweepTab(BaseMeasurementTab):
         self.cbo_slow.blockSignals(True)
         self.cbo_slow.clear()
         if self._is_2d_map():
-            choices = ["Doping", "E-field"] if self._is_derived() else ["Vtg", "Vbg", "Vds"]
+            choices = ["Doping", "E-field", "Vds"] if self._is_derived() else ["Vtg", "Vbg", "Vds"]
             for axis in choices:
                 if axis != fast:
                     self.cbo_slow.addItem(axis)
@@ -800,12 +804,6 @@ class CoSweepTab(BaseMeasurementTab):
             _label, start, stop, step = self._axis_controls(axis)
             for widget in (start, stop, step):
                 widget.setVisible(self._is_derived())
-        # Vds remains visible as the fixed bias in a derived map.
-        self.lbl_vds_mode.setText("Fixed" if self._is_derived() else self.lbl_vds_mode.text())
-        self.sp_vds_stop.setVisible(not self._is_derived())
-        self.sp_vds_step.setVisible(not self._is_derived())
-        self.sp_vds_stop.setEnabled(not self._is_derived())
-        self.sp_vds_step.setEnabled(not self._is_derived())
         self._updating_combos = False
         self._update_ratio_formula()
         self._update_sweep_summary()
@@ -859,14 +857,39 @@ class CoSweepTab(BaseMeasurementTab):
         mode = "2D map" if self._is_2d_map() else "1D sweep"
         fast = self.cbo_fast.currentText()
         slow = self.cbo_slow.currentText() if self._is_2d_map() else "None"
+        basis = "Model estimate; no matching historical calibration."
+        try:
+            preview = self._params_for_summary()
+            trajectory = build_cosweep_points(preview)
+            timing_context = getattr(self, "get_timing_context", None)
+            connections, save = timing_context() if timing_context else (self.conns, self.save)
+            calibrated = historical_cosweep_match(preview, connections, save.device_id)
+            seconds = estimate_cosweep_seconds(preview, points=trajectory,
+                                               connections=connections, device_id=save.device_id)
+            duration = format_cosweep_duration(seconds)
+            basis = cosweep_calibration_description(preview, connections, save.device_id)
+            source = "model estimate"
+            if calibrated:
+                if preview.n_sample in (1, 3):
+                    source = f"historical calibration; completed Ave={preview.n_sample} reference"
+                else:
+                    source = "Ave interpolated" if preview.n_sample == 2 else "Ave extrapolated"
+            timing = f"Estimated total: ~{duration} ({source}; approximate)"
+        except ValueError:
+            trajectory = []
+            timing = "Estimated total: unavailable until ranges and steps are valid"
+        self.lbl_sweep_summary.setToolTip(
+            basis + "\nTime estimate assumes outputs start at 0 V and includes final return to 0 V. "
+            "Delay occurs once per point; Ave readings follow consecutively. "
+            "Without matching history, additional averages assume 10 ms/read. "
+            "Planning allowances: DAQ read 10 ms, Keithley I/O 20 ms, current read 100 ms, "
+            "file/plot update 10 ms per point. Actual device and disk timing may vary."
+        )
         if self._is_derived():
-            axes = "; ".join(self._format_axis_summary(axis) for axis in ("Doping", "E-field"))
-            axes += f"; Vds: fixed {self.sp_vds_start.value():g} V"
+            axes = "; ".join(self._format_axis_summary(axis) for axis in ("Doping", "E-field", "Vds"))
             try:
-                preview = self._params_for_summary()
-                points = build_cosweep_points(preview)
-                vtg_values = [point["vtg"] for point in points]
-                vbg_values = [point["vbg"] for point in points]
+                vtg_values = [point["vtg"] for point in trajectory]
+                vbg_values = [point["vbg"] for point in trajectory]
                 axes += f"\nComputed Vtg: {min(vtg_values):g} to {max(vtg_values):g} V; Vbg: {min(vbg_values):g} to {max(vbg_values):g} V"
             except Exception:
                 axes += "\nComputed Vtg/Vbg: unavailable until ratio and ranges are valid"
@@ -881,19 +904,43 @@ class CoSweepTab(BaseMeasurementTab):
         order = f"Fast: {fast}; Slow: {slow}" if self._is_2d_map() else f"Sweep: {fast}; fixed axes use Start / Fixed"
         if self._is_2d_map():
             order += "; alternate slow passes run the fast axis in reverse."
-        self.lbl_sweep_summary.setText(f"{mode} · {coordinate_label}. {order}\n{axes}\nEstimated points: {points}")
+        if self._live_eta is None:
+            self.lbl_eta.setText(timing.replace("Estimated total:", "ETA (estimated total):", 1))
+            self.lbl_eta.setToolTip(self.lbl_sweep_summary.toolTip())
+        self._precision_error = ""
+        try:
+            precision = self._precision_check(trajectory)
+        except ValueError as ex:
+            precision = str(ex)
+            self._precision_error = precision
+        self._last_precision_signature = self._precision_signature()
+        self.lbl_precision.setText(precision)
+        self.lbl_sweep_summary.setText(f"{mode} · {coordinate_label}. {order}\n{axes}\nEstimated points: {points}\n{timing}\n{precision}")
         self.refresh_output_preview()
 
     def _params_for_summary(self) -> CoParams:
         """Build a non-destructive parameter snapshot for the setup summary."""
         p = CoParams(
-            coordinate_mode="Derived",
+            coordinate_mode="Derived" if self._is_derived() else "Raw",
+            mode="Linked" if self.chk_link.isChecked() and self._link_plot_available() else "Grid",
             axis_fast=self.cbo_fast.currentText(),
-            axis_slow=self.cbo_slow.currentText(),
+            axis_slow=self.cbo_slow.currentText() if self._is_2d_map() else "None",
+            vtg_start=self.sp_vtg_start.value(),
+            vtg_stop=self.sp_vtg_stop.value() if "Vtg" in self._swept_axes() else self.sp_vtg_start.value(),
+            vtg_step=abs(self.sp_vtg_step.value()),
+            vbg_start=self.sp_vbg_start.value(),
+            vbg_stop=self.sp_vbg_stop.value() if "Vbg" in self._swept_axes() else self.sp_vbg_start.value(),
+            vbg_step=abs(self.sp_vbg_step.value()),
+            vds_source=self.cbo_source.currentText(),
+            vg_ramp=GATE_BIAS_RAMP_STEP_V,
+            vds_ramp=self.p.vds_ramp,
+            delay=self.sp_delay.value(),
+            n_sample=self.sp_nsamp.value(),
             ratio=self.sp_ratio.value(),
             ratio_target=self._ratio_target(),
             vds_start=self.sp_vds_start.value(),
-            vds_stop=self.sp_vds_start.value(),
+            vds_stop=self.sp_vds_stop.value() if "Vds" in self._swept_axes() else self.sp_vds_start.value(),
+            vds_step=abs(self.sp_vds_step.value()),
             doping_start=self.sp_doping_start.value(),
             doping_stop=self.sp_doping_stop.value(),
             doping_step=abs(self.sp_doping_step.value()),
@@ -929,13 +976,20 @@ class CoSweepTab(BaseMeasurementTab):
                 self.plot.ax.set_title(f"Preview unavailable: {ex}")
                 self.plot.canvas.draw_idle()
                 return
-            xs = [point["doping"] for point in points]
-            ys = [point["efield"] for point in points]
+            xs = [point["fast_value"] for point in points]
+            ys = [point["slow_value"] for point in points]
             self.plot.ax.plot(xs, ys, "o-", markersize=4, linewidth=1.0, color="blue", alpha=0.8)
-            self.plot.ax.set_xlabel(doping_axis_label(self.sp_ratio.value(), self._ratio_target()))
-            self.plot.ax.set_ylabel(efield_axis_label(self.sp_ratio.value(), self._ratio_target()))
+            self.plot.ax.set_xlabel(plot_x_axis_label(self.cbo_fast.currentText(), self.sp_ratio.value(), self._ratio_target()))
+            self.plot.ax.set_ylabel(plot_x_axis_label(self.cbo_slow.currentText(), self.sp_ratio.value(), self._ratio_target()))
             self.plot.ax.set_title(f"Derived 2D Map Preview: {len(points)} pts (coordinated Vtg/Vbg)")
             self.plot.ax.grid(True)
+            self.plot.canvas.draw_idle()
+            return
+        try:
+            if self._point_count() > 250000:
+                raise ValueError("The limit is 250,000 points.")
+        except ValueError as ex:
+            self.plot.ax.set_title(f"Preview unavailable: {ex}")
             self.plot.canvas.draw_idle()
             return
         use_ratio = self.chk_link.isChecked() and self._link_plot_available()
@@ -1055,8 +1109,40 @@ class CoSweepTab(BaseMeasurementTab):
         self.p.derived_fast_axis = self.p.axis_fast if self._is_derived() else "Doping"
         self.p.derived_slow_axis = self.p.axis_slow if self._is_derived() else "E-field"
 
+    def _precision_signature(self):
+        return tuple(source_resolution(self.device_manager.sessions.get(name)) for name in ("g1", "g2", "g3"))
+
+    def _on_precision_readback(self, *_args):
+        # Most quiet reads change only current; avoid rebuilding the trajectory.
+        if self._precision_signature() != getattr(self, "_last_precision_signature", None):
+            self._update_sweep_summary()
+
+    def _precision_check(self, points, require_known=False):
+        resolutions, messages = {}, []
+        for device, axis in (("g1", "vtg"), ("g2", "vbg"), ("g3", "vds")):
+            if device not in self._required_devices():
+                continue
+            session = self.device_manager.sessions.get(device)
+            quantum = source_resolution(session)
+            if quantum is None:
+                message = f"{axis.upper()}: source resolution unconfirmed; connect/read back a supported Keithley 2400 range."
+                if require_known:
+                    raise ValueError(message)
+                messages.append(message)
+            else:
+                resolutions[axis] = quantum
+                messages.append(f"{axis.upper()}: {quantum:g} V source resolution (cached range).")
+        validate_voltage_points(points, resolutions)
+        return " ".join(messages) or "Keithley source resolution: not applicable."
+
+    @run_filename_snapshot
     def start_run(self):
         if self.worker_thread:
+            return
+        try:
+            self._precision_check(build_cosweep_points(self._params_for_summary()), require_known=True)
+        except ValueError as ex:
+            QtWidgets.QMessageBox.warning(self, "Voltage Resolution", str(ex))
             return
         mw = self.window()
         if hasattr(mw, "refresh_models_from_ui"):
@@ -1088,6 +1174,19 @@ class CoSweepTab(BaseMeasurementTab):
         try:
             self.begin_run_logging(self._planned_output, "2D Map" if self._is_2d_map() else "1D Sweep")
             self.worker = CoSweepWorker(self.p, self.save, self.conns, g1=self.s_g1, g2=self.s_g2, g3=self.s_g3, daq=self.s_daq, plot_choice=self.p.plot_choice, amp_rate=amp, lkn_rate=lkn, signal_chain=signal_chain_metadata(signal_chain))
+            trajectory = build_cosweep_points(self.p)
+            initial_seconds = estimate_cosweep_seconds(self.p, points=trajectory,
+                                                       connections=self.conns, device_id=self.save.device_id)
+            self._live_eta = LiveCoSweepTiming(len(trajectory), initial_seconds,
+                estimate_cosweep_cleanup_seconds(self.p, trajectory[-1]))
+            self._eta_outcome = "Running"
+            self._eta_detail = ""
+            self.worker.timing_updated.connect(self._on_live_timing)
+            self.lbl_eta.setToolTip("Live estimate uses the last 20 point intervals, excluding pauses. "
+                                   "The first point is excluded from the rate; the first 5 intervals "
+                                   "blend with the initial estimate. Final zero-return time is reserved. "
+                                   "Remaining time updates at each point; it is approximate.")
+            self._on_live_timing({"completed": 0, "elapsed": 0, "phase": "sampling"})
             self.worker_thread = QtCore.QThread()
             self.worker.moveToThread(self.worker_thread)
             self.worker_thread.started.connect(self.worker.run)
@@ -1104,17 +1203,44 @@ class CoSweepTab(BaseMeasurementTab):
             self.worker.error.connect(self.worker_thread.quit)
             self.worker_thread.finished.connect(self._cleanup_thread)
             self.run_panel.set_running(True)
-            self.set_status("Running...", "running")
+            self.set_status("Starting measurement...", "preparing")
             self.worker_thread.start()
         except Exception as ex:
+            self._live_eta = None
+            self._update_sweep_summary()
             self.append_log(str(ex))
             self.end_run_logging("error", str(ex))
             self.release_run_devices()
 
     def stop_run(self):
         if self.worker:
-            self.set_status("Stopping safely...", "running", "Stop requested. Waiting for the worker to reach a safe checkpoint and ramp outputs to 0 V.")
+            self.set_status("Stopping safely...", "stopping", "Stop requested. Waiting for the worker to reach a safe checkpoint and ramp outputs to 0 V.")
+            self._eta_outcome = "Stopped"
+            self.lbl_eta.setText("ETA: stopping safely; remaining time unavailable")
             self.worker.request_stop()
+
+    def _on_live_timing(self, sample):
+        eta = self._live_eta
+        if eta is None:
+            return
+        phase = sample["phase"]
+        eta.update(int(sample["completed"]), float(sample["elapsed"]))
+        if phase in ("done", "cleanup_failed"):
+            eta.finish(float(sample["elapsed"]))
+            outcome = "Zero return not confirmed" if phase == "cleanup_failed" else self._eta_outcome
+            self.lbl_eta.setText(f"{outcome} | Active elapsed: {format_cosweep_duration(eta.elapsed)}")
+            self._finalize_run_outcome(cleanup_failed=phase == "cleanup_failed")
+            # Retain the frozen result until thread cleanup releases the run.
+        elif phase == "cleanup":
+            self.lbl_eta.setText("ETA: returning outputs to zero; waiting for cleanup")
+        elif self._eta_outcome != "Running":
+            self.lbl_eta.setText("ETA: stopping safely; remaining time unavailable")
+        else:
+            state = "Paused" if phase == "paused" else "Live ETA"
+            self.lbl_eta.setText(
+                f"{state} | Remaining: ~{format_cosweep_duration(eta.remaining_seconds)}\n"
+                f"Estimated total: ~{format_cosweep_duration(eta.total_seconds)} "
+                f"({eta.completed}/{eta.total_points} points)")
 
     def _clear_plot(self):
         self.plot.clear()
@@ -1168,6 +1294,7 @@ class CoSweepTab(BaseMeasurementTab):
             self.plot.canvas.draw_idle()
 
     def _cleanup_thread(self):
+        self._live_eta = None
         if self.worker:
             self.worker.deleteLater()
             self.worker = None
@@ -1176,23 +1303,32 @@ class CoSweepTab(BaseMeasurementTab):
         self.run_panel.set_running(False)
         self._update_manual_buttons()
 
-    def on_error(self, msg):
-        self.set_status("Run error", "error", msg)
-        self.append_log("ERROR: " + msg)
-        self.end_run_logging("error", msg)
+    def _record_run_outcome(self, outcome, detail):
+        self._eta_outcome = outcome
+        self._eta_detail = detail
+        if self._live_eta is not None:
+            self.set_status("Returning outputs to zero...", "cleanup", detail)
+            return
+        self._finalize_run_outcome()
+
+    def _finalize_run_outcome(self, *, cleanup_failed=False):
+        outcome, detail = self._eta_outcome, self._eta_detail
+        if cleanup_failed:
+            outcome = "Error"
+            detail = "Zero return not confirmed. " + detail
+        status = {"Finished": "finished", "Stopped": "stopped"}.get(outcome, "error")
+        label = {"finished": "Finished", "stopped": "Stopped by user", "error": "Run error"}[status]
+        self.set_status(label, "error" if status == "error" else "done", detail)
+        self.append_log(("Saved: " if status == "finished" else "ERROR: " if status == "error" else "") + detail)
+        self.end_run_logging(status, detail)
         self._output_run_id = None
         self.refresh_output_preview()
+
+    def on_error(self, msg):
+        self._record_run_outcome("Error", msg)
 
     def on_finished(self, path):
-        self.set_status("Finished", "done", path)
-        self.append_log(f"Saved: {path}")
-        self.end_run_logging("finished", path)
-        self._output_run_id = None
-        self.refresh_output_preview()
+        self._record_run_outcome("Finished", path)
 
     def on_stopped(self, message: str):
-        self.set_status("Stopped by user", "done", message)
-        self.append_log(message)
-        self.end_run_logging("stopped", message)
-        self._output_run_id = None
-        self.refresh_output_preview()
+        self._record_run_outcome("Stopped", message)

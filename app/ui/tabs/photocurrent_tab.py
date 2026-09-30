@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 
-from PyQt6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtWidgets
 
 from app.constants import GATE_BIAS_RAMP_STEP_T, GATE_BIAS_RAMP_STEP_V
 from app.device_manager import DeviceManager
@@ -12,7 +12,7 @@ from app.result_channels import compare_channel_options, plot_channel_options, p
 from app.run_output import build_planned_output, planned_output_warning
 from app.signal_chain import SignalChainSnapshot, signal_chain_filename_parts, signal_chain_metadata
 from app.ui.helpers import apply_tooltip, configure_volt_spinbox, flash_button_success, set_standard_input_height, style_form_layout
-from app.ui.tabs.base_tab import BaseMeasurementTab
+from app.ui.tabs.base_tab import BaseMeasurementTab, run_filename_snapshot
 from app.ui.widgets.collapsible_section import CollapsibleSection
 from app.ui.widgets.safe_combo import SafeComboBox
 from app.ui.widgets.safe_spinbox import SafeDoubleSpinBox, SafeSpinBox
@@ -60,7 +60,7 @@ class PhotocurrentTab(BaseMeasurementTab):
         return wrap
 
     def _build_control_panel(self, ctl_layout: QtWidgets.QVBoxLayout):
-        ctl_layout.addWidget(SectionHeader("Sweep Parameters"))
+        ctl_layout.addWidget(SectionHeader("1. Sweep range"))
         grp_wl = QtWidgets.QGroupBox("Wavelength Scan")
         form_wl = QtWidgets.QFormLayout(grp_wl)
         style_form_layout(form_wl)
@@ -77,13 +77,13 @@ class PhotocurrentTab(BaseMeasurementTab):
         self.btn_go_wl.setFixedWidth(SET_BUTTON_WIDTH)
         lbl_wls = QtWidgets.QLabel("Start (nm):")
         lbl_wle = QtWidgets.QLabel("Stop (nm):")
-        lbl_wld = QtWidgets.QLabel("Step (nm):")
+        lbl_wld = QtWidgets.QLabel("Sampling step (nm):")
         form_wl.addRow(lbl_wls, self.sp_wls)
         form_wl.addRow(lbl_wle, self.sp_wle)
         form_wl.addRow(lbl_wld, self._make_set_row(self.sp_wld, self.btn_go_wl))
         ctl_layout.addWidget(grp_wl)
 
-        ctl_layout.addWidget(SectionHeader("Bias"))
+        ctl_layout.addWidget(SectionHeader("2. Fixed biases"))
         grp_vds = QtWidgets.QGroupBox("Vds Bias")
         form_vds = QtWidgets.QFormLayout(grp_vds)
         style_form_layout(form_vds)
@@ -98,9 +98,8 @@ class PhotocurrentTab(BaseMeasurementTab):
         self.sp_vds_ramp.setValue(0.01)
         form_vds.addRow(self.chk_use_vds)
         lbl_vds = QtWidgets.QLabel("Manual Set (V):")
-        lbl_vds_ramp = QtWidgets.QLabel("Vds Step (V):")
+        lbl_vds_ramp = QtWidgets.QLabel("Ramp step (V):")
         form_vds.addRow(lbl_vds, self._make_set_row(self.sp_vds, self.btn_set_vds))
-        form_vds.addRow(lbl_vds_ramp, self.sp_vds_ramp)
         self.lbl_vds_availability = QtWidgets.QLabel()
         self.lbl_vds_availability.setWordWrap(True)
         self.lbl_vds_availability.setProperty("role", "hint")
@@ -142,7 +141,7 @@ class PhotocurrentTab(BaseMeasurementTab):
         ctl_layout.addWidget(grp_recipe)
         self._append_bias_condition(PhotocurrentBiasCondition())
 
-        ctl_layout.addWidget(SectionHeader("Acquisition"))
+        ctl_layout.addWidget(SectionHeader("3. Acquisition and waiting"))
         grp_time = QtWidgets.QGroupBox("Timing")
         form_time = QtWidgets.QFormLayout(grp_time)
         style_form_layout(form_time)
@@ -157,23 +156,24 @@ class PhotocurrentTab(BaseMeasurementTab):
         lbl_avg = QtWidgets.QLabel("Averages:")
         form_time.addRow(lbl_delay, self.sp_delay)
         form_time.addRow(lbl_avg, self.sp_nsamp)
+        form_time.addRow(lbl_vds_ramp, self.sp_vds_ramp)
         self.exp_timing = CollapsibleSection("Timing", grp_time, expanded=False)
         ctl_layout.addWidget(self.exp_timing)
 
-        ctl_layout.addWidget(SectionHeader("Output"))
+        ctl_layout.addWidget(SectionHeader("4. Output files"))
         grp_output = QtWidgets.QGroupBox("Output Settings")
         form_output = QtWidgets.QFormLayout(grp_output)
         style_form_layout(form_output)
         self.ed_base = QtWidgets.QLineEdit(self.p.base_name)
         self.cbo_source = SafeComboBox()
         self.cbo_source.addItems(["None", "Keithley 2400"])
+        lbl_source = QtWidgets.QLabel("Vds Source:")
+        form_vds.addRow(lbl_source, self.cbo_source)
         self.cbo_y = SafeComboBox()
         self.cbo_y.addItems(["Ids_DC", "Ids_X", "Ids_Y"])
         lbl_base = QtWidgets.QLabel("Filename Stem:")
-        lbl_source = QtWidgets.QLabel("Vds Source:")
         lbl_y = QtWidgets.QLabel("Plot Axis:")
         form_output.addRow(lbl_base, self.ed_base)
-        form_output.addRow(lbl_source, self.cbo_source)
         form_output.addRow(lbl_y, self.cbo_y)
         output_content = QtWidgets.QWidget()
         output_layout = QtWidgets.QVBoxLayout(output_content)
@@ -422,8 +422,8 @@ class PhotocurrentTab(BaseMeasurementTab):
 
     def _output_summary_parts(self) -> list[str]:
         return [
-            f"wl_{self.sp_wls.value():g}to{self.sp_wle.value():g}nm",
-            *signal_chain_filename_parts(self.get_signal_chain()),
+            f"WL{self.sp_wls.value():g}to{self.sp_wle.value():g}nm",
+            *signal_chain_filename_parts(self.filename_signal_chain()),
         ]
 
     def refresh_output_preview(self, *_args):
@@ -720,15 +720,15 @@ class PhotocurrentTab(BaseMeasurementTab):
         ):
             missing_required.append("G3 mode")
         if self.device_manager.is_busy():
-            text = "Hardware is busy with another connection or disconnect operation from Instrument Setup."
+            text = "Hardware is busy with another connection or disconnect operation from Devices."
             self.lbl_connection_hint.setProperty("role", "warning-hint")
             self.btn_start.setToolTip("Wait for the dock connection operation to finish")
         elif missing_required:
-            text = f"Required before start: {', '.join(missing_required)}. Connect from Instrument Setup."
+            text = f"Required before start: {', '.join(missing_required)}. Connect from Devices."
             if missing_optional:
                 text += f" Optional manual controls unavailable: {', '.join(missing_optional)}."
             self.lbl_connection_hint.setProperty("role", "warning-hint")
-            self.btn_start.setToolTip(f"Connect required devices from Instrument Setup: {', '.join(missing_required)}")
+            self.btn_start.setToolTip(f"Connect required devices from Devices: {', '.join(missing_required)}")
         else:
             text = "Ready to run with dock-managed sessions."
             if missing_optional:
@@ -800,6 +800,7 @@ class PhotocurrentTab(BaseMeasurementTab):
         self.p.n_sample = self.sp_nsamp.value()
         self.p.plot_choice = self.cbo_y.currentText()
 
+    @run_filename_snapshot
     def start_run(self):
         if self.worker_thread:
             return
@@ -848,7 +849,7 @@ class PhotocurrentTab(BaseMeasurementTab):
             self.worker.error.connect(self.worker_thread.quit)
             self.worker_thread.finished.connect(self._cleanup_thread)
             self.run_panel.set_running(True)
-            self.set_status("Running...", "running")
+            self.set_status("Starting measurement...", "preparing")
             self.worker_thread.start()
         except Exception as ex:
             self.append_log(str(ex))
@@ -857,7 +858,7 @@ class PhotocurrentTab(BaseMeasurementTab):
 
     def stop_run(self):
         if self.worker:
-            self.set_status("Stopping safely...", "running", "Stop requested. Waiting for the worker to reach a safe checkpoint and ramp outputs to 0 V.")
+            self.set_status("Stopping safely...", "stopping", "Stop requested. Waiting for the worker to reach a safe checkpoint and ramp outputs to 0 V.")
             self.worker.request_stop()
 
     def _cleanup_thread(self):

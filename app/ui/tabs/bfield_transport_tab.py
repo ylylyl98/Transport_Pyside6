@@ -14,7 +14,7 @@ import os
 import re
 import time
 
-from PyQt6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtWidgets
 
 from app.engine.bfield_transport_sweep import (
     COIL_CONSTANT_T_PER_A,
@@ -81,7 +81,7 @@ class BFieldTransportTab(BaseMeasurementTab):
         return spin
 
     def _build_control_panel(self, ctl_layout):
-        ctl_layout.addWidget(SectionHeader("B-field trajectory"))
+        ctl_layout.addWidget(SectionHeader("1. Sweep range"))
         group = QtWidgets.QGroupBox("Driven-mode sweep")
         form = QtWidgets.QFormLayout(group)
         style_form_layout(form)
@@ -137,7 +137,7 @@ class BFieldTransportTab(BaseMeasurementTab):
         form.addRow("Active equations:", self.lbl_ratio_formula)
         ctl_layout.addWidget(group)
 
-        ctl_layout.addWidget(SectionHeader("Gate conditions for each B-field sweep"))
+        ctl_layout.addWidget(SectionHeader("2. Fixed biases"))
         intro = QtWidgets.QLabel(
             "Sweep the magnetic field while measuring current at fixed doping and E-field conditions. "
             "Each row fixes both doping and E-field for one complete trajectory; "
@@ -266,7 +266,7 @@ class BFieldTransportTab(BaseMeasurementTab):
         self.btn_condition_up.clicked.connect(lambda: self._move_condition(-1))
         self.btn_condition_down.clicked.connect(lambda: self._move_condition(1))
 
-        ctl_layout.addWidget(SectionHeader("Acquisition / output"))
+        ctl_layout.addWidget(SectionHeader("3. Acquisition and waiting"))
         acq = QtWidgets.QGroupBox("Acquisition")
         acq_form = QtWidgets.QFormLayout(acq)
         style_form_layout(acq_form)
@@ -277,11 +277,14 @@ class BFieldTransportTab(BaseMeasurementTab):
         self.ed_base = QtWidgets.QLineEdit(self.params.base_name)
         acq_form.addRow("Delay (s):", self.sp_delay)
         acq_form.addRow("Averages:", self.sp_averages)
-        acq_form.addRow("Filename stem:", self.ed_base)
         ctl_layout.addWidget(acq)
+        ctl_layout.addWidget(SectionHeader("4. Output files"))
         output_wrap = QtWidgets.QWidget()
         output_layout = QtWidgets.QVBoxLayout(output_wrap)
         output_layout.setContentsMargins(0, 0, 0, 0)
+        file_form = QtWidgets.QFormLayout()
+        file_form.addRow("Filename stem:", self.ed_base)
+        output_layout.addLayout(file_form)
         self._add_output_preview_section(output_layout)
         ctl_layout.addWidget(output_wrap)
         self.lbl_preview = QtWidgets.QLabel()

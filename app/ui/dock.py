@@ -2,15 +2,15 @@ from __future__ import annotations
 
 from typing import Tuple
 
-from PyQt6 import QtCore, QtWidgets
-from PyQt6.QtCore import Qt
+from PySide6 import QtCore, QtWidgets
+from PySide6.QtCore import Qt
 
 from app.constants import SETTINGS_APP, SETTINGS_ORG, V_LIMIT
 from app.device_manager import DeviceManager
 from app.hw_discovery import scan_all
 from app.keithley_modes import KEITHLEY_MODE_LABELS, keithley_mode_label, keithley_mode_options
 from app.models import Connections, SaveRoot
-from app.signal_chain import engineering_value, preamp_gain_v_per_a, sr830_xy_output_gain
+from app.signal_chain import engineering_value, preamp_gain_v_per_a, sr830_xy_output_gain, sample_ac_voltage_estimate
 from app.settings import get_app_settings
 from app.ui.helpers import apply_tooltip, configure_volt_spinbox, flash_button_success, set_standard_input_height, style_form_layout
 from app.ui.widgets.collapsible_section import CollapsibleSection
@@ -23,8 +23,8 @@ from instruments.visa_resources import resolve_gpib_resource
 
 
 class ScanWorker(QtCore.QThread):
-    results_ready = QtCore.pyqtSignal(dict)
-    scan_failed = QtCore.pyqtSignal(str)
+    results_ready = QtCore.Signal(dict)
+    scan_failed = QtCore.Signal(str)
 
     def run(self):
         try:
@@ -34,9 +34,9 @@ class ScanWorker(QtCore.QThread):
 
 
 class ConnDock(QtWidgets.QWidget):
-    stop_requested = QtCore.pyqtSignal()
-    signal_chain_changed = QtCore.pyqtSignal()
-    lockin_sensitivity_verified = QtCore.pyqtSignal(float, str)
+    stop_requested = QtCore.Signal()
+    signal_chain_changed = QtCore.Signal()
+    lockin_sensitivity_verified = QtCore.Signal(float, str)
 
     AMP_MIN_A = 1e-12
     LIA_MIN_V = 1e-6
@@ -213,7 +213,7 @@ class ConnDock(QtWidgets.QWidget):
         self.sp_amp.valueChanged.connect(self._on_preamp_sensitivity_changed)
         self.sp_lkn.valueChanged.connect(self._on_manual_lockin_sensitivity_changed)
         lbl_amp = QtWidgets.QLabel("Pre-amp (A):")
-        lbl_lkn = QtWidgets.QLabel("Lock-in (V):")
+        lbl_lkn = QtWidgets.QLabel("Lock-in sensitivity (V):")
         self.lbl_lkn_source = QtWidgets.QLabel("Manual value")
         self.lbl_lkn_source.setWordWrap(True)
         self.lbl_lkn_source.setProperty("role", "hint")
@@ -224,6 +224,23 @@ class ConnDock(QtWidgets.QWidget):
         form_rate.addRow("", self.lbl_amp_status)
         form_rate.addRow(lbl_lkn, self.sp_lkn)
         form_rate.addRow("", self.lbl_lkn_source)
+        self.ed_ac_contact = QtWidgets.QLineEdit()
+        self.ed_ac_contact.setMaxLength(40)
+        self.ed_ac_contact.setPlaceholderText("e.g. MoTe2E2 (optional)")
+        self.ed_ac_contact.setToolTip("AC excitation contact label. Does not change instrument connections. Output amplitude comes from Lock-in Sine Out.")
+        form_rate.addRow("AC contact:", self.ed_ac_contact)
+        self.ed_ac_contact.textEdited.connect(self._on_ac_contact_edited)
+        self.sp_ac_ratio = TrimmedDoubleSpinBox()
+        self.sp_ac_ratio.setDecimals(9)
+        self.sp_ac_ratio.setRange(0, 1e6)
+        self.sp_ac_ratio.setSpecialValueText("Not specified")
+        self.sp_ac_ratio.setToolTip("User estimate: sample-side AC voltage / Lock-in output voltage. Use the same amplitude convention on both sides. Set 0 to clear; no default ratio is assumed.")
+        self.sp_ac_ratio.valueChanged.connect(self._on_ac_ratio_edited)
+        form_rate.addRow("AC voltage ratio (estimate):", self.sp_ac_ratio)
+        self.lbl_ac_estimate = QtWidgets.QLabel("Sample AC estimate: ratio not specified")
+        self.lbl_ac_estimate.setWordWrap(True)
+        self.lbl_ac_estimate.setProperty("role", "hint")
+        form_rate.addRow("", self.lbl_ac_estimate)
         self.exp_signal_chain = CollapsibleSection("Signal Chain", grp_rate, expanded=False)
         layout.addWidget(self.exp_signal_chain)
         self._update_preamp_status(flash=False)
@@ -262,6 +279,13 @@ class ConnDock(QtWidgets.QWidget):
         grp_manual = QtWidgets.QGroupBox("Manual Controls")
         form_manual = QtWidgets.QFormLayout(grp_manual)
         style_form_layout(form_manual)
+        self.sp_manual_step = SafeDoubleSpinBox()
+        self.sp_manual_step.setDecimals(3)
+        self.sp_manual_step.setRange(0.001, 1.0)
+        self.sp_manual_step.setValue(0.1)
+        self.sp_manual_step.setSuffix(" V")
+        self.sp_manual_step.setToolTip("Relative change per click; larger changes retain the safe ramp step limits.")
+        form_manual.addRow("Step size:", self.sp_manual_step)
         self.sp_manual_g1 = SafeDoubleSpinBox()
         self.sp_manual_g2 = SafeDoubleSpinBox()
         self.sp_manual_g3 = SafeDoubleSpinBox()
@@ -283,6 +307,8 @@ class ConnDock(QtWidgets.QWidget):
             set_button.clicked.connect(lambda _checked=False, sb=spinbox: self._on_manual_gate_ramp(sb))
             zero_button.clicked.connect(lambda _checked=False, sb=spinbox: self._on_manual_gate_zero(sb))
             spinbox.valueChanged.connect(lambda _value, n=name: self._mark_manual_gate_dirty(n))
+            spinbox.lineEdit().textEdited.connect(lambda _text, n=name: self._mark_manual_gate_dirty(n))
+            spinbox.lineEdit().returnPressed.connect(lambda sb=spinbox: self._on_manual_gate_ramp(sb))
 
         self.sp_manual_wavelength = SafeDoubleSpinBox()
         self.sp_manual_wavelength.setDecimals(3)
@@ -297,6 +323,8 @@ class ConnDock(QtWidgets.QWidget):
         self.gate_readback_labels: dict[str, dict[str, QtWidgets.QLabel]] = {}
         for name, title in (("g1", "G1 / Vtg"), ("g2", "G2 / Vbg"), ("g3", "G3 / Vds")):
             form_manual.addRow(self._make_gate_control_card(name, title))
+        self.sp_manual_step.valueChanged.connect(self._update_manual_step_labels)
+        self._update_manual_step_labels()
         self._manual_daq_controls: dict[int, tuple[SafeDoubleSpinBox, QtWidgets.QPushButton, QtWidgets.QPushButton, QtWidgets.QLabel]] = {}
         for ao_index in (0, 1):
             spinbox = SafeDoubleSpinBox()
@@ -405,8 +433,8 @@ class ConnDock(QtWidgets.QWidget):
         for name, (spinbox, ramp_button, _zero_button) in self._manual_gate_controls.items():
             apply_tooltip("Ramp this gate from its current source setpoint to the requested voltage.", spinbox, ramp_button)
             down_button, up_button = self._manual_gate_step_buttons[name]
-            apply_tooltip("Decrease the target by 0.1 V and safely ramp to it.", down_button)
-            apply_tooltip("Increase the target by 0.1 V and safely ramp to it.", up_button)
+            apply_tooltip("Decrease the source setpoint by the selected step; continuous clicks are combined.", down_button)
+            apply_tooltip("Increase the source setpoint by the selected step; continuous clicks are combined.", up_button)
             apply_tooltip("Read this gate's set voltage, measured voltage, current, and compliance state.", self._manual_gate_read_buttons[name])
         apply_tooltip("Safely ramp this gate from its current source setpoint to 0 V.", self.btn_manual_g1_zero, self.btn_manual_g2_zero, self.btn_manual_g3_zero)
         for ao_index, (spinbox, ramp_button, zero_button, state_label) in self._manual_daq_controls.items():
@@ -438,6 +466,8 @@ class ConnDock(QtWidgets.QWidget):
 
     def signal_chain_values(self) -> dict[str, float | str]:
         return {
+            "ac_contact": self.ed_ac_contact.text().strip(),
+            "ac_voltage_ratio": self.sp_ac_ratio.value() or None,
             "lockin_sensitivity_v": max(float(self.sp_lkn.value()), self.LIA_MIN_V),
             "preamp_sensitivity_a": max(float(self.sp_amp.value()), self.AMP_MIN_A),
             "lockin_sensitivity_source": (
@@ -445,6 +475,30 @@ class ConnDock(QtWidgets.QWidget):
             ),
             "preamp_sensitivity_source": "manual calibration",
         }
+
+    def _on_ac_contact_edited(self, *_args):
+        settings = get_app_settings()
+        settings.setValue("signal_chain/ac_contact", self.ed_ac_contact.text().strip())
+        self.signal_chain_changed.emit()
+
+    def _on_ac_ratio_edited(self, *_args):
+        settings = get_app_settings()
+        settings.setValue("signal_chain/ac_voltage_ratio", self.sp_ac_ratio.value())
+        self.update_ac_voltage_estimate(getattr(self, "_ac_sine_out_v", None))
+        self.signal_chain_changed.emit()
+
+    def update_ac_voltage_estimate(self, sine_out_v):
+        self._ac_sine_out_v = sine_out_v
+        ratio = self.sp_ac_ratio.value() or None
+        value = sample_ac_voltage_estimate({'ac_voltage_ratio': ratio,
+            'lockin_settings': {'values': {'sine_out_v': sine_out_v}}})
+        if ratio is None:
+            text = "Sample AC estimate: ratio not specified"
+        elif value is None:
+            text = "Sample AC estimate: Sine Out unavailable"
+        else:
+            text = f"Sample AC estimate: {engineering_value(value, 'V')} (Sine Out x {ratio:g}; user estimate, not measured)"
+        self.lbl_ac_estimate.setText(text)
 
     def set_lockin_sensitivity_from_sr830(self, sensitivity_v: float, label: str = ""):
         try:
@@ -580,9 +634,9 @@ class ConnDock(QtWidgets.QWidget):
         target_row.addWidget(ramp_button)
         layout.addLayout(target_row)
 
-        down_button = QtWidgets.QPushButton("▼ -0.1")
+        down_button = QtWidgets.QPushButton("Ã¢â€“Â¼ -0.1")
         read_button = QtWidgets.QPushButton("Read")
-        up_button = QtWidgets.QPushButton("▲ +0.1")
+        up_button = QtWidgets.QPushButton("Ã¢â€“Â² +0.1")
         step_row = QtWidgets.QHBoxLayout()
         step_row.setSpacing(4)
         for button in (down_button, read_button, up_button, zero_button):
@@ -590,9 +644,9 @@ class ConnDock(QtWidgets.QWidget):
             step_row.addWidget(button)
         layout.addLayout(step_row)
 
-        down_button.clicked.connect(lambda _checked=False, n=name: self._on_manual_gate_step(n, -0.1))
+        down_button.clicked.connect(lambda _checked=False, n=name: self._on_manual_gate_step(n, -self.sp_manual_step.value()))
         read_button.clicked.connect(lambda _checked=False, n=name: self._on_read_gate(n))
-        up_button.clicked.connect(lambda _checked=False, n=name: self._on_manual_gate_step(n, 0.1))
+        up_button.clicked.connect(lambda _checked=False, n=name: self._on_manual_gate_step(n, self.sp_manual_step.value()))
         self._manual_gate_step_buttons[name] = (down_button, up_button)
         self._manual_gate_read_buttons[name] = read_button
         self.gate_readback_labels[name] = {
@@ -655,6 +709,7 @@ class ConnDock(QtWidgets.QWidget):
 
     def save_settings(self):
         s = get_app_settings()
+        s.setValue("manual/step_v", self.sp_manual_step.value())
         s.setValue("addr/g1", self.cbo_g1.current_address())
         s.setValue("addr/g2", self.cbo_g2.current_address())
         s.setValue("addr/g3", self.cbo_g3.current_address())
@@ -672,6 +727,8 @@ class ConnDock(QtWidgets.QWidget):
         s.setValue("path/base", self.ed_base.text())
         s.setValue("rates/amp", float(self.sp_amp.value()))
         s.setValue("rates/lkn", float(self.sp_lkn.value()))
+        s.setValue("signal_chain/ac_contact", self.ed_ac_contact.text().strip())
+        s.setValue("signal_chain/ac_voltage_ratio", self.sp_ac_ratio.value())
         s.sync()
 
     def _save_protection_settings(self, *_args):
@@ -693,6 +750,7 @@ class ConnDock(QtWidgets.QWidget):
 
     def load_settings(self):
         s = get_app_settings()
+        self.sp_manual_step.setValue(float(s.value("manual/step_v", 0.1)))
         self.cbo_g1.setCurrentText(str(s.value("addr/g1", self.conns.gate1)))
         self.cbo_g2.setCurrentText(str(s.value("addr/g2", self.conns.gate2)))
         self.cbo_g3.setCurrentText(str(s.value("addr/g3", self.conns.gate3)))
@@ -721,6 +779,10 @@ class ConnDock(QtWidgets.QWidget):
         self.ed_base.setText(str(s.value("path/base", self.save_root.base)))
         saved_amp = float(s.value("rates/amp", 1e7))
         saved_lkn = float(s.value("rates/lkn", 100.0))
+        self.ed_ac_contact.setText(str(s.value("signal_chain/ac_contact", "")))
+        with QtCore.QSignalBlocker(self.sp_ac_ratio):
+            self.sp_ac_ratio.setValue(float(s.value("signal_chain/ac_voltage_ratio", 0) or 0))
+        self.update_ac_voltage_estimate(getattr(self, "_ac_sine_out_v", None))
 
         # Backward compatibility:
         # Old builds stored pre-amp as V/A and lock-in sensitivity as a millivolt-style scalar.
@@ -743,6 +805,7 @@ class ConnDock(QtWidgets.QWidget):
         self.device_manager.status_changed.connect(self._on_device_status_changed)
         self.device_manager.operation_changed.connect(self._on_operation_changed)
         self.device_manager.manual_control_finished.connect(self._on_manual_control_finished)
+        self.device_manager.manual_gate_progress.connect(self._on_manual_gate_progress)
         self.device_manager.gate_currents_read.connect(self._on_gate_currents_read)
         self.device_manager.daq_output_finished.connect(self._on_daq_output_finished)
         self.device_manager.protection_changed.connect(self._on_protection_changed)
@@ -871,18 +934,36 @@ class ConnDock(QtWidgets.QWidget):
 
     def _on_manual_gate_ramp(self, spinbox: QtWidgets.QDoubleSpinBox):
         name = next(name for name, (control, _set, _zero) in self._manual_gate_controls.items() if control is spinbox)
-        self.device_manager.ramp_gate(name, spinbox.value())
+        spinbox.interpretText()
+        if self.device_manager.ramp_gate(name, spinbox.value()):
+            self._manual_gate_dirty[name] = False
 
     def _on_manual_gate_zero(self, spinbox: QtWidgets.QDoubleSpinBox):
         name = next(name for name, (control, _set, _zero) in self._manual_gate_controls.items() if control is spinbox)
-        spinbox.setValue(0.0)
-        self.device_manager.ramp_gate(name, 0.0)
+        if self.device_manager.ramp_gate(name, 0.0):
+            spinbox.setValue(0.0)
+            self._manual_gate_dirty[name] = False
 
     def _on_manual_gate_step(self, name: str, delta_v: float):
+        if self.device_manager.step_gate(name, float(delta_v)):
+            self._manual_gate_dirty[name] = False
+            self.lbl_manual_hint.setText(f"{name.upper()} step requested: {delta_v:+g} V; reading source level...")
+
+    def _update_manual_step_labels(self, *_args):
+        step = self.sp_manual_step.value()
+        for down, up in self._manual_gate_step_buttons.values():
+            down.setText(f"-{step:g} V")
+            up.setText(f"+{step:g} V")
+
+    def _on_manual_gate_progress(self, name, target, written):
         spinbox = self._manual_gate_controls[name][0]
-        target = min(spinbox.maximum(), max(spinbox.minimum(), spinbox.value() + float(delta_v)))
-        spinbox.setValue(target)
-        self.device_manager.ramp_gate(name, spinbox.value())
+        if not self._manual_gate_dirty[name]:
+            previous = spinbox.blockSignals(True)
+            spinbox.setValue(target)
+            spinbox.blockSignals(previous)
+        labels = self.gate_readback_labels[name]
+        labels["set_voltage"].setText(f"Sent: {self._format_voltage(written)}")
+        self.lbl_manual_hint.setText(f"{name.upper()} target {target:g} V; last command {written:g} V. Awaiting readback.")
 
     def _on_read_gate(self, name: str):
         if self.device_manager.read_gate_currents(names=(name,)):
@@ -915,8 +996,10 @@ class ConnDock(QtWidgets.QWidget):
                 labels = self.gate_readback_labels.get(name, {})
                 if "set_voltage" in labels:
                     labels["set_voltage"].setText(f"Set: {self._format_voltage(confirmed)}")
-                self._manual_gate_dirty[name] = False
-                self._sync_gate_target_from_readback(name, result, force=True)
+                matches_confirmation = spinbox.value() == float(confirmed) and not spinbox.lineEdit().isModified()
+                if not success or not self._manual_gate_dirty[name] or matches_confirmation:
+                    self._manual_gate_dirty[name] = False
+                    self._sync_gate_target_from_readback(name, result, force=True)
             if not success:
                 return
             target = float(result.get("target", spinbox.value()))
@@ -1001,7 +1084,7 @@ class ConnDock(QtWidgets.QWidget):
         if connected and readback.get("current_compliance_a") is not None:
             tooltip += f"\nCurrent compliance: {float(readback['current_compliance_a']):.3g} A"
         if connected and readback.get("max_source_voltage_v") is not None:
-            tooltip += f"\nMaximum source voltage: ±{float(readback['max_source_voltage_v']):g} V"
+            tooltip += f"\nMaximum source voltage: Ã‚Â±{float(readback['max_source_voltage_v']):g} V"
         for label in labels.values():
             label.setToolTip(tooltip)
 
@@ -1238,7 +1321,7 @@ class ConnDock(QtWidgets.QWidget):
                 tooltip = (
                     f"Live session still uses {self.device_manager.connected_address(name)}"
                     f" in {keithley_mode_label(self.device_manager.connected_mode(name)) if name in {'g1','g2','g3'} else 'its current mode'}. "
-                    "Reconnect from Instrument Setup to apply the edited address or mode."
+                    "Reconnect from Devices to apply the edited address or mode."
                 )
             self._set_reconnect_state(widget, needs, tooltip)
             if name in mode_widgets:

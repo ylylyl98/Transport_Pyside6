@@ -36,7 +36,7 @@ if not exist requirements.txt (
 )
 
 :: Install only when a requirement is absent from the project environment.
-"%PYTHON_EXE%" -m pip show PyQt6 matplotlib numpy pyvisa nidaqmx pythonnet >nul 2>nul
+"%PYTHON_EXE%" -m pip show PySide6 matplotlib numpy pyvisa nidaqmx pythonnet >nul 2>nul
 if errorlevel 1 (
     echo [SETUP] Installing application dependencies into .venv...
     "%PYTHON_EXE%" -m pip install -r requirements.txt

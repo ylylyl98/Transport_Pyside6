@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from PyQt6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtWidgets
 
 from app.engine.gate_scan_field_batch import GateScanFieldBatch
 from app.models import LineSweepParams, SaveRoot
@@ -34,9 +34,9 @@ def _snapshot(field, *, heater=False, output=0.0, standby=True, fault=False):
 
 
 class _FakeMagnet(QtCore.QObject):
-    snapshot_updated = QtCore.pyqtSignal(object)
-    safe_move_result = QtCore.pyqtSignal(object)
-    fault = QtCore.pyqtSignal(str)
+    snapshot_updated = QtCore.Signal(object)
+    safe_move_result = QtCore.Signal(object)
+    fault = QtCore.Signal(str)
 
     def __init__(self):
         super().__init__()
@@ -68,7 +68,7 @@ class _FakeMagnet(QtCore.QObject):
 
 
 class _FakeTab(QtCore.QObject):
-    batch_run_terminal = QtCore.pyqtSignal(str, str)
+    batch_run_terminal = QtCore.Signal(str, str)
 
     def __init__(self, directory):
         super().__init__()

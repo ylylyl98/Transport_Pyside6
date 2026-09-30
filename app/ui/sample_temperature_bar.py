@@ -4,7 +4,7 @@ from __future__ import annotations
 import math
 import time
 from decimal import Decimal, InvalidOperation
-from PyQt6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtWidgets
 
 from app.ui.widgets.safe_spinbox import SafeDoubleSpinBox
 
@@ -16,7 +16,7 @@ class SampleTemperatureBar(QtWidgets.QFrame):
     exposes a readiness query so measurement starts can gate on one common
     state instead of duplicating temperature controls in each tab.
     """
-    readiness_changed = QtCore.pyqtSignal(bool)
+    readiness_changed = QtCore.Signal(bool)
 
     def __init__(self, controller, config, parent=None, *, clock=time.monotonic):
         super().__init__(parent)

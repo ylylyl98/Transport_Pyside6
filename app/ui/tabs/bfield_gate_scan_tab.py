@@ -5,7 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 from datetime import datetime
 
-from PyQt6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtWidgets
 
 from app.engine.gate_scan_field_batch import GateScanFieldBatch
 from app.gate_scan_summary import format_gate_scan_condition
@@ -161,7 +161,8 @@ class BFieldGateScanTab(GateScanTab):
         # Alias kept explicit for callers that prefer the label naming style.
         self.lbl_condition_details = self.condition_details
         details_layout.addWidget(self.condition_details)
-        layout.addWidget(details_group)
+        self.condition_details_section = CollapsibleSection("Selected condition details", details_group, expanded=False)
+        layout.addWidget(self.condition_details_section)
 
         name_row = QtWidgets.QHBoxLayout()
         name_row.addWidget(QtWidgets.QLabel("Selected name:"))
@@ -187,10 +188,15 @@ class BFieldGateScanTab(GateScanTab):
         self.condition_edit_status.setMinimumWidth(0)
         self.lbl_condition_edit_status = self.condition_edit_status
         layout.addWidget(self.condition_edit_status)
-        self.bfield_section = CollapsibleSection("B-field Gate Scan Series", content, expanded=True)
-
-        index = ctl_layout.indexOf(self.lbl_connection_hint)
-        ctl_layout.insertWidget(index if index >= 0 else ctl_layout.count(), self.bfield_section)
+        self.bfield_section = CollapsibleSection("1. B-field series and saved conditions", content, expanded=True)
+        for index in range(ctl_layout.count()):
+            header = ctl_layout.itemAt(index).widget()
+            if isinstance(header, SectionHeader):
+                if header.text() == "1. SWEEP MODE":
+                    header.setText("2. EDIT SCAN CONDITION")
+                elif header.text() == "2. SWEEP RANGE AND HELD BIASES":
+                    header.setText("SWEEP RANGE AND HELD BIASES")
+        ctl_layout.insertWidget(0, self.bfield_section)
         self.condition_table.itemSelectionChanged.connect(self._condition_selected)
         self.condition_add.clicked.connect(self._add_condition)
         self.condition_update.clicked.connect(self._update_condition)
@@ -440,7 +446,7 @@ class BFieldGateScanTab(GateScanTab):
                 "Unsaved editor changes are not part of this series. "
                 "Press Update selected to save them before starting."
             )
-        calibration = self.verified_run_calibration()
+        calibration = self.verified_run_calibration(capture_settings=False)
         if calibration is None:
             raise ValueError("Signal-chain verification failed")
         if not self._conditions:
@@ -535,24 +541,31 @@ class BFieldGateScanTab(GateScanTab):
         self.log.verticalScrollBar().setValue(self.log.verticalScrollBar().maximum())
 
     def _on_batch_state_changed(self, phase: str, detail: str):
+        self.set_status(detail or phase, phase, detail)
         self.bfield_status.setText(f"{phase}: {detail}")
         self._append_series_display(f"{phase}: {detail}", "PHASE")
 
     def _on_batch_progress_changed(self, index: int, count: int, detail: str):
+        self.run_panel.progress.setFormat(f"Series step {min(index + 1, count)}/{count} · %p%")
         self.bfield_status.setText(f"{detail} — step {min(index + 1, count)}/{count}")
         self._append_series_display(
             f"{detail} — step {min(index + 1, count)}/{count}", "PROGRESS"
         )
 
     def _on_batch_error(self, message: str):
+        self.set_status(message, "error", message)
         self.bfield_status.setText(f"Error: {message}")
         self._append_series_display(str(message), "ERROR")
 
     def _on_batch_finished(self):
+        self.set_status("B-field series complete", "finished")
+        self.run_panel.progress.setFormat("%p%")
         self.bfield_status.setText("B-field series complete")
         self._append_series_display("B-field series complete", "COMPLETE")
 
     def _on_batch_stopped(self, message: str):
+        self.set_status(message, "stopped", message)
+        self.run_panel.progress.setFormat("%p%")
         self.bfield_status.setText(f"Stopped: {message}")
         self._append_series_display(str(message), "STOP")
 

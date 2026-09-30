@@ -3,16 +3,17 @@ from __future__ import annotations
 import time
 from typing import List
 
-from PyQt6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtWidgets
 
 from app.constants import GATE_BIAS_RAMP_STEP_T, GATE_BIAS_RAMP_STEP_V
+from app.measurement_output import dual_gate_filename_parts
 from app.device_manager import DeviceManager
 from app.models import Connections, DualGateParams, SaveRoot
 from app.result_channels import compare_channel_options, plot_channel_options, plot_channel_value
 from app.run_output import build_planned_output, planned_output_warning
-from app.signal_chain import SignalChainSnapshot, signal_chain_filename_parts, signal_chain_metadata
+from app.signal_chain import SignalChainSnapshot, signal_chain_metadata
 from app.ui.helpers import apply_tooltip, configure_volt_spinbox, set_standard_input_height, style_form_layout
-from app.ui.tabs.base_tab import BaseMeasurementTab
+from app.ui.tabs.base_tab import BaseMeasurementTab, run_filename_snapshot
 from app.ui.widgets.collapsible_section import CollapsibleSection
 from app.ui.widgets.safe_combo import SafeComboBox
 from app.ui.widgets.safe_spinbox import SafeDoubleSpinBox, SafeSpinBox
@@ -69,7 +70,7 @@ class DualGateTab(BaseMeasurementTab):
         return wrap
 
     def _build_control_panel(self, ctl_layout: QtWidgets.QVBoxLayout):
-        ctl_layout.addWidget(SectionHeader("Sweep Parameters"))
+        ctl_layout.addWidget(SectionHeader("1. Sweep range"))
         grp_vds = QtWidgets.QGroupBox("Vds Sweep")
         form_vds = QtWidgets.QFormLayout(grp_vds)
         style_form_layout(form_vds)
@@ -87,12 +88,11 @@ class DualGateTab(BaseMeasurementTab):
         self.sp_vds_ramp.setValue(0.05)
         lbl_vds_start = QtWidgets.QLabel("Start (V):")
         lbl_vds_stop = QtWidgets.QLabel("Stop (V):")
-        lbl_vds_step = QtWidgets.QLabel("Step (V):")
-        lbl_vds_ramp = QtWidgets.QLabel("Vds Step (V):")
+        lbl_vds_step = QtWidgets.QLabel("Sampling step (V):")
+        lbl_vds_ramp = QtWidgets.QLabel("Ramp step (V):")
         form_vds.addRow(lbl_vds_start, self.sp_vds_start)
         form_vds.addRow(lbl_vds_stop, self.sp_vds_stop)
         form_vds.addRow(lbl_vds_step, self.sp_vds_step)
-        form_vds.addRow(lbl_vds_ramp, self.sp_vds_ramp)
         self.chk_sweep_bidirectional = QtWidgets.QCheckBox("Sweep forward and backward")
         self.chk_sweep_bidirectional.setChecked(False)
         set_standard_input_height(self.chk_sweep_bidirectional)
@@ -103,7 +103,7 @@ class DualGateTab(BaseMeasurementTab):
         form_vds.addRow("", self.chk_sweep_bidirectional)
         ctl_layout.addWidget(grp_vds)
 
-        ctl_layout.addWidget(SectionHeader("Fixed Gate Voltages"))
+        ctl_layout.addWidget(SectionHeader("2. Fixed biases"))
         grp_gate = QtWidgets.QGroupBox("Fixed Gate Voltages")
         form_gate = QtWidgets.QFormLayout(grp_gate)
         style_form_layout(form_gate)
@@ -119,9 +119,13 @@ class DualGateTab(BaseMeasurementTab):
         lbl_vbg = QtWidgets.QLabel("Vbg (V):")
         form_gate.addRow(lbl_vtg, self._make_set_row(self.sp_vtg, self.btn_set_vtg))
         form_gate.addRow(lbl_vbg, self._make_set_row(self.sp_vbg, self.btn_set_vbg))
+        self.cbo_source = SafeComboBox()
+        self.cbo_source.addItems(["Keithley 2400"])
+        lbl_source = QtWidgets.QLabel("Vds Source:")
+        form_gate.addRow(lbl_source, self.cbo_source)
         ctl_layout.addWidget(grp_gate)
 
-        ctl_layout.addWidget(SectionHeader("Acquisition"))
+        ctl_layout.addWidget(SectionHeader("3. Acquisition and waiting"))
         grp_time = QtWidgets.QGroupBox("Timing")
         form_time = QtWidgets.QFormLayout(grp_time)
         style_form_layout(form_time)
@@ -136,23 +140,20 @@ class DualGateTab(BaseMeasurementTab):
         lbl_nsamp = QtWidgets.QLabel("Averages:")
         form_time.addRow(lbl_delay, self.sp_delay)
         form_time.addRow(lbl_nsamp, self.sp_nsamp)
+        form_time.addRow(lbl_vds_ramp, self.sp_vds_ramp)
         self.exp_timing = CollapsibleSection("Timing", grp_time, expanded=False)
         ctl_layout.addWidget(self.exp_timing)
 
-        ctl_layout.addWidget(SectionHeader("Output"))
+        ctl_layout.addWidget(SectionHeader("4. Output files"))
         grp_output = QtWidgets.QGroupBox("Output Settings")
         form_output = QtWidgets.QFormLayout(grp_output)
         style_form_layout(form_output)
         self.ed_base = QtWidgets.QLineEdit(self.p.base_name)
-        self.cbo_source = SafeComboBox()
-        self.cbo_source.addItems(["Keithley 2400"])
         self.cbo_y = SafeComboBox()
         self.cbo_y.addItems(["Ids_DC", "Ids_X", "Ids_Y"])
         lbl_base = QtWidgets.QLabel("Filename Stem:")
-        lbl_source = QtWidgets.QLabel("Vds Source:")
         lbl_y = QtWidgets.QLabel("Plot Axis:")
         form_output.addRow(lbl_base, self.ed_base)
-        form_output.addRow(lbl_source, self.cbo_source)
         form_output.addRow(lbl_y, self.cbo_y)
         output_content = QtWidgets.QWidget()
         output_layout = QtWidgets.QVBoxLayout(output_content)
@@ -255,16 +256,12 @@ class DualGateTab(BaseMeasurementTab):
         self.refresh_output_preview()
 
     def _output_summary_parts(self) -> list[str]:
-        direction = "forward_backward" if self.chk_sweep_bidirectional.isChecked() else "forward"
-        source = "keithley_g3" if self.cbo_source.currentText() == "Keithley 2400" else self.cbo_source.currentText()
-        return [
-            f"Vds_{self.sp_vds_start.value():g}to{self.sp_vds_stop.value():g}V",
-            f"Vtg_{self.sp_vtg.value():g}V",
-            f"Vbg_{self.sp_vbg.value():g}V",
-            source,
-            direction,
-            *signal_chain_filename_parts(self.get_signal_chain()),
-        ]
+        params = DualGateParams(
+            vds_start=self.sp_vds_start.value(), vds_stop=self.sp_vds_stop.value(),
+            vtg_set=self.sp_vtg.value(), vbg_set=self.sp_vbg.value(),
+            sweep_both_ways=self.chk_sweep_bidirectional.isChecked(),
+        )
+        return dual_gate_filename_parts(params, self.filename_signal_chain())
 
     def refresh_output_preview(self, *_args):
         planned = build_planned_output(
@@ -401,15 +398,15 @@ class DualGateTab(BaseMeasurementTab):
         if self.cbo_source.currentText() == "Keithley 2400" and self.device_manager.is_connected("g3") and not self.device_manager.is_voltage_source_mode("g3"):
             missing_required.append("G3 mode")
         if self.device_manager.is_busy():
-            text = "Hardware is busy with another connection or disconnect operation from Instrument Setup."
+            text = "Hardware is busy with another connection or disconnect operation from Devices."
             self.lbl_connection_hint.setProperty("role", "warning-hint")
             self.btn_start.setToolTip("Wait for the dock connection operation to finish")
         elif missing_required:
-            text = f"Required before start: {', '.join(missing_required)}. Connect from Instrument Setup."
+            text = f"Required before start: {', '.join(missing_required)}. Connect from Devices."
             if missing_optional:
                 text += f" Optional manual controls unavailable: {', '.join(missing_optional)}."
             self.lbl_connection_hint.setProperty("role", "warning-hint")
-            self.btn_start.setToolTip(f"Connect required devices from Instrument Setup: {', '.join(missing_required)}")
+            self.btn_start.setToolTip(f"Connect required devices from Devices: {', '.join(missing_required)}")
         else:
             text = "Ready to run with dock-managed sessions."
             if missing_optional:
@@ -456,6 +453,7 @@ class DualGateTab(BaseMeasurementTab):
         self.p.plot_choice = self.cbo_y.currentText()
         self.p.sweep_both_ways = self.chk_sweep_bidirectional.isChecked()
 
+    @run_filename_snapshot
     def start_run(self):
         if self.worker_thread:
             QtWidgets.QMessageBox.warning(self, "Busy", "Run already in progress")
@@ -515,7 +513,7 @@ class DualGateTab(BaseMeasurementTab):
             self.worker.error.connect(self.worker_thread.quit)
             self.worker_thread.finished.connect(self._cleanup_thread)
             self.run_panel.set_running(True)
-            self.set_status("Running...", "running")
+            self.set_status("Starting measurement...", "preparing")
             self.progress.setValue(0)
             self.worker_thread.start()
             self.append_log("[start] Worker thread started.")
@@ -526,7 +524,7 @@ class DualGateTab(BaseMeasurementTab):
 
     def stop_run(self):
         if self.worker:
-            self.set_status("Stopping safely...", "running", "Stop requested. Waiting for the worker to reach a safe checkpoint and ramp outputs to 0 V.")
+            self.set_status("Stopping safely...", "stopping", "Stop requested. Waiting for the worker to reach a safe checkpoint and ramp outputs to 0 V.")
             self.append_log("Stop requested by user.")
             self.worker.request_stop()
 
@@ -615,7 +613,7 @@ class DualGateTab(BaseMeasurementTab):
         if hasattr(mw, "refresh_models_from_ui"):
             mw.refresh_models_from_ui()
         if not self.device_manager.is_connected("daq"):
-            QtWidgets.QMessageBox.warning(self, "AO Test", "Connect DAQ first from Instrument Setup.")
+            QtWidgets.QMessageBox.warning(self, "AO Test", "Connect DAQ first from Devices.")
             return
         try:
             items = self.get_ao_items_if_available()

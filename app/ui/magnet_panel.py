@@ -11,7 +11,7 @@ from datetime import datetime
 import time
 from typing import Any, Optional
 
-from PyQt6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtWidgets
 
 from utils.config import cfg
 from app.ui.widgets.safe_combo import SafeComboBox
@@ -21,7 +21,7 @@ from app.ui.widgets.safe_spinbox import SafeDoubleSpinBox
 class MagnetPanel(QtWidgets.QWidget):
     """UI for one selected magnet backend, sharing two application controllers."""
 
-    backend_changed = QtCore.pyqtSignal(str)
+    backend_changed = QtCore.Signal(str)
 
     def __init__(self, magnet1000, magnet2100, parent=None, lakeshore335=None, thermal_safety=None):
         super().__init__(parent)

@@ -6,7 +6,7 @@ import unittest
 from types import SimpleNamespace as NS
 from unittest.mock import patch
 
-from PyQt6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtWidgets
 from app.engine.bfield_transport_controller import BFieldTransportController
 from app.engine.bfield_transport_sweep import TransportSweepPlan
 from app.engine.transport_tasks import TaskLane, LatestTelemetry
@@ -15,12 +15,12 @@ from utils.config import cfg
 
 
 class Magnet(QtCore.QObject):
-    transport_config_result = QtCore.pyqtSignal(object)
-    safe_move_result = QtCore.pyqtSignal(object)
-    transport_sweep_result = QtCore.pyqtSignal(object)
-    snapshot_updated = QtCore.pyqtSignal(object)
-    fault = QtCore.pyqtSignal(str)
-    operation_finished = QtCore.pyqtSignal(str)
+    transport_config_result = QtCore.Signal(object)
+    safe_move_result = QtCore.Signal(object)
+    transport_sweep_result = QtCore.Signal(object)
+    snapshot_updated = QtCore.Signal(object)
+    fault = QtCore.Signal(str)
+    operation_finished = QtCore.Signal(str)
 
     def __init__(self):
         super().__init__()

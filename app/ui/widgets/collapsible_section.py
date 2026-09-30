@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from PyQt6 import QtCore, QtWidgets
-from PyQt6.QtCore import Qt
+from PySide6 import QtCore, QtWidgets
+from PySide6.QtCore import Qt
 
 
 class CollapsibleSection(QtWidgets.QWidget):
-    toggled = QtCore.pyqtSignal(bool)
+    toggled = QtCore.Signal(bool)
 
     def __init__(self, title: str, content: QtWidgets.QWidget | None = None, expanded: bool = False, parent=None):
         super().__init__(parent)

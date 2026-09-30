@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Iterable, List
 
-from PyQt6 import QtWidgets
+from PySide6 import QtWidgets
 
 from app.ui.widgets.safe_combo import SafeComboBox
 

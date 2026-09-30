@@ -3,7 +3,8 @@ from __future__ import annotations
 import datetime
 import json
 import os
-import uuid
+import re
+import threading
 from dataclasses import asdict, dataclass, is_dataclass
 from typing import Iterable
 
@@ -31,8 +32,17 @@ class PlannedOutput:
         return self.stem[: -len(suffix)] if self.stem.endswith(suffix) else self.stem
 
 
+_run_id_lock = threading.Lock()
+_run_id_counts: dict[str, int] = {}
+
+
 def new_run_id() -> str:
-    return uuid.uuid4().hex[:12] + "_" + datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    """Readable timestamp with a sequence for runs created in the same second."""
+    stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    with _run_id_lock:
+        count = _run_id_counts.get(stamp, 0) + 1
+        _run_id_counts[stamp] = count
+    return stamp if count == 1 else f"{stamp}_{count:02d}"
 
 
 def sanitize_segment(value: str, fallback: str) -> str:
@@ -79,8 +89,27 @@ def compose_output_stem(
     filename_label = clean_user_stem or fallback_label
     clean_parts = [sanitize_segment(part, "") for part in summary_parts]
     clean_parts = [part for part in clean_parts if part]
-    clean_run_id = sanitize_segment(run_id or new_run_id(), new_run_id())
-    return "_".join([clean_device_id, filename_label, *clean_parts, clean_run_id])
+    amplitude_pattern = r"AC(?:out|set)[0-9.eE+\-]+[fpnumkMG]?V"
+    contact_parts = list(dict.fromkeys(part for part in clean_parts
+        if part.startswith("AC") and not re.fullmatch(amplitude_pattern, part)))
+    clean_parts = [part for part in clean_parts if part not in contact_parts]
+    # Contact belongs with the experimental description. Preserve an existing
+    # exact, underscore-delimited occurrence wherever the user placed it.
+    contact_parts = [part for part in contact_parts
+        if f"_{part}_" not in f"_{filename_label}_"]
+    # Keep user descriptions, but replace generated AC amplitude tags and avoid
+    # repeating exact structured tags already entered in the free-form label.
+    tags = set(clean_parts)
+    has_ac_amplitude = any(re.fullmatch(amplitude_pattern, part) for part in clean_parts)
+    estimate_pattern = r"VacEst[0-9.eE+\-]+[fpnumkMG]?V"
+    has_ac_estimate = any(re.fullmatch(estimate_pattern, part) for part in clean_parts)
+    label_parts = filename_label.split('_')
+    label_parts = [part for part in label_parts if part not in tags and not (
+        has_ac_amplitude and re.fullmatch(amplitude_pattern, part)) and not (
+        has_ac_estimate and re.fullmatch(estimate_pattern, part))]
+    filename_label = '_'.join(label_parts)
+    clean_run_id = sanitize_segment(run_id, "") or new_run_id()
+    return "_".join(part for part in [clean_device_id, filename_label, *contact_parts, *clean_parts, clean_run_id] if part)
 
 
 def build_planned_output(
@@ -92,17 +121,23 @@ def build_planned_output(
     create_dir: bool = False,
     filename_measurement_type: str | None = None,
 ) -> PlannedOutput:
-    run_id = sanitize_segment(run_id or new_run_id(), new_run_id())
+    run_id = sanitize_segment(run_id, "") or new_run_id()
     measurement_type = sanitize_segment(measurement_type, "measurement")
-    stem = compose_output_stem(
-        save.device_id,
-        measurement_type,
-        filename_stem,
-        summary_parts,
-        run_id,
-        filename_measurement_type,
-    )
     output_dir = save_directory(save, measurement_type, create=create_dir)
+    summary_parts = tuple(summary_parts)
+    match = re.fullmatch(r"(\d{8}_\d{6})(?:_(\d+))?", run_id)
+    base_id = match.group(1) if match else run_id
+    sequence = int(match.group(2) or 1) if match else 1
+    while True:
+        stem = compose_output_stem(
+            save.device_id, measurement_type, filename_stem, summary_parts,
+            run_id, filename_measurement_type,
+        )
+        if not any(os.path.exists(os.path.join(output_dir, stem + suffix))
+                   for suffix in (".csv", "_metadata.json", "_run_log.txt")):
+            break
+        sequence += 1
+        run_id = f"{base_id}_{sequence:02d}"
     return PlannedOutput(
         run_id=run_id,
         output_dir=output_dir,
@@ -161,9 +196,23 @@ def to_jsonable(value):
     return value
 
 
+def promote_experiment_metadata(payload: dict) -> dict:
+    """Keep large snapshots once at the JSON root, leaving scalar calibration intact."""
+    payload = to_jsonable(payload)
+    chain = payload.get("signal_chain")
+    if not isinstance(chain, dict):
+        chain = payload.get("validation", {}).get("calibration", {}).get("signal_chain")
+    if isinstance(chain, dict):
+        for key in ("lockin_settings", "experiment_context"):
+            value = chain.pop(key, None)
+            if value is not None:
+                payload[key] = value
+    return payload
+
+
 def write_run_metadata(path: str, payload: dict) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    payload = dict(payload)
+    payload = promote_experiment_metadata(payload)
     payload.setdefault("created_at", datetime.datetime.now().isoformat(timespec="seconds"))
     payload.setdefault("status", "running")
     with open(path, "w", encoding="utf-8") as f:

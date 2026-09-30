@@ -3,10 +3,11 @@ from __future__ import annotations
 import math
 from typing import Any
 
-from PyQt6 import QtCore, QtWidgets
-from PyQt6.QtCore import Qt
+from PySide6 import QtCore, QtWidgets
+from PySide6.QtCore import Qt
 
 from app.device_manager import DeviceManager
+from app.experiment_metadata import timestamp
 from app.settings import get_app_settings
 from app.ui.helpers import apply_tooltip, set_standard_input_height, style_form_layout
 from app.ui.widgets.collapsible_section import CollapsibleSection
@@ -29,8 +30,8 @@ from instruments.SR830 import (
 
 
 class LockinWorker(QtCore.QThread):
-    data_ready = QtCore.pyqtSignal(dict, str)
-    failed = QtCore.pyqtSignal(str)
+    data_ready = QtCore.Signal(dict, str)
+    failed = QtCore.Signal(str)
 
     def __init__(self, session: object, action: str = "refresh", payload: dict | None = None, parent=None):
         super().__init__(parent)
@@ -66,9 +67,9 @@ class LockinWorker(QtCore.QThread):
 
 
 class LockinPanel(QtWidgets.QWidget):
-    sensitivity_read = QtCore.pyqtSignal(float, str)
-    settings_changed = QtCore.pyqtSignal()
-    stop_sweep_requested = QtCore.pyqtSignal()
+    sensitivity_read = QtCore.Signal(float, str)
+    settings_changed = QtCore.Signal()
+    stop_sweep_requested = QtCore.Signal()
 
     SETTINGS_PREFIX = "lockin"
 
@@ -86,6 +87,8 @@ class LockinPanel(QtWidgets.QWidget):
         self._bind_panel_settings()
         self.device_manager.status_changed.connect(self._on_device_status_changed)
         self.device_manager.operation_changed.connect(lambda _busy, _message: self._update_enabled())
+        # Quiet gate readbacks finish without emitting operation_changed.
+        self.device_manager.gate_currents_read.connect(lambda _data, _message: self._update_enabled())
         self.device_manager.resources_changed.connect(lambda _resources: self._update_enabled())
         self._on_device_status_changed("lockin", self.device_manager.state("lockin"), self.device_manager.detail("lockin"))
         self._update_enabled()
@@ -241,7 +244,7 @@ class LockinPanel(QtWidgets.QWidget):
         self.exp_actions = CollapsibleSection("Auto Functions", actions, expanded=False)
         layout.addWidget(self.exp_actions)
 
-        self.lbl_message = QtWidgets.QLabel("Connect an SR830 or SR850 from Instrument Setup, then refresh this panel.")
+        self.lbl_message = QtWidgets.QLabel("Connect an SR830 or SR850 from Devices, then refresh this panel.")
         self.lbl_message.setWordWrap(True)
         self.lbl_message.setProperty("role", "hint")
         layout.addWidget(self.lbl_message)
@@ -376,6 +379,25 @@ class LockinPanel(QtWidgets.QWidget):
         if ref_source == self._capabilities.get("internal_reference_code"):
             settings["frequency_hz"] = self.sp_frequency.value()
         return settings
+
+    def settings_snapshot(self) -> dict:
+        """Copy displayed settings without issuing instrument queries."""
+        values = self._collect_settings()
+        values["frequency_hz"] = self.sp_frequency.value()
+        for key, combo in (
+            ("sensitivity", self.cbo_sensitivity), ("time_constant", self.cbo_time_constant),
+            ("reserve", self.cbo_reserve), ("filter_slope", self.cbo_filter_slope),
+            ("ref_source", self.cbo_ref_source), ("input_config", self.cbo_input_config),
+            ("input_coupling", self.cbo_input_coupling), ("input_ground", self.cbo_input_ground),
+            ("line_filter", self.cbo_line_filter), ("current_gain", self.cbo_current_gain),
+        ):
+            if key in values:
+                values[key + "_label"] = combo.currentText()
+        return {"source": "saved/manual", "captured_at": timestamp(),
+                "model": self._capabilities.get("model"),
+                "address": self.device_manager.connections.lockin,
+                "scope": "displayed front-panel settings; not instrument-verified",
+                "values": values}
 
     def set_verified_sensitivity(self, sensitivity_v: float, label: str = "") -> None:
         index = self.cbo_sensitivity.findText(str(label)) if label else -1

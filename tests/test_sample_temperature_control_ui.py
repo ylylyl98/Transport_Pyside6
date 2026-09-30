@@ -4,18 +4,18 @@ from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtWidgets
 
 from app.ui.sample_temperature_bar import SampleTemperatureBar
 from app.ui.widgets.run_panel import RunPanel
 
 
 class _FakeLakeShoreController(QtCore.QObject):
-    snapshot_updated = QtCore.pyqtSignal(object)
-    control_result = QtCore.pyqtSignal(object)
-    error = QtCore.pyqtSignal(str)
-    fault = QtCore.pyqtSignal(str)
-    disconnected = QtCore.pyqtSignal()
+    snapshot_updated = QtCore.Signal(object)
+    control_result = QtCore.Signal(object)
+    error = QtCore.Signal(str)
+    fault = QtCore.Signal(str)
+    disconnected = QtCore.Signal()
 
     def __init__(self):
         super().__init__()

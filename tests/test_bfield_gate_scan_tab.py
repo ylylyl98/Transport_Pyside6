@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 
-from PyQt6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication
 
 from app.device_manager import DeviceManager
 from app.engine.gate_scan_field_batch import GateScanFieldBatch
@@ -72,7 +72,7 @@ class BFieldGateScanTabTests(unittest.TestCase):
         tab = self._fresh_raw_tab()
         saved_stop = tab._conditions[0].params.raw_vtg_stop
         tab.sp_raw_vtg_stop.setValue(saved_stop + 1.0)
-        tab.verified_run_calibration = lambda: (1e7, 100.0, {})
+        tab.verified_run_calibration = lambda **_kwargs: (1e7, 100.0, {})
 
         requests = tab.capture_field_batch_requests()
 

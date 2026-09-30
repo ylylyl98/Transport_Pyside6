@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from PyQt6 import QtCore, QtWidgets
-from PyQt6.QtCore import Qt
+from PySide6 import QtCore, QtWidgets
+from PySide6.QtCore import Qt
 
 from app.constants import V_LIMIT
 
 
-def configure_volt_spinbox(sp: QtWidgets.QDoubleSpinBox, val: float):
-    sp.setDecimals(3)
+def configure_volt_spinbox(sp: QtWidgets.QDoubleSpinBox, val: float, *, decimals: int = 3):
+    sp.setDecimals(decimals)
     sp.setRange(-V_LIMIT, V_LIMIT)
     sp.setSingleStep(0.1)
     sp.setValue(val)

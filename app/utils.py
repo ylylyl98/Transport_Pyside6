@@ -45,8 +45,20 @@ def safe_ramp(
     step_t: float,
     check_fn=None,
 ) -> None:
-    """Step a voltage from current_v to target_v in controlled increments."""
+    """Ramp from the source setpoint, or current_v for plain callbacks.
+
+    Query-capable voltage sources must never use a cached start, even when
+    that cache already equals the target. Read failures propagate before any
+    write so a front-panel change cannot cause an uncontrolled first step.
+    """
     owner = getattr(set_fn, "__self__", None)
+    if check_fn is not None:
+        check_fn()
+    read_setpoint = getattr(owner, "get_voltage_setpoint", None)
+    if callable(read_setpoint):
+        current_v = float(read_setpoint())
+    if not math.isfinite(current_v):
+        raise ValueError("Cannot ramp from a non-finite voltage setpoint.")
     if getattr(set_fn, "__name__", "") == "set_voltage" and hasattr(owner, "set_voltage_fast"):
         set_fn = owner.set_voltage_fast
     if abs(target_v - current_v) < 1e-9:

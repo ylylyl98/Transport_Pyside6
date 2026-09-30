@@ -10,10 +10,8 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Optional
 
-from PyQt6.QtCore import QObject, QMetaObject, QThread, QTimer, Qt, pyqtSignal, pyqtSlot
+from PySide6.QtCore import QObject, QMetaObject, QThread, QTimer, Qt, Signal, Slot
 
-Signal = pyqtSignal
-Slot = pyqtSlot
 
 from app.devices.aps100_attodry1000_adapter import (
     APS100AttoDry1000Adapter,
@@ -524,6 +522,9 @@ class MagnetController(QObject):
 
     def __init__(self, parent: Optional[QObject] = None) -> None:
         super().__init__(parent)
+        # Latch before queueing a connect: an empty adapter alone cannot
+        # distinguish an unused controller from a pending or lost connection.
+        self._has_requested_connection = False
         self._thread = QThread(self)
         self._worker = _MagnetWorker()
         from app.engine.transport_tasks import LatestTelemetry
@@ -607,6 +608,10 @@ class MagnetController(QObject):
         return self._latest_snapshot
 
     @property
+    def has_requested_connection(self) -> bool:
+        return self._has_requested_connection
+
+    @property
     def is_connected(self) -> bool:
         adapter = self._worker.adapter
         return adapter is not None and bool(getattr(adapter, "connected", False))
@@ -622,6 +627,7 @@ class MagnetController(QObject):
     def connect_instrument(self, resource: Optional[str] = None, use_mock: bool = False) -> None:
         selected = str(resource or cfg.magnet.visa_resource).strip()
         cfg.magnet.visa_resource = selected
+        self._has_requested_connection = True
         self._connect_requested.emit(selected, bool(use_mock))
 
     def disconnect_instrument(self) -> None:
@@ -687,7 +693,7 @@ class MagnetController(QObject):
         if abs(float(target_t)) > cfg.magnet.safe_control_max_field_t:
             message = (
                 "Safe magnet target exceeds the configured "
-                f"±{cfg.magnet.safe_control_max_field_t:g} T control limit"
+                f"Â±{cfg.magnet.safe_control_max_field_t:g} T control limit"
             )
             self.error.emit(message)
             self.safe_move_result.emit({

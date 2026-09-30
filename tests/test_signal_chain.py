@@ -16,7 +16,7 @@ class SignalChainTests(unittest.TestCase):
             clock.datetime.now.return_value.strftime.return_value = "20260905_120000"
             ids = {new_run_id() for _ in range(100)}
         self.assertEqual(len(ids), 100)
-        self.assertTrue(all(value.endswith("20260905_120000") for value in ids))
+        self.assertTrue(all(value.startswith("20260905_120000") for value in ids))
 
     def test_snapshot_and_conversion_agree_across_ranges(self):
         for sensitivity in (1e-3, 0.01, 0.1, 1):

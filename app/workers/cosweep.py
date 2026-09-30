@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import math
 import csv
 import datetime
 import os
 import time
 
-from PyQt6 import QtCore
+from PySide6 import QtCore
 
 from app.constants import (
     GATE_BIAS_RAMP_STEP_T,
@@ -14,15 +15,26 @@ from app.constants import (
     SAFE_RAMP_STEP_V,
     V_LIMIT,
 )
+from app.cosweep_output import map_filename_parts
 from app.gate_transform import derived_to_gates, gates_to_derived, normalize_ratio_target
 from app.keithley_modes import KEITHLEY_MODE_VOLTAGE_2W
 from app.models import CoParams, Connections, SaveRoot
 from app.plot_x_axis import record_x_value, resolve_map_x_axis
 from app.result_channels import KEITHLEY_CHANNEL
 from app.run_output import new_run_id, compose_output_stem, update_run_metadata_status, write_run_metadata
-from app.signal_chain import signal_chain_filename_parts
 from app.utils import _frange_inc, safe_ramp
 from app.workers.base import RunStopped, RunWorker
+
+
+def sequence_point_count(start, stop, step):
+    start, stop, step = float(start), float(stop), abs(float(step))
+    if not all(math.isfinite(v) for v in (start, stop, step)):
+        raise ValueError("Sweep values must be finite.")
+    if step == 0:
+        if abs(stop-start) <= 1e-12:
+            return 1
+        raise ValueError("Swept steps must be greater than zero.")
+    return math.ceil(round(abs(stop-start)/step, 9)) + 1
 
 
 def _sequence(start: float, stop: float, step: float) -> list[float]:
@@ -32,6 +44,8 @@ def _sequence(start: float, stop: float, step: float) -> list[float]:
         if abs(stop - start) <= 1e-12:
             return [start]
         raise ValueError("Swept steps must be greater than zero.")
+    if sequence_point_count(start, stop, step) > 250000:
+        raise ValueError("This setup exceeds the limit of 250,000 points.")
     return _frange_inc(start, stop, step if stop >= start else -step)
 
 
@@ -46,11 +60,11 @@ def validate_cosweep_params(params: CoParams) -> None:
         raise ValueError("Gate and Vds ramp steps must be greater than zero.")
     normalize_ratio_target(params.ratio_target)
     if mode == "Derived":
-        if params.axis_slow == "None" or params.axis_fast not in {"Doping", "E-field"} or params.axis_slow not in {"Doping", "E-field"} or params.axis_fast == params.axis_slow:
-            raise ValueError("Derived 2D maps require Doping and E-field as distinct fast and slow axes.")
+        if params.axis_slow == "None" or params.axis_fast not in {"Doping", "E-field", "Vds"} or params.axis_slow not in {"Doping", "E-field", "Vds"} or params.axis_fast == params.axis_slow:
+            raise ValueError("Derived 2D maps require two distinct axes from Doping, E-field, and Vds.")
         if abs(float(params.ratio)) < 1e-12:
             raise ValueError("Derived trajectory requires a non-zero ratio.")
-        if abs(float(params.vds_stop) - float(params.vds_start)) > 1e-12:
+        if "Vds" not in (params.axis_fast, params.axis_slow) and abs(float(params.vds_stop) - float(params.vds_start)) > 1e-12:
             raise ValueError("Derived 2D maps use a fixed Vds; set Vds stop equal to Vds start.")
         fast = _sequence(*_derived_axis_values(params, params.axis_fast))
         slow = _sequence(*_derived_axis_values(params, params.axis_slow))
@@ -59,12 +73,13 @@ def validate_cosweep_params(params: CoParams) -> None:
             raise ValueError(f"This setup would run {points:,} points; the limit is 250,000.")
         for slow_value in slow:
             for fast_value in fast:
-                doping, efield = _derived_pair(params.axis_fast, fast_value, params.axis_slow, slow_value)
+                doping, efield = _derived_pair(params, params.axis_fast, fast_value, params.axis_slow, slow_value)
                 vtg, vbg = derived_to_gates(doping, efield, params.ratio, params.ratio_target)
                 if abs(vtg) > V_LIMIT or abs(vbg) > V_LIMIT:
                     raise ValueError(f"Derived point ({doping:g}, {efield:g}) requires Vtg={vtg:.3f} V and Vbg={vbg:.3f} V, above the {V_LIMIT:.1f} V limit.")
-        if abs(float(params.vds_start)) > V_LIMIT:
-            raise ValueError(f"vds_start is {params.vds_start:.3f} V, above the {V_LIMIT:.1f} V limit.")
+        bias_values = (fast if params.axis_fast == "Vds" else slow if params.axis_slow == "Vds" else [params.vds_start])
+        if any(abs(float(value)) > V_LIMIT for value in bias_values):
+            raise ValueError(f"Vds trajectory is above the {V_LIMIT:.1f} V limit.")
         return
     axes = [params.axis_fast] + ([params.axis_slow] if params.axis_slow != "None" else [])
     for field in ("vtg_start", "vtg_stop", "vbg_start", "vbg_stop", "vds_start", "vds_stop"):
@@ -108,12 +123,14 @@ def _derived_axis_values(params: CoParams, axis: str) -> tuple[float, float, flo
         return params.doping_start, params.doping_stop, params.doping_step
     if axis == "E-field":
         return params.efield_start, params.efield_stop, params.efield_step
+    if axis == "Vds":
+        return params.vds_start, params.vds_stop, params.vds_step
     raise ValueError(f"Unknown derived sweep axis: {axis}")
 
 
-def _derived_pair(fast_axis: str, fast_value: float, slow_axis: str, slow_value: float) -> tuple[float, float]:
+def _derived_pair(params: CoParams, fast_axis: str, fast_value: float, slow_axis: str, slow_value: float) -> tuple[float, float]:
     values = {fast_axis: float(fast_value), slow_axis: float(slow_value)}
-    return values["Doping"], values["E-field"]
+    return values.get("Doping", params.doping_start), values.get("E-field", params.efield_start)
 
 
 def build_cosweep_points(params: CoParams) -> list[dict]:
@@ -132,9 +149,9 @@ def build_cosweep_points(params: CoParams) -> list[dict]:
         row = list(reversed(fast_seq)) if slow_axis != "None" and pass_idx % 2 else fast_seq
         for fast_value in row:
             if derived:
-                doping, efield = _derived_pair(fast_axis, fast_value, slow_axis, slow_value)
+                doping, efield = _derived_pair(params, fast_axis, fast_value, slow_axis, slow_value)
                 vtg, vbg = derived_to_gates(doping, efield, params.ratio, params.ratio_target)
-                vds = params.vds_start
+                vds = fast_value if fast_axis == "Vds" else (slow_value if slow_axis == "Vds" else params.vds_start)
             else:
                 vtg = fast_value if fast_axis == "Vtg" else (slow_value if slow_axis == "Vtg" else params.vtg_start)
                 vbg = fast_value if fast_axis == "Vbg" else (slow_value if slow_axis == "Vbg" else params.vbg_start)
@@ -145,6 +162,8 @@ def build_cosweep_points(params: CoParams) -> list[dict]:
 
 
 class CoSweepWorker(RunWorker):
+    timing_updated = QtCore.Signal(object)
+
     def __init__(self, params: CoParams, save: SaveRoot, conns: Connections, **kw):
         super().__init__()
         self.p = params
@@ -159,9 +178,32 @@ class CoSweepWorker(RunWorker):
         self.lkn_rate = kw.get("lkn_rate", 100.0)
         self.signal_chain = dict(kw.get("signal_chain") or {})
         self._active_derived = False
+        self._timing_start = None
+        self._timing_paused = 0.0
+        self._timing_completed = 0
 
-    @QtCore.pyqtSlot()
+    def _emit_timing(self, phase):
+        if self._timing_start is not None:
+            self.timing_updated.emit({"completed": self._timing_completed,
+                                      "elapsed": max(0.0, time.monotonic() - self._timing_start - self._timing_paused),
+                                      "phase": phase})
+
+    def check_abort_pause(self):
+        if not self._pause or self._stop:
+            return super().check_abort_pause()
+        started = time.monotonic()
+        self._emit_timing("paused")
+        try:
+            super().check_abort_pause()
+        finally:
+            self._timing_paused += time.monotonic() - started
+            self._emit_timing("sampling")
+
+    @QtCore.Slot()
     def run(self):
+        self._timing_start = time.monotonic()
+        self._timing_paused = 0.0
+        self._timing_completed = 0
         csv_path = self.p.output_csv_path
         run_status = "error"
         run_detail = "Run ended before completion."
@@ -196,12 +238,12 @@ class CoSweepWorker(RunWorker):
 
             if not csv_path:
                 ts = new_run_id()
-                signal_tags = "_".join(signal_chain_filename_parts(self.signal_chain))
+                summary_parts = map_filename_parts(self.p, self.signal_chain)
                 stem = compose_output_stem(
                     self.save.device_id,
                     measurement_name,
                     self.p.base_name,
-                    (f"fast_{fast_axis}", f"slow_{slow_axis}", signal_tags),
+                    summary_parts,
                     ts,
                 )
                 csv_path = os.path.join(self.save.path(), stem + ".csv")
@@ -272,6 +314,9 @@ class CoSweepWorker(RunWorker):
                     self.status.emit(f"Point {cnt + 1}/{total}  [pass {pass_idx + 1}]")
                     if self._active_derived:
                         self.set_derived_gates(point["vtg"], point["vbg"])
+                        if fast_axis == "Vds" or (slow_axis == "Vds" and pass_idx != current_pass):
+                            self.set_volt("Vds", point["vds"])
+                        current_pass = pass_idx
                     else:
                         if slow_axis != "None" and pass_idx != current_pass:
                             self.set_volt(slow_axis, point["slow_value"])
@@ -337,6 +382,8 @@ class CoSweepWorker(RunWorker):
                         "fast_direction": fast_direction,
                     })
                     cnt += 1
+                    self._timing_completed = cnt
+                    self._emit_timing("sampling")
                     self.progress.emit(cnt / total)
             run_status = "finished"
             run_detail = csv_path
@@ -350,6 +397,7 @@ class CoSweepWorker(RunWorker):
             run_detail = str(ex)
             self.error.emit(run_detail)
         finally:
+            self._emit_timing("cleanup")
             failures = []
             try:
                 if self.g1 is not None:
@@ -370,7 +418,10 @@ class CoSweepWorker(RunWorker):
             except Exception as ex:
                 failures.append(f"Vds zero failed: {ex}")
             self.emit_safe_state_report(failures)
-            update_run_metadata_status(self.p.output_metadata_path, run_status, run_detail, failures)
+            try:
+                update_run_metadata_status(self.p.output_metadata_path, run_status, run_detail, failures)
+            finally:
+                self._emit_timing("cleanup_failed" if failures else "done")
 
     def set_volt(self, name, val):
         if name == "Vtg":

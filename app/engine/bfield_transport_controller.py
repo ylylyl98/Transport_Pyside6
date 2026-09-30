@@ -15,8 +15,8 @@ from collections import deque
 from dataclasses import asdict, is_dataclass
 from copy import deepcopy
 
-from PyQt6 import QtCore
-from PyQt6 import QtWidgets
+from PySide6 import QtCore
+from PySide6 import QtWidgets
 
 from app.engine.bfield_transport_sweep import (
     BFieldTransportSafetyError,
@@ -36,14 +36,14 @@ from app.engine.transport_tasks import TaskLane
 
 
 class BFieldTransportController(QtCore.QObject):
-    state_changed = QtCore.pyqtSignal(str, str)
-    progress_changed = QtCore.pyqtSignal(int, int, str)
-    error = QtCore.pyqtSignal(str)
-    finished = QtCore.pyqtSignal()
-    stopped = QtCore.pyqtSignal(str)
+    state_changed = QtCore.Signal(str, str)
+    progress_changed = QtCore.Signal(int, int, str)
+    error = QtCore.Signal(str)
+    finished = QtCore.Signal()
+    stopped = QtCore.Signal(str)
     # Emitted only after an application-close Persistent transition has been
     # acknowledged.  MainWindow uses it to retry the close event safely.
-    shutdown_ready = QtCore.pyqtSignal()
+    shutdown_ready = QtCore.Signal()
 
     def __init__(self, magnet, tab, device_manager, thermal_safety=None, parent=None):
         super().__init__(parent)
@@ -375,6 +375,9 @@ class BFieldTransportController(QtCore.QObject):
                 raise BFieldTransportSafetyError("Signal-chain rates are invalid; verify calibration before transport")
             self._signal_chain = signal_getter() if callable(signal_getter) else None
             if self._signal_chain is not None:
+                capture = getattr(self.tab, "capture_run_signal_chain", None)
+                if callable(capture):
+                    self._signal_chain = capture(self._signal_chain)
                 for key in ("frequency_hz", "lockin_sensitivity_v", "preamp_sensitivity_a"):
                     value = getattr(self._signal_chain, key, None)
                     if value is None and isinstance(self._signal_chain, dict):
@@ -410,6 +413,8 @@ class BFieldTransportController(QtCore.QObject):
             if any(c.vds_source == "Keithley 2400" for c in self.plan.conditions):
                 required.append("g3")
             self._validate_biases(required)
+            if self.device_manager.get_session("lockin") is not None:
+                required.append("lockin")
             claimed, blocked = self.device_manager.mark_in_use(required)
             if not claimed:
                 self.magnet.release_exclusive(self._owner)
@@ -464,7 +469,7 @@ class BFieldTransportController(QtCore.QObject):
             self._leg_timeout_s = 0.0
             self._progress_timeout_s = 0.0
             self.tab.set_sweep_locked(True)
-            self.state_changed.emit("configuring", "Programming APS100 rate and ±6 T limits")
+            self.state_changed.emit("configuring", "Programming APS100 rate and Â±6 T limits")
             self.magnet.configure_transport(params.rate_t_per_min, 6.0)
             return True
         except Exception as exc:
@@ -503,6 +508,19 @@ class BFieldTransportController(QtCore.QObject):
             return False
         if self.__dict__.get("_shutdown_persistent_waiting", False):
             return False
+        # An unused APS controller has no instrument state to restore.  Do not
+        # infer this from is_connected alone: queued connects and lost sessions
+        # still need the existing conservative cleanup path.  Unknown controller
+        # implementations fail closed, and this bypass is never cached.
+        if (
+            getattr(self.magnet, "has_requested_connection", None) is False
+            and not self.magnet.is_connected
+            and not self._exclusive_acquired
+            and not self._shutdown_exclusive_acquired
+            and not self._claimed
+            and self._completed_final_mode == "persistent"
+        ):
+            return True
         # Fence first.  Do not trust a pre-fence snapshot: a manual Driven
         # command may already be queued in the APS worker.  The Persistent
         # request below is queued after that command and is idempotent when
@@ -1372,7 +1390,7 @@ class BFieldTransportController(QtCore.QObject):
             self._begin_leg(0, self.plan.params.stop_field_t)
 
     def _note_heater_activation(self, result):
-        """Record only a real OFF→ON transition for thermal interval gating."""
+        """Record only a real OFFâ†’ON transition for thermal interval gating."""
         audit = result.get("audit") or {}
         request = audit.get("request") or {}
         if str(request.get("final_mode", "")).lower() != "driven":
@@ -1669,7 +1687,7 @@ class BFieldTransportController(QtCore.QObject):
         span = abs(float(plan.params.stop_field_t) - float(plan.params.start_field_t))
         configured = max(1e-6, float(getattr(cfg.magnet, "field_tolerance_t", 0.002)))
         # Keep the commissioned default for ordinary spans, but do not let it
-        # accept a materially wrong endpoint on a short ±10 mT recipe.
+        # accept a materially wrong endpoint on a short Â±10 mT recipe.
         return max(1e-5, min(configured, max(1e-5, span * 0.01)))
 
     def _endpoint_tolerance_t(self):

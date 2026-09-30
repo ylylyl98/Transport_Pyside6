@@ -4,7 +4,7 @@ import time
 import unittest
 from dataclasses import asdict
 
-from PyQt6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication
 
 from app.devices.attodry2100_adapter import (
     AttoDRY2100StateError,

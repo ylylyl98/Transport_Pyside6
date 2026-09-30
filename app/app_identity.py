@@ -4,7 +4,7 @@ import ctypes
 import sys
 from pathlib import Path
 
-from PyQt6 import QtCore, QtGui, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 
 APP_NAME = "Transport Measurement"
 APP_ORG = "MyLab"

@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import threading
 import traceback
-from PyQt6.QtCore import QObject, QMetaObject, QThread, QTimer, Qt, pyqtSignal, pyqtSlot
+from PySide6.QtCore import QObject, QMetaObject, QThread, QTimer, Qt, Signal, Slot
 
 from app.devices.lakeshore335_adapter import LakeShore335Adapter, MockLakeShore335Adapter, LakeShore335Snapshot
 import time
 from utils.config import cfg
 
 
-Signal = pyqtSignal
 
 
 class _LakeShoreWorker(QObject):
@@ -28,7 +27,7 @@ class _LakeShoreWorker(QObject):
         self._timer = QTimer(self)
         self._timer.timeout.connect(self.refresh_snapshot)
 
-    @pyqtSlot(str, bool)
+    @Slot(str, bool)
     def connect_instrument(self, resource, use_mock=False):
         self.disconnect_instrument()
         try:
@@ -43,7 +42,7 @@ class _LakeShoreWorker(QObject):
             self.adapter = None
             self.error.emit(f"Lake Shore 335 connection failed: {exc}\n{traceback.format_exc()}")
 
-    @pyqtSlot()
+    @Slot()
     def disconnect_instrument(self):
         self._timer.stop()
         adapter, self.adapter = self.adapter, None
@@ -51,7 +50,7 @@ class _LakeShoreWorker(QObject):
             adapter.close()
         self.disconnected.emit()
 
-    @pyqtSlot()
+    @Slot()
     def refresh_snapshot(self):
         if self.adapter is None:
             return
@@ -71,14 +70,14 @@ class _LakeShoreWorker(QObject):
             self.snapshot_updated.emit(invalid)
             self.fault.emit(f"Lake Shore 335 telemetry unavailable: {exc}")
 
-    @pyqtSlot(bool)
+    @Slot(bool)
     def set_polling_enabled(self, enabled):
         if enabled and self.adapter is not None:
             self._timer.start()
         else:
             self._timer.stop()
 
-    @pyqtSlot(float)
+    @Slot(float)
     def set_sample_setpoint(self, target):
         if self.adapter is None:
             self.error.emit("Lake Shore 335 is not connected")
@@ -90,7 +89,7 @@ class _LakeShoreWorker(QObject):
             self.control_result.emit({"operation": "setpoint", "ok": False, "error": str(exc)})
             self.error.emit(f"Lake Shore setpoint failed: {exc}")
 
-    @pyqtSlot()
+    @Slot()
     def heater_off(self):
         if self.adapter is None:
             self.error.emit("Lake Shore 335 is not connected; heater-off is unconfirmed")
@@ -102,7 +101,7 @@ class _LakeShoreWorker(QObject):
             self.control_result.emit({"operation": "heater_off", "ok": False, "error": str(exc)})
             self.error.emit(f"Lake Shore heater-off failed (unconfirmed): {exc}")
 
-    @pyqtSlot()
+    @Slot()
     def shutdown(self):
         self.disconnect_instrument()
 

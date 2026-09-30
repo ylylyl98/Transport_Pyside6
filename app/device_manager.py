@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import math
 import time
-from threading import Lock
+from threading import Event, Lock
 from typing import Dict, Iterable, List, Optional, Set
 
-from PyQt6 import QtCore
+from PySide6 import QtCore
 
 from app.keithley_modes import KEITHLEY_MODE_LABELS, KEITHLEY_MODE_OHM_4W, KEITHLEY_MODE_VOLTAGE_2W, keithley_mode_label
 from app.models import Connections
@@ -36,9 +36,9 @@ def _compliance_trip_detail(name: str, readback: dict[str, object]) -> str:
 
 
 class ConnectWorker(QtCore.QThread):
-    status_changed = QtCore.pyqtSignal(str, str, str)
-    finished_ok = QtCore.pyqtSignal()
-    failed = QtCore.pyqtSignal(str)
+    status_changed = QtCore.Signal(str, str, str)
+    finished_ok = QtCore.Signal()
+    failed = QtCore.Signal(str)
 
     def __init__(self, manager: "DeviceManager"):
         super().__init__()
@@ -53,9 +53,9 @@ class ConnectWorker(QtCore.QThread):
 
 
 class DisconnectWorker(QtCore.QThread):
-    status_changed = QtCore.pyqtSignal(str, str, str)
-    finished_ok = QtCore.pyqtSignal()
-    failed = QtCore.pyqtSignal(str)
+    status_changed = QtCore.Signal(str, str, str)
+    finished_ok = QtCore.Signal()
+    failed = QtCore.Signal(str)
 
     def __init__(self, manager: "DeviceManager"):
         super().__init__()
@@ -221,6 +221,8 @@ class GateCurrentReadWorker(QtCore.QThread):
         failures: list[str] = []
         warnings: list[str] = []
         for name in self.names:
+            if self.isInterruptionRequested():
+                break
             session = self.sessions.get(name)
             mode = self.modes.get(name, "")
             if session is None:
@@ -245,7 +247,11 @@ class GateCurrentReadWorker(QtCore.QThread):
                 continue
             try:
                 set_voltage = session.get_voltage_setpoint()
+                if self.isInterruptionRequested():
+                    break
                 readings = session.acquire()
+                if self.isInterruptionRequested():
+                    break
                 measured_voltage = readings.get("voltage") if isinstance(readings, dict) else None
                 current = readings.get("current") if isinstance(readings, dict) else None
                 if measured_voltage is None:
@@ -320,7 +326,7 @@ class ProtectionApplyWorker(QtCore.QThread):
 
 
 class EmergencyRampWorker(QtCore.QThread):
-    ramp_finished = QtCore.pyqtSignal(str)
+    ramp_finished = QtCore.Signal(str)
 
     def __init__(self, sessions: dict, daq_channels: list):
         super().__init__()
@@ -358,14 +364,125 @@ class EmergencyRampWorker(QtCore.QThread):
             self.ramp_finished.emit("Emergency safe ramp complete: all requested outputs at 0 V.")
 
 
+
+class GateStepWorker(ManualControlWorker):
+    """Coalesce a burst of relative steps from one live source-level read.
+
+    Requests wake the worker immediately. Large accumulated changes remain
+    bounded ramps; measured voltage/current are refreshed only after the burst.
+    """
+    progress = QtCore.Signal(float, float)  # requested target, last written level
+
+    def __init__(self, name, session, delta, voltage_limit, parent=None):
+        super().__init__(name, session, 0.0, parent)
+        self._delta = float(delta)
+        self._resolved = False
+        self._absolute = False
+        self._limit = float(voltage_limit)
+        self._wake = Event()
+        self._revision = 0
+
+    def _validate(self, value):
+        if not math.isfinite(value) or abs(value) > self._limit + 1e-12:
+            raise ValueError(f"{self.name.upper()} target exceeds its applied voltage limit or is not finite")
+
+    def add_step(self, delta):
+        delta = float(delta)
+        if not math.isfinite(delta):
+            raise ValueError("Step must be finite")
+        with self._target_lock:
+            if self._resolved or self._absolute:
+                target = round(self._target + delta, 9)
+                self._validate(target)
+                self._target = target
+            else:
+                self._delta += delta
+            self._revision += 1
+            self._wake.set()
+
+    def update_target(self, target):
+        target = float(target)
+        self._validate(target)
+        with self._target_lock:
+            self._target = target
+            self._absolute = True
+            self._revision += 1
+            self._wake.set()
+
+    def request_cancel(self):
+        super().request_cancel()
+        self._wake.set()
+
+    def run(self):
+        from app.constants import GATE_BIAS_RAMP_STEP_V, GATE_BIAS_RAMP_STEP_T, SAFE_RAMP_STEP_V, SAFE_RAMP_STEP_T
+        current = None
+        try:
+            self._check_cancelled()
+            current = float(self.session.get_voltage_setpoint())
+            if not math.isfinite(current):
+                raise ValueError("Instrument source setpoint is not finite")
+            with self._target_lock:
+                if not self._absolute:
+                    self._target = round(current + self._delta, 9)
+                self._validate(self._target)
+                self._resolved = True
+            setter = getattr(self.session, "set_voltage_fast", None) or self.session.set_voltage
+            while True:
+                self._check_cancelled()
+                with self._target_lock:
+                    self._wake.clear()
+                    target, revision = self._target, self._revision
+                self._validate(target)
+                self.progress.emit(target, current)
+                if not math.isclose(current, target, abs_tol=1e-9):
+                    zeroing = math.isclose(target, 0.0, abs_tol=1e-9)
+                    step, delay = ((SAFE_RAMP_STEP_V, SAFE_RAMP_STEP_T) if zeroing
+                                   else (GATE_BIAS_RAMP_STEP_V, GATE_BIAS_RAMP_STEP_T))
+                    level = round(current + math.copysign(min(step, abs(target-current)), target-current), 9)
+                    self._check_cancelled()
+                    setter(level)
+                    current = level
+                    self.progress.emit(self.target, current)
+                    # Preserve the existing slew limits, including burst reversals.
+                    time.sleep(delay)
+                    continue
+                if self._wake.wait(0.2):
+                    continue
+                self._check_cancelled()
+                confirmed = float(self.session.get_voltage_setpoint())
+                self._check_cancelled()
+                if not math.isfinite(confirmed):
+                    raise ValueError("Source setpoint confirmation is not finite")
+                with self._target_lock:
+                    changed = revision != self._revision
+                if changed:
+                    current = confirmed
+                    continue
+                if not math.isclose(confirmed, target, abs_tol=1e-9):
+                    raise RuntimeError("Source setpoint changed during manual adjustment; read again before retrying")
+                current = confirmed
+                self.success = True
+                self.message = f"{self.name.upper()} source setpoint confirmed at {current:g} V."
+                break
+        except Exception as exc:
+            self.message = f"{self.name.upper()} manual adjustment failed: {exc}"
+        # A write acknowledgement is not a measured or confirmed voltage.
+        self.gate_readback = {
+            "connected": True, "mode": KEITHLEY_MODE_VOLTAGE_2W,
+            "set_voltage": current if self.success else None,
+            "error": "" if self.success else self.message,
+        }
+
+
 class DeviceManager(QtCore.QObject):
-    status_changed = QtCore.pyqtSignal(str, str, str)
-    operation_changed = QtCore.pyqtSignal(bool, str)
-    resources_changed = QtCore.pyqtSignal(object)
-    manual_control_finished = QtCore.pyqtSignal(str, bool, str, dict)
-    gate_currents_read = QtCore.pyqtSignal(dict, str)
-    daq_output_finished = QtCore.pyqtSignal(int, bool, str, dict)
-    protection_changed = QtCore.pyqtSignal(str, bool, str, dict)
+    status_changed = QtCore.Signal(str, str, str)
+    operation_changed = QtCore.Signal(bool, str)
+    resources_changed = QtCore.Signal(object)
+    manual_control_finished = QtCore.Signal(str, bool, str, dict)
+    gate_currents_read = QtCore.Signal(dict, str)
+    manual_gate_progress = QtCore.Signal(str, float, float)
+    daq_output_finished = QtCore.Signal(int, bool, str, dict)
+    protection_changed = QtCore.Signal(str, bool, str, dict)
 
     def __init__(self, connections: Connections):
         super().__init__()
@@ -385,6 +502,11 @@ class DeviceManager(QtCore.QObject):
         self._protection_worker: Optional[ProtectionApplyWorker] = None
         self._emergency_worker: Optional[QtCore.QThread] = None
         self._pending_emergency_daq_channels: Optional[list[int]] = None
+        self._manual_readback_names = set()
+        self._manual_readback_timer = QtCore.QTimer(self)
+        self._manual_readback_timer.setSingleShot(True)
+        self._manual_readback_timer.setInterval(200)
+        self._manual_readback_timer.timeout.connect(self._refresh_manual_readbacks)
 
     def _address_for(self, name: str) -> str:
         return {
@@ -475,12 +597,12 @@ class DeviceManager(QtCore.QObject):
         return self.get_session(name) is not None and self.state(name) == "ok"
 
     def is_busy(self) -> bool:
-        return (
-            (self._operation_thread is not None and self._operation_thread.isRunning())
-            or (self._manual_worker is not None and self._manual_worker.isRunning())
-            or (self._gate_current_worker is not None and self._gate_current_worker.isRunning())
-            or (self._protection_worker is not None and self._protection_worker.isRunning())
-            or (self._emergency_worker is not None and self._emergency_worker.isRunning())
+        # Ownership ends in the GUI completion handler, not when run() returns.
+        return self._pending_emergency_daq_channels is not None or any(
+            worker is not None for worker in (
+                self._operation_thread, self._manual_worker, self._gate_current_worker,
+                self._protection_worker, self._emergency_worker,
+            )
         )
 
     def current_in_use(self) -> Set[str]:
@@ -591,6 +713,9 @@ class DeviceManager(QtCore.QObject):
         """Safely ramp one connected gate source to a requested voltage."""
         if name not in {"g1", "g2", "g3"}:
             raise ValueError(f"Unknown gate: {name}")
+        if not math.isfinite(float(target)):
+            self.operation_changed.emit(False, "Manual target must be finite.")
+            return False
         if not self.can_accept_gate_target(name):
             if self._in_use:
                 self.operation_changed.emit(False, "Manual control is unavailable while a measurement is running.")
@@ -615,6 +740,7 @@ class DeviceManager(QtCore.QObject):
                 "Set a larger Max source voltage under Keithley Protection, ramp the gate to 0 V, and click Apply.",
             )
             return False
+        self._manual_readback_timer.stop()
         worker = self._manual_worker
         if worker is not None:
             worker.update_target(float(target))
@@ -628,6 +754,45 @@ class DeviceManager(QtCore.QObject):
         self._start_manual_worker(name, self.sessions[name], target)
         return True
 
+    def step_gate(self, name: str, delta: float) -> bool:
+        """Relative adjustment independent of the unapplied target editor."""
+        if name not in {"g1", "g2", "g3"}:
+            raise ValueError(f"Unknown gate: {name}")
+        if not math.isfinite(float(delta)):
+            self.operation_changed.emit(False, "Manual step must be finite.")
+            return False
+        if not self.can_accept_gate_target(name) or not self.protection_is_applied(name):
+            self.operation_changed.emit(False, "Manual step unavailable: check connection, protection, and device use.")
+            return False
+        self._manual_readback_timer.stop()
+        worker = self._manual_worker
+        if worker is not None:
+            if isinstance(worker, GateStepWorker):
+                try:
+                    worker.add_step(delta)
+                except ValueError as exc:
+                    self.operation_changed.emit(False, str(exc))
+                    return False
+                self.operation_changed.emit(True, f"{name.upper()} adjustment queued ({delta:+g} V).")
+                return True
+            return self.ramp_gate(name, worker.target + float(delta))
+        worker = GateStepWorker(name, self.sessions[name], delta, self.applied_gate_voltage_limit(name), self)
+        self._manual_worker = worker
+        worker.progress.connect(lambda target, written, n=name: self.manual_gate_progress.emit(n, target, written))
+        worker.finished.connect(self._finish_manual_worker)
+        self.operation_changed.emit(True, f"{name.upper()} adjustment requested ({delta:+g} V).")
+        worker.start()
+        return True
+
+    def _refresh_manual_readbacks(self):
+        names = tuple(sorted(name for name in self._manual_readback_names if self.is_connected(name)))
+        self._manual_readback_names.intersection_update(names)
+        if names:
+            if self.read_gate_currents(quiet=True, names=names):
+                self._manual_readback_names.difference_update(names)
+            else:
+                self._manual_readback_timer.start(200)
+
     def can_accept_gate_target(self, name: str) -> bool:
         """Return whether a gate can start or update a manual voltage ramp."""
         if name not in {"g1", "g2", "g3"}:
@@ -638,7 +803,7 @@ class DeviceManager(QtCore.QObject):
             self._protection_worker,
             self._emergency_worker,
         )
-        if any(worker is not None and worker.isRunning() for worker in blockers):
+        if self._pending_emergency_daq_channels is not None or any(worker is not None for worker in blockers):
             return False
         if self._in_use or not self.is_connected(name) or not self.is_voltage_source_mode(name):
             return False
@@ -785,6 +950,9 @@ class DeviceManager(QtCore.QObject):
         ):
             self._start_manual_worker(worker.name, worker.session, worker.target)
             return
+        if worker.success and worker.name in {"g1", "g2", "g3"} and self._pending_emergency_daq_channels is None:
+            self._manual_readback_names.add(worker.name)
+            self._manual_readback_timer.start(0 if isinstance(worker, GateStepWorker) else 200)
         self.manual_control_finished.emit(worker.name, worker.success, worker.message, result)
         if self._pending_emergency_daq_channels is not None:
             daq_channels = self._pending_emergency_daq_channels
@@ -800,7 +968,11 @@ class DeviceManager(QtCore.QObject):
         self._gate_current_worker = None
         worker.deleteLater()
         self.gate_currents_read.emit(worker.readbacks, worker.message)
-        if not worker.quiet:
+        if self._pending_emergency_daq_channels is not None:
+            channels = self._pending_emergency_daq_channels
+            self._pending_emergency_daq_channels = None
+            self._start_emergency_worker(channels)
+        elif not worker.quiet:
             self.operation_changed.emit(False, worker.message)
 
     def _finish_protection_apply(self):
@@ -960,7 +1132,7 @@ class DeviceManager(QtCore.QObject):
         if start_voltage is not None and not math.isclose(float(start_voltage), 0.0, abs_tol=1e-9):
             zero_detail = f" Existing {float(start_voltage):g} V setpoint was safely ramped to 0 V before configuration."
         return (
-            f"{mode_text}; ±{max_voltage:g} V maximum; "
+            f"{mode_text}; ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â±{max_voltage:g} V maximum; "
             f"{current_compliance:.3g} A current compliance. "
             + (
                 "Requested profile is applied and verified."
@@ -1107,15 +1279,22 @@ class DeviceManager(QtCore.QObject):
         return sorted(unique)
 
     def emergency_stop(self, daq_channels: Optional[Iterable[int]] = None):
+        self._manual_readback_timer.stop()
+        self._manual_readback_names.clear()
         daq_channels = self._daq_output_channels(daq_channels)
-        if self._emergency_worker is not None and self._emergency_worker.isRunning():
+        if self._emergency_worker is not None:
             return
-        if self._manual_worker is not None and self._manual_worker.isRunning():
+        if self._manual_worker is not None:
             self._pending_emergency_daq_channels = list(daq_channels)
             self._manual_worker.request_cancel()
             self.operation_changed.emit(True, "Emergency stop requested: stopping manual control before zeroing outputs...")
             return
-        if self._protection_worker is not None and self._protection_worker.isRunning():
+        if self._gate_current_worker is not None:
+            self._pending_emergency_daq_channels = list(daq_channels)
+            self._gate_current_worker.requestInterruption()
+            self.operation_changed.emit(True, "Emergency stop requested: finishing in-flight readback before zeroing outputs...")
+            return
+        if self._protection_worker is not None:
             self._pending_emergency_daq_channels = list(daq_channels)
             self.operation_changed.emit(True, "Emergency stop requested: waiting for the active protection command before zeroing outputs...")
             return
@@ -1135,14 +1314,16 @@ class DeviceManager(QtCore.QObject):
         self._queue_gate_readback()
 
     def shutdown(self):
-        if self._manual_worker is not None and self._manual_worker.isRunning():
+        self._manual_readback_timer.stop()
+        self._manual_readback_names.clear()
+        if self._manual_worker is not None:
             self._manual_worker.request_cancel()
             self._manual_worker.wait()
             self._finish_manual_worker()
-        if self._gate_current_worker is not None and self._gate_current_worker.isRunning():
+        if self._gate_current_worker is not None:
             self._gate_current_worker.wait()
             self._finish_gate_current_read()
-        if self._protection_worker is not None and self._protection_worker.isRunning():
+        if self._protection_worker is not None:
             self._protection_worker.wait()
             self._finish_protection_apply()
         if self._emergency_worker is not None and self._emergency_worker.isRunning():

@@ -5,7 +5,7 @@ import datetime
 import os
 import time
 
-from PyQt6 import QtCore
+from PySide6 import QtCore
 
 from app.constants import (
     GATE_BIAS_RAMP_STEP_T,
@@ -17,7 +17,7 @@ from app.constants import (
 from app.models import Connections, DualGateParams, SaveRoot
 from app.result_channels import KEITHLEY_CHANNEL
 from app.run_output import new_run_id, compose_output_stem, update_run_metadata_status, write_run_metadata
-from app.signal_chain import signal_chain_filename_parts
+from app.measurement_output import dual_gate_filename_parts
 from app.utils import _frange_inc, safe_ramp
 from app.workers.base import RunStopped, RunWorker
 
@@ -37,7 +37,7 @@ class DualGateWorker(RunWorker):
         self.lkn_rate = kw.get("lkn_rate", 100.0)
         self.signal_chain = dict(kw.get("signal_chain") or {})
 
-    @QtCore.pyqtSlot()
+    @QtCore.Slot()
     def run(self):
         csv_path = self.p.output_csv_path
         run_status = "error"
@@ -61,22 +61,11 @@ class DualGateWorker(RunWorker):
 
             if not csv_path:
                 ts = new_run_id()
-                tag_src = "VdsKeithley" if self.p.vds_source == "Keithley 2400" else f"VdsDAQ_ao{self.p.ao_channel}"
-                g1_tag = "Tg" if self.g1 else "NoTg"
-                g2_tag = "Bg" if self.g2 else "NoBg"
-                signal_tags = "_".join(signal_chain_filename_parts(self.signal_chain))
                 stem = compose_output_stem(
                     self.save.device_id,
                     "vds_sweep",
                     self.p.base_name,
-                    (
-                        g1_tag,
-                        g2_tag,
-                        tag_src,
-                        f"Vtg{self.p.vtg_set:+.3f}V",
-                        f"Vbg{self.p.vbg_set:+.3f}V",
-                        signal_tags,
-                    ),
+                    dual_gate_filename_parts(self.p, self.signal_chain),
                     ts,
                 )
                 csv_path = os.path.join(self.save.path(), stem + ".csv")
