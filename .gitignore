@@ -10,4 +10,7 @@ tmp/
 offline_results_*.json
 *_preview.png
 workspace_preview*.png
+# Generated curve-map preview images and saved view settings
+/curve_map_*_preview*.png
+/curve_map_*_preview*_view.json
 *.lnk
