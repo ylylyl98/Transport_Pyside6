@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Tuple
 
 from PySide6 import QtCore, QtWidgets
@@ -12,6 +13,7 @@ from app.keithley_modes import KEITHLEY_MODE_LABELS, keithley_mode_label, keithl
 from app.models import Connections, SaveRoot
 from app.signal_chain import engineering_value, preamp_gain_v_per_a, sr830_xy_output_gain, sample_ac_voltage_estimate
 from app.settings import get_app_settings
+from app.ui.drag_drive_settings import DragDriveSettings
 from app.ui.helpers import apply_tooltip, configure_volt_spinbox, flash_button_success, set_standard_input_height, style_form_layout
 from app.ui.widgets.collapsible_section import CollapsibleSection
 from app.ui.widgets.status_panel import StatusPanel
@@ -39,7 +41,7 @@ class ConnDock(QtWidgets.QWidget):
     lockin_sensitivity_verified = QtCore.Signal(float, str)
 
     AMP_MIN_A = 1e-12
-    LIA_MIN_V = 1e-6
+    LIA_MIN_V = 2e-9
     MAX_GATE_VOLTAGE_V = 200.0
 
     def __init__(self, device_manager: DeviceManager | None = None):
@@ -49,6 +51,7 @@ class ConnDock(QtWidgets.QWidget):
         self.device_manager = device_manager
         self._scan_thread = None
         self._lockin_sensitivity_from_sr830 = False
+        self._sensitivity_panels_bound = False
         self._build()
         QtCore.QTimer.singleShot(0, self._start_scan)
         self._bind_device_manager()
@@ -80,6 +83,7 @@ class ConnDock(QtWidgets.QWidget):
         self.cbo_daq = ResourceComboBox()
         self.cbo_mono = ResourceComboBox()
         self.cbo_lockin = ResourceComboBox()
+        self.cbo_drive_lockin = ResourceComboBox()
         self.ed_g1 = self.cbo_g1
         self.ed_g2 = self.cbo_g2
         self.ed_g3 = self.cbo_g3
@@ -99,7 +103,8 @@ class ConnDock(QtWidgets.QWidget):
         self.cbo_daq.setCurrentText(self.conns.daq_dev)
         self.cbo_mono.setCurrentText(self.conns.mono)
         self.cbo_lockin.setCurrentText(self.conns.lockin)
-        for widget in (self.cbo_g1, self.cbo_g2, self.cbo_g3, self.cbo_daq, self.cbo_mono, self.cbo_lockin, self.cbo_g1_mode, self.cbo_g2_mode, self.cbo_g3_mode):
+        self.cbo_drive_lockin.setCurrentText(self.conns.drive_lockin)
+        for widget in (self.cbo_g1, self.cbo_g2, self.cbo_g3, self.cbo_daq, self.cbo_mono, self.cbo_lockin, self.cbo_drive_lockin, self.cbo_g1_mode, self.cbo_g2_mode, self.cbo_g3_mode):
             widget.currentTextChanged.connect(self._update_reconnect_indicators)
 
         lbl_g1 = QtWidgets.QLabel("G1 / Vtg:")
@@ -114,7 +119,9 @@ class ConnDock(QtWidgets.QWidget):
         form_hw.addRow(lbl_g3, self._make_address_mode_row(self.cbo_g3, self.cbo_g3_mode))
         form_hw.addRow(lbl_daq, self.cbo_daq)
         form_hw.addRow(lbl_mono, self.cbo_mono)
+        lbl_lockin.setText("Drag / primary lock-in:")
         form_hw.addRow(lbl_lockin, self.cbo_lockin)
+        form_hw.addRow("Drive lock-in:", self.cbo_drive_lockin)
         self.lbl_reconnect_hint = QtWidgets.QLabel("")
         self.lbl_reconnect_hint.setWordWrap(True)
         self.lbl_reconnect_hint.setProperty("role", "warning-hint")
@@ -200,20 +207,33 @@ class ConnDock(QtWidgets.QWidget):
 
         grp_rate = QtWidgets.QGroupBox("Signal Chain")
         form_rate = QtWidgets.QFormLayout(grp_rate)
+        self._signal_chain_form = form_rate
         style_form_layout(form_rate)
         self.sp_amp = ScientificDoubleSpinBox()
         self.sp_amp.setDecimals(12)
         self.sp_amp.setRange(self.AMP_MIN_A, 1.0)
         self.sp_amp.setValue(1e-7)
         self.sp_lkn = SafeDoubleSpinBox()
-        self.sp_lkn.setDecimals(6)
+        self.sp_lkn.setDecimals(9)
         self.sp_lkn.setRange(self.LIA_MIN_V, 10.0)
         self.sp_lkn.setSingleStep(0.001)
         self.sp_lkn.setValue(0.1)
         self.sp_amp.valueChanged.connect(self._on_preamp_sensitivity_changed)
         self.sp_lkn.valueChanged.connect(self._on_manual_lockin_sensitivity_changed)
         lbl_amp = QtWidgets.QLabel("Pre-amp (A):")
-        lbl_lkn = QtWidgets.QLabel("Lock-in sensitivity (V):")
+        self.lbl_lkn = lbl_lkn = QtWidgets.QLabel("Lock-in sensitivity (V):")
+        self.ed_lkn_readback = QtWidgets.QLineEdit('--')
+        self.ed_lkn_readback.setObjectName('lockinSensitivityReadback')
+        self.ed_lkn_readback.setAccessibleName('Drag lock-in sensitivity readback')
+        self.ed_lkn_readback.setReadOnly(True)
+        self.btn_refresh_drag_sensitivity = QtWidgets.QPushButton('Refresh')
+        self.btn_refresh_drag_sensitivity.setAccessibleName('Refresh Drag lock-in sensitivity')
+        primary_field = QtWidgets.QWidget()
+        primary_layout = QtWidgets.QHBoxLayout(primary_field)
+        primary_layout.setContentsMargins(0, 0, 0, 0)
+        primary_layout.addWidget(self.sp_lkn, 1)
+        primary_layout.addWidget(self.ed_lkn_readback, 1)
+        primary_layout.addWidget(self.btn_refresh_drag_sensitivity)
         self.lbl_lkn_source = QtWidgets.QLabel("Manual value")
         self.lbl_lkn_source.setWordWrap(True)
         self.lbl_lkn_source.setProperty("role", "hint")
@@ -222,8 +242,26 @@ class ConnDock(QtWidgets.QWidget):
         self.lbl_amp_status.setProperty("role", "success-hint")
         form_rate.addRow(lbl_amp, self.sp_amp)
         form_rate.addRow("", self.lbl_amp_status)
-        form_rate.addRow(lbl_lkn, self.sp_lkn)
+        form_rate.addRow(lbl_lkn, primary_field)
         form_rate.addRow("", self.lbl_lkn_source)
+        self.drive_sensitivity_row = QtWidgets.QWidget()
+        self.ed_drive_lkn_readback = QtWidgets.QLineEdit('--')
+        self.ed_drive_lkn_readback.setObjectName('lockin_driveSensitivityReadback')
+        self.ed_drive_lkn_readback.setAccessibleName('Drive lock-in sensitivity readback')
+        self.ed_drive_lkn_readback.setReadOnly(True)
+        self.btn_refresh_drive_sensitivity = QtWidgets.QPushButton('Refresh')
+        self.btn_refresh_drive_sensitivity.setAccessibleName('Refresh Drive lock-in sensitivity')
+        drive_layout = QtWidgets.QHBoxLayout(self.drive_sensitivity_row)
+        drive_layout.setContentsMargins(0, 0, 0, 0)
+        drive_layout.addWidget(self.ed_drive_lkn_readback, 1)
+        drive_layout.addWidget(self.btn_refresh_drive_sensitivity)
+        self.lbl_drive_lkn_source = QtWidgets.QLabel('Not read - refresh Drive panel')
+        self.lbl_drive_lkn_source.setWordWrap(True)
+        self.lbl_drive_lkn_source.setProperty('role', 'hint')
+        form_rate.addRow('Drive sensitivity:', self.drive_sensitivity_row)
+        form_rate.addRow('', self.lbl_drive_lkn_source)
+        for field in (self.ed_lkn_readback, self.ed_drive_lkn_readback):
+            field.setToolTip('Last instrument voltage range readback. Change Sensitivity in the corresponding Lock-in panel; each run reads both ranges again.')
         self.ed_ac_contact = QtWidgets.QLineEdit()
         self.ed_ac_contact.setMaxLength(40)
         self.ed_ac_contact.setPlaceholderText("e.g. MoTe2E2 (optional)")
@@ -241,9 +279,14 @@ class ConnDock(QtWidgets.QWidget):
         self.lbl_ac_estimate.setWordWrap(True)
         self.lbl_ac_estimate.setProperty("role", "hint")
         form_rate.addRow("", self.lbl_ac_estimate)
+        self.drag_drive_settings = DragDriveSettings()
+        self.drag_drive_settings.changed.connect(self._update_sensitivity_mode)
+        self.drag_drive_settings.changed.connect(self.signal_chain_changed.emit)
+        form_rate.addRow(self.drag_drive_settings)
         self.exp_signal_chain = CollapsibleSection("Signal Chain", grp_rate, expanded=False)
         layout.addWidget(self.exp_signal_chain)
         self._update_preamp_status(flash=False)
+        self._update_sensitivity_mode()
 
         grp_conn = QtWidgets.QGroupBox("Connections")
         lay_conn = QtWidgets.QVBoxLayout(grp_conn)
@@ -270,7 +313,7 @@ class ConnDock(QtWidgets.QWidget):
         status_row.addWidget(self.lbl_connection_status, 1)
         status_row.addWidget(self.btn_connection_details)
         self._connection_detail = "Connect hardware from here. Tabs will reuse the same sessions."
-        self.dock_status_panel = StatusPanel(["g1", "g2", "g3", "daq", "mono", "lockin"], columns=1)
+        self.dock_status_panel = StatusPanel(["g1", "g2", "g3", "daq", "mono", "lockin", "lockin_drive"], columns=1)
         lay_conn.addLayout(status_row)
         lay_conn.addWidget(self.dock_status_panel)
         self.exp_connections = CollapsibleSection("Connections", grp_conn, expanded=True)
@@ -401,7 +444,7 @@ class ConnDock(QtWidgets.QWidget):
         layout.addWidget(self.btn_stop)
         layout.addStretch()
 
-        for widget in [self.cbo_g1, self.cbo_g2, self.cbo_g3, self.cbo_g1_mode, self.cbo_g2_mode, self.cbo_g3_mode, self.cbo_daq, self.cbo_mono, self.cbo_lockin, self.ed_user, self.ed_device_id, self.ed_base]:
+        for widget in [self.cbo_g1, self.cbo_g2, self.cbo_g3, self.cbo_g1_mode, self.cbo_g2_mode, self.cbo_g3_mode, self.cbo_daq, self.cbo_mono, self.cbo_lockin, self.cbo_drive_lockin, self.ed_user, self.ed_device_id, self.ed_base]:
             set_standard_input_height(widget, 26)
             widget.setMinimumWidth(0)
             widget.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
@@ -427,7 +470,7 @@ class ConnDock(QtWidgets.QWidget):
         apply_tooltip("Device identifier added to the save path.", lbl_device_id, self.ed_device_id)
         apply_tooltip("Root folder where all CSV output is stored.", lbl_base, self.ed_base)
         apply_tooltip("Pre-amp sensitivity shown on the amplifier front panel, entered in amps.", lbl_amp, self.sp_amp)
-        apply_tooltip("Lock-in voltage sensitivity used for Ids_X/Ids_Y scaling. When an SR830 or SR850 is connected, this is updated from SENS?.", lbl_lkn, self.sp_lkn, self.lbl_lkn_source)
+        apply_tooltip("Lock-in voltage sensitivity used for Ids_X/Ids_Y scaling. When an SR830 or SR850 is connected, this is read-only and updated from SENS?. Change the instrument range in the Lock-in panel.", lbl_lkn, self.sp_lkn, self.lbl_lkn_source)
         apply_tooltip("Open all configured hardware sessions so tabs can reuse them.", self.btn_connect_all)
         apply_tooltip("Close all instrument sessions managed by the dock.", self.btn_disconnect_all)
         for name, (spinbox, ramp_button, _zero_button) in self._manual_gate_controls.items():
@@ -466,6 +509,7 @@ class ConnDock(QtWidgets.QWidget):
 
     def signal_chain_values(self) -> dict[str, float | str]:
         return {
+            "drag_drive": self.drag_drive_settings.configuration(),
             "ac_contact": self.ed_ac_contact.text().strip(),
             "ac_voltage_ratio": self.sp_ac_ratio.value() or None,
             "lockin_sensitivity_v": max(float(self.sp_lkn.value()), self.LIA_MIN_V),
@@ -505,7 +549,7 @@ class ConnDock(QtWidgets.QWidget):
             sensitivity_v = float(sensitivity_v)
         except (TypeError, ValueError):
             return False
-        if sensitivity_v <= 0.0:
+        if not math.isfinite(sensitivity_v) or sensitivity_v <= 0.0:
             return False
         previous = self.sp_lkn.blockSignals(True)
         try:
@@ -513,12 +557,74 @@ class ConnDock(QtWidgets.QWidget):
         finally:
             self.sp_lkn.blockSignals(previous)
         self._lockin_sensitivity_from_sr830 = True
-        suffix = f" ({label})" if label else ""
-        self._set_lockin_sensitivity_source(f"Using lock-in SENS{suffix}")
+        self.ed_lkn_readback.setText(engineering_value(sensitivity_v, 'V', ' '))
+        self._set_sensitivity_source('lockin', 'Instrument readback')
         self.lbl_lkn_source.setToolTip("")
         self._save_signal_chain_settings()
         self.lockin_sensitivity_verified.emit(sensitivity_v, label)
         return True
+
+    def bind_lockin_panels(self, primary, drive):
+        """Reuse each panel's asynchronous worker; no VISA reads for rendering."""
+        primary.sensitivity_read.connect(self.set_lockin_sensitivity_from_sr830)
+        self.lockin_sensitivity_verified.connect(primary.set_verified_sensitivity)
+        drive.sensitivity_read.connect(self.set_drive_lockin_sensitivity)
+        for name, panel, button in (
+            ('lockin', primary, self.btn_refresh_drag_sensitivity),
+            ('lockin_drive', drive, self.btn_refresh_drive_sensitivity),
+        ):
+            panel.sensitivity_invalidated.connect(
+                lambda reason, role=name: self.invalidate_lockin_sensitivity(role, reason))
+            button.clicked.connect(panel.refresh_panel)
+        self._sensitivity_panels_bound = True
+        self._update_sensitivity_controls()
+
+    def set_drive_lockin_sensitivity(self, sensitivity_v: float, label: str = ''):
+        try:
+            value = float(sensitivity_v)
+        except (TypeError, ValueError):
+            return False
+        if not math.isfinite(value) or value <= 0:
+            return False
+        self.ed_drive_lkn_readback.setText(engineering_value(value, 'V', ' '))
+        self._set_sensitivity_source('lockin_drive', 'Instrument readback')
+        return True
+
+    def invalidate_lockin_sensitivity(self, name, reason):
+        field = self.ed_lkn_readback if name == 'lockin' else self.ed_drive_lkn_readback
+        field.setText('--')
+        self._set_sensitivity_source(name, reason, warning=True)
+
+    def _set_sensitivity_source(self, name, message, warning=False):
+        manager = self.device_manager
+        connections = manager.connections if manager is not None else self.conns
+        address = manager.connected_address(name) if manager is not None else ''
+        address = address or getattr(connections, 'lockin' if name == 'lockin' else 'drive_lockin')
+        label = self.lbl_lkn_source if name == 'lockin' else self.lbl_drive_lkn_source
+        label.setText(f'{address}\n{message}')
+        label.setTextFormat(Qt.TextFormat.PlainText)
+        label.setToolTip(message)
+        label.setProperty('role', 'warning-hint' if warning else 'hint')
+        label.style().unpolish(label)
+        label.style().polish(label)
+
+    def _update_sensitivity_mode(self, *_args):
+        dual = self.drag_drive_settings.configuration()['enabled']
+        self.lbl_lkn.setText('Drag sensitivity:' if dual else 'Lock-in sensitivity (V):')
+        self.sp_lkn.setVisible(not dual)
+        self.ed_lkn_readback.setVisible(dual)
+        self.btn_refresh_drag_sensitivity.setVisible(dual)
+        self._signal_chain_form.setRowVisible(self.drive_sensitivity_row, dual)
+        self._signal_chain_form.setRowVisible(self.lbl_drive_lkn_source, dual)
+        self._update_sensitivity_controls()
+
+    def _update_sensitivity_controls(self, *_args):
+        manager = self.device_manager
+        for name, button in (('lockin', self.btn_refresh_drag_sensitivity),
+                             ('lockin_drive', self.btn_refresh_drive_sensitivity)):
+            button.setEnabled(bool(self._sensitivity_panels_bound and manager is not None
+                                   and manager.is_connected(name) and not manager.is_busy()
+                                   and not manager.is_in_use(name)))
 
     def refresh_lockin_sensitivity_from_session(self) -> bool:
         if self.device_manager is None or not self.device_manager.is_connected("lockin"):
@@ -532,14 +638,17 @@ class ConnDock(QtWidgets.QWidget):
             settings = session.read_sensitivity() if hasattr(session, "read_sensitivity") else session.read_settings()
             index = int(settings.get("sensitivity"))
         except Exception as ex:
-            self._set_lockin_sensitivity_source("Lock-in read failed; using last value", warning=True)
+            self.invalidate_lockin_sensitivity('lockin', 'Read failed; unverified - refresh Drag panel')
             self.lbl_lkn_source.setToolTip(str(ex))
+            return False
+        if settings.get('input_config', 0) not in (0, 1):
+            self.invalidate_lockin_sensitivity('lockin', 'Voltage input required (A or A-B); sensitivity is not a voltage range')
             return False
         sensitivity_v = settings.get("sensitivity_v")
         if sensitivity_v is None:
             sensitivity_v = sensitivity_value(index, use_current=False)
         if sensitivity_v is None:
-            self._set_lockin_sensitivity_source("Lock-in sensitivity unknown; using last value", warning=True)
+            self.invalidate_lockin_sensitivity('lockin', 'Sensitivity unknown; unverified - refresh Drag panel')
             return False
         label = str(settings.get("sensitivity_label") or "")
         if not label:
@@ -548,6 +657,7 @@ class ConnDock(QtWidgets.QWidget):
 
     def _on_manual_lockin_sensitivity_changed(self, *_args):
         self._lockin_sensitivity_from_sr830 = False
+        self.ed_lkn_readback.setText('--')
         self._set_lockin_sensitivity_source("Manual value")
         self._save_signal_chain_settings()
 
@@ -703,6 +813,8 @@ class ConnDock(QtWidgets.QWidget):
             daq_dev=self.cbo_daq.current_address(),
             mono=self.cbo_mono.current_address(),
             lockin=self.cbo_lockin.current_address(),
+            drive_lockin=self.cbo_drive_lockin.current_address(),
+            drag_drive_enabled=self.drag_drive_settings.configuration()["enabled"],
         )
         s = SaveRoot(user=self.ed_user.text(), device_id=self.ed_device_id.text(), base=self.ed_base.text())
         return c, s, True
@@ -722,6 +834,7 @@ class ConnDock(QtWidgets.QWidget):
         s.setValue("addr/daq", self.cbo_daq.current_address())
         s.setValue("addr/mono", self.cbo_mono.current_address())
         s.setValue("addr/lockin", self.cbo_lockin.current_address())
+        s.setValue("addr/drive_lockin", self.cbo_drive_lockin.current_address())
         s.setValue("path/user", self.ed_user.text())
         s.setValue("path/device_id", self.ed_device_id.text())
         s.setValue("path/base", self.ed_base.text())
@@ -773,6 +886,7 @@ class ConnDock(QtWidgets.QWidget):
         self.cbo_daq.setCurrentText(str(s.value("addr/daq", self.conns.daq_dev)))
         self.cbo_mono.setCurrentText(str(s.value("addr/mono", self.conns.mono)))
         self.cbo_lockin.setCurrentText(str(s.value("addr/lockin", self.conns.lockin)))
+        self.cbo_drive_lockin.setCurrentText(str(s.value("addr/drive_lockin", self.conns.drive_lockin)))
         self.ed_user.setText(str(s.value("path/user", self.save_root.user)))
         device_id = str(s.value("path/device_id", s.value("path/sample", "YZ315")))
         self.ed_device_id.setText(device_id)
@@ -795,21 +909,25 @@ class ConnDock(QtWidgets.QWidget):
 
     def set_device_manager(self, device_manager: DeviceManager):
         self.device_manager = device_manager
+        self.drag_drive_settings.bind_manager(device_manager)
         self._bind_device_manager()
 
     def _bind_device_manager(self):
         if self.device_manager is None:
             return
+        self.drag_drive_settings.bind_manager(self.device_manager)
         self.btn_connect_all.clicked.connect(self._on_connect_all_clicked)
         self.btn_disconnect_all.clicked.connect(self._on_disconnect_all_clicked)
         self.device_manager.status_changed.connect(self._on_device_status_changed)
+        self.device_manager.resources_changed.connect(self._update_sensitivity_controls)
+        self.device_manager.operation_changed.connect(self._update_sensitivity_controls)
         self.device_manager.operation_changed.connect(self._on_operation_changed)
         self.device_manager.manual_control_finished.connect(self._on_manual_control_finished)
         self.device_manager.manual_gate_progress.connect(self._on_manual_gate_progress)
         self.device_manager.gate_currents_read.connect(self._on_gate_currents_read)
         self.device_manager.daq_output_finished.connect(self._on_daq_output_finished)
         self.device_manager.protection_changed.connect(self._on_protection_changed)
-        for name in ("g1", "g2", "g3", "daq", "mono", "lockin"):
+        for name in ("g1", "g2", "g3", "daq", "mono", "lockin", "lockin_drive"):
             self._on_device_status_changed(name, self.device_manager.state(name), self.device_manager.detail(name))
         self._update_reconnect_indicators()
         self._update_manual_controls()
@@ -889,11 +1007,15 @@ class ConnDock(QtWidgets.QWidget):
             self._update_protection_status(name, state, detail)
         if name in getattr(self, "gate_readback_labels", {}) and state != "ok":
             self._set_gate_readback_row(name, {})
+        if name in ('lockin', 'lockin_drive'):
+            role = 'Drag' if name == 'lockin' else 'Drive'
+            self.invalidate_lockin_sensitivity(name, f'Not read - refresh {role} panel' if state == 'ok'
+                                               else 'Connection error; unverified' if state == 'err' else 'Disconnected')
+            self._update_sensitivity_controls()
         if name == "lockin":
+            self.sp_lkn.setReadOnly(state == "ok")
             if state == "ok":
                 QtCore.QTimer.singleShot(0, self.refresh_lockin_sensitivity_from_session)
-            elif self._lockin_sensitivity_from_sr830:
-                self._set_lockin_sensitivity_source("Last lock-in value; reconnect to update")
         if name == "daq":
             if state == "ok":
                 self._sync_daq_controls_from_session(detail)
@@ -1306,6 +1428,7 @@ class ConnDock(QtWidgets.QWidget):
             "daq": self.cbo_daq,
             "mono": self.cbo_mono,
             "lockin": self.cbo_lockin,
+            "lockin_drive": self.cbo_drive_lockin,
         }
         mode_widgets = {
             "g1": self.cbo_g1_mode,
@@ -1352,6 +1475,7 @@ class ConnDock(QtWidgets.QWidget):
             ("G2", self.cbo_g2),
             ("G3", self.cbo_g3),
             ("lock-in", self.cbo_lockin),
+            ("Drive lock-in", self.cbo_drive_lockin),
         ):
             configured = combo.current_address()
             resolved = resolve_gpib_resource(configured, gpib)

@@ -7,6 +7,7 @@ import unittest
 import json
 import threading
 import faulthandler
+import shlex
 
 ROOT = Path(__file__).resolve().parent
 os.chdir(ROOT)
@@ -23,6 +24,21 @@ os.environ["APPDATA"] = scratch.name
 os.environ["LOCALAPPDATA"] = scratch.name
 
 def audit(event, args):
+    if event == "subprocess.Popen":
+        executable, command, cwd, _ = args
+        # Permit only the detached, hardware-free renderer exercised by the
+        # process lifecycle tests. Keep arbitrary subprocesses blocked.
+        argv = ([part.strip('"') for part in shlex.split(command, posix=False)]
+                if isinstance(command, str) else command)
+        interpreters = (Path(sys.executable), Path(sys.executable).with_name("pythonw.exe"))
+        if (executable and Path(executable) in interpreters and cwd and Path(cwd) == ROOT
+                and len(argv) in (6, 8) and argv[0] == executable
+                and Path(argv[1]) == ROOT / "transport_png_exporter.py"
+                and argv[2] == "--spool" and Path(argv[3]).parent == Path(tempfile.gettempdir())
+                and Path(argv[3]).name.startswith("transport-png-")
+                and argv[4] == "--owner-pid" and argv[5] == str(os.getpid())
+                and (len(argv) == 6 or (argv[6] == "--after-pid" and argv[7].isdigit()))):
+            return
     if event in ("socket.connect", "socket.bind", "socket.sendto", "socket.sendmsg",
                  "socket.getaddrinfo", "socket.gethostbyname", "socket.gethostbyaddr",
                  "subprocess.Popen", "os.system"):

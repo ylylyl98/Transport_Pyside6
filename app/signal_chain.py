@@ -38,6 +38,7 @@ class SignalChainSnapshot:
     experiment_context: dict | None = None
     ac_contact: str = ""
     ac_voltage_ratio: float | None = None
+    drag_drive: dict | None = None
 
     @property
     def preamp_gain_v_per_a(self) -> float:
@@ -118,6 +119,9 @@ def signal_chain_filename_parts(snapshot: SignalChainSnapshot | dict) -> list[st
         f"LIA{engineering_value(lockin, 'V')}",
         f"Pre{engineering_value(preamp, 'A')}",
     ]
+    dual = data.get('drag_drive') or {}
+    if dual.get('enabled'):
+        parts.extend(['DragDrive', 'Rs' + engineering_value(dual['series_resistance_ohm'], 'Ohm')])
     amplitude = values.get("sine_out_v")
     if isinstance(amplitude, (int, float)) and math.isfinite(amplitude) and amplitude > 0:
         parts.append(('ACout' if verified else 'ACset') + engineering_value(amplitude, 'V'))

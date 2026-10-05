@@ -770,7 +770,7 @@ class GateScanTab(BaseMeasurementTab):
         self._update_plot_axis_choices()
 
     def _update_plot_axis_choices(self):
-        options = plot_channel_options(self.cbo_source.currentText())
+        options = plot_channel_options(self.cbo_source.currentText(), getattr(self.device_manager.connections, "drag_drive_enabled", False))
         current = self.cbo_y.currentText()
         if current not in options:
             current = "Ids_DC"
@@ -780,7 +780,7 @@ class GateScanTab(BaseMeasurementTab):
         self.cbo_y.setCurrentText(current)
         self.cbo_y.blockSignals(False)
         self.plot.set_y_axis_options(options, current)
-        self.plot.set_compare_channels(compare_channel_options(self.cbo_source.currentText()))
+        self.plot.set_compare_channels(compare_channel_options(self.cbo_source.currentText(), getattr(self.device_manager.connections, "drag_drive_enabled", False)), grid=getattr(self.device_manager.connections, "drag_drive_enabled", False))
         self.set_plot_axis_source(current)
 
     def _on_device_status_changed(self, name: str, _state: str, _detail: str):
@@ -984,7 +984,7 @@ class GateScanTab(BaseMeasurementTab):
         self.lbl_derived_range.style().polish(self.lbl_derived_range)
 
     def _update_plot_axis_label(self, *_args):
-        if self._plot_records:
+        if self._plot_records or self.plot.current_plot_mode() == "4-Channel Compare":
             self._redraw_plot()
             return
         self._set_plot_x_label(self.plot.ax)
@@ -1482,7 +1482,7 @@ class GateScanTab(BaseMeasurementTab):
         self._redraw_plot()
 
     def set_plot_axis_source(self, source: str):
-        if source not in plot_channel_options(self.cbo_source.currentText()):
+        if source not in plot_channel_options(self.cbo_source.currentText(), getattr(self.device_manager.connections, "drag_drive_enabled", False)):
             source = "Ids_DC"
         if self.cbo_y.currentText() != source:
             self.cbo_y.blockSignals(True)
@@ -1509,9 +1509,10 @@ class GateScanTab(BaseMeasurementTab):
                 axis.autoscale_view()
                 axis.set_ylabel(f"{channel} (A)")
                 axis.grid(True)
-            if axes:
-                self._set_plot_x_label(axes[-1])
-                self.plot.canvas.draw_idle()
+            for axis in self.plot.bottom_axes():
+                self._set_plot_x_label(axis)
+            self.plot.format_compare_axes()
+            self.plot.canvas.draw_idle()
         else:
             source = self.cbo_y.currentText()
             ax = self.plot.ax

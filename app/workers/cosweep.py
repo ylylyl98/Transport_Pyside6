@@ -264,8 +264,8 @@ class CoSweepWorker(RunWorker):
 
             with open(csv_path, "x", newline="", buffering=1, encoding="utf-8") as f:
                 w = csv.writer(f)
-                w.writerow(["Vtg", "Vbg", "Vds", "Vds_measured", "raw_X", "raw_Y", "raw_DC", "Ids_X", "Ids_Y", "Ids_DC", KEITHLEY_CHANNEL, "Doping", "E-field", "PassIndex", "FastDirection"])
-                w.writerow(["V", "V", "V", "V", "A", "A", "A", "A", "A", "A", "A", "V", "V", "#", ""])
+                w.writerow(["Vtg", "Vbg", "Vds", "Vds_measured", "raw_X", "raw_Y", "raw_DC", "Ids_X", "Ids_Y", "Ids_DC", KEITHLEY_CHANNEL, "Doping", "E-field", "PassIndex", "FastDirection", *self.extra_columns()])
+                w.writerow(["V", "V", "V", "V", "V", "V", "V", "A", "A", "A", "A", "V", "V", "#", "", *self.extra_units()])
 
                 if not self._active_derived and "Vtg" not in active_axes:
                     if self.g1 is not None:
@@ -324,20 +324,9 @@ class CoSweepWorker(RunWorker):
                         self.set_volt(fast_axis, point["fast_value"])
                     time.sleep(self.p.delay)
 
-                    raw_x = raw_y = raw_dc = 0.0
-                    for _ in range(self.p.n_sample):
-                        self.check_abort_pause()
-                        self.daq.acquire()
-                        raw_x += self.daq.get_ai_value(0)
-                        raw_y += self.daq.get_ai_value(1)
-                        raw_dc += self.daq.get_ai_value(2)
-                    raw_x /= self.p.n_sample
-                    raw_y /= self.p.n_sample
-                    raw_dc /= self.p.n_sample
-
-                    ids_x = raw_x / (self.amp_rate * self.lkn_rate)
-                    ids_y = raw_y / (self.amp_rate * self.lkn_rate)
-                    ids_dc = raw_dc / self.amp_rate
+                    sample = self.acquire_currents(self.p.n_sample)
+                    raw_x, raw_y, raw_dc = (sample[key] for key in ("raw_X", "raw_Y", "raw_DC"))
+                    ids_x, ids_y, ids_dc = (sample[key] for key in ("Ids_X", "Ids_Y", "Ids_DC"))
                     ids_keithley = self._read_keithley_current()
                     vds_measured = (
                         self.daq.get_ao_vs_gnd_value(self.p.ao_channel)
@@ -350,7 +339,7 @@ class CoSweepWorker(RunWorker):
                     curr_vds = point["vds"]
                     doping, efield = point["doping"], point["efield"]
 
-                    w.writerow([curr_vtg, curr_vbg, curr_vds, vds_measured, raw_x, raw_y, raw_dc, ids_x, ids_y, ids_dc, ids_keithley, doping, efield, pass_idx, fast_direction])
+                    w.writerow([curr_vtg, curr_vbg, curr_vds, vds_measured, raw_x, raw_y, raw_dc, ids_x, ids_y, ids_dc, ids_keithley, doping, efield, pass_idx, fast_direction, *self.extra_values()])
                     try:
                         f.flush()
                         os.fsync(f.fileno())
@@ -369,6 +358,7 @@ class CoSweepWorker(RunWorker):
                     x_plot = record_x_value(point_record, x_axis)
                     self.point.emit(x_plot, y_val)
                     self.point_data.emit({
+                        **sample,
                         "x": x_plot,
                         **point_record,
                         "vds_measured": vds_measured,
@@ -457,6 +447,8 @@ class CoSweepWorker(RunWorker):
             return None
 
     def _plot_value(self, ids_dc, ids_x, ids_y, ids_keithley):
+        if self.plot_choice in getattr(self, "_current_sample", {}):
+            return self._current_sample[self.plot_choice]
         if self.plot_choice == "Ids_X":
             return ids_x
         if self.plot_choice == "Ids_Y":

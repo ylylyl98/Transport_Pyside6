@@ -22,6 +22,8 @@ class Connections:
     daq_dev: str = "Dev1"
     mono: str = "ASRL13::INSTR"
     lockin: str = "GPIB1::08::INSTR"
+    drive_lockin: str = "GPIB1::09::INSTR"
+    drag_drive_enabled: bool = False
 
 
 @dataclass

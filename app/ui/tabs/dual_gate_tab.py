@@ -338,7 +338,7 @@ class DualGateTab(BaseMeasurementTab):
         self._update_plot_axis_choices()
 
     def _update_plot_axis_choices(self):
-        options = plot_channel_options(self.cbo_source.currentText())
+        options = plot_channel_options(self.cbo_source.currentText(), getattr(self.device_manager.connections, "drag_drive_enabled", False))
         current = self.cbo_y.currentText()
         if current not in options:
             current = "Ids_DC"
@@ -348,7 +348,7 @@ class DualGateTab(BaseMeasurementTab):
         self.cbo_y.setCurrentText(current)
         self.cbo_y.blockSignals(False)
         self.plot.set_y_axis_options(options, current)
-        self.plot.set_compare_channels(compare_channel_options(self.cbo_source.currentText()))
+        self.plot.set_compare_channels(compare_channel_options(self.cbo_source.currentText(), getattr(self.device_manager.connections, "drag_drive_enabled", False)), grid=getattr(self.device_manager.connections, "drag_drive_enabled", False))
         self.set_plot_axis_source(current)
 
     def _on_device_status_changed(self, name: str, _state: str, _detail: str):
@@ -542,7 +542,7 @@ class DualGateTab(BaseMeasurementTab):
         self._redraw_plot()
 
     def set_plot_axis_source(self, source: str):
-        if source not in plot_channel_options(self.cbo_source.currentText()):
+        if source not in plot_channel_options(self.cbo_source.currentText(), getattr(self.device_manager.connections, "drag_drive_enabled", False)):
             source = "Ids_DC"
         if self.cbo_y.currentText() != source:
             self.cbo_y.blockSignals(True)
@@ -569,8 +569,9 @@ class DualGateTab(BaseMeasurementTab):
                 axis.autoscale_view()
                 axis.set_ylabel(f"{channel} (A)")
                 axis.grid(True)
-            if axes:
-                axes[-1].set_xlabel("Vds (V)")
+            for axis in self.plot.bottom_axes():
+                axis.set_xlabel("Vds (V)")
+            self.plot.format_compare_axes()
         else:
             source = self.cbo_y.currentText()
             ax = self.plot.ax

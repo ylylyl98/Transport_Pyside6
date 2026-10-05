@@ -20,6 +20,7 @@ class PlotWidget(QtWidgets.QWidget):
         self._plot_modes = ["Single Plot", "4-Channel Compare"]
         self._selected_plot_mode = "Single Plot"
         self._compare_channels: list[str] = []
+        self._compare_grid = False
 
         lay = QtWidgets.QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -56,7 +57,7 @@ class PlotWidget(QtWidgets.QWidget):
             action.setChecked(option == selected)
             action.triggered.connect(lambda checked=False, value=option: self._emit_y_axis_changed(value))
         self.set_selected_y_axis(selected)
-        self.btn_y_axis.setVisible(bool(options))
+        self.btn_y_axis.setVisible(bool(options) and self._selected_plot_mode == 'Single Plot')
 
     def set_selected_y_axis(self, selected: str):
         self._selected_y_axis = selected
@@ -80,11 +81,14 @@ class PlotWidget(QtWidgets.QWidget):
         self.set_selected_plot_mode(selected)
 
     def set_selected_plot_mode(self, selected: str):
+        changed = selected != self._selected_plot_mode
         self._selected_plot_mode = selected
+        self.btn_y_axis.setVisible(bool(self._y_axis_options) and selected == 'Single Plot')
         self.btn_plot_mode.setText(f"View: {selected}")
         for action in self.plot_mode_menu.actions():
             action.setChecked(action.text() == selected)
-        self._rebuild_axes()
+        if changed:
+            self._rebuild_axes()
 
     def _emit_plot_mode_changed(self, selected: str):
         if selected != self._selected_plot_mode:
@@ -94,8 +98,11 @@ class PlotWidget(QtWidgets.QWidget):
     def current_plot_mode(self) -> str:
         return self._selected_plot_mode
 
-    def set_compare_channels(self, channels: list[str]):
+    def set_compare_channels(self, channels: list[str], *, grid: bool = False):
+        if self._compare_channels == list(channels) and self._compare_grid == grid:
+            return
         self._compare_channels = list(channels)
+        self._compare_grid = grid
         self._rebuild_axes()
 
     def compare_channels(self) -> list[str]:
@@ -104,23 +111,38 @@ class PlotWidget(QtWidgets.QWidget):
     def get_axes(self):
         return list(self.axes)
 
+    def bottom_axes(self):
+        """Axes that need an X label, including both columns of the dual grid."""
+        return [axis for axis in self.axes if axis.get_subplotspec().is_last_row()]
+
+    def format_compare_axes(self):
+        if self._selected_plot_mode != '4-Channel Compare':
+            return
+        for axis, channel in zip(self.axes, self._compare_channels):
+            if self._compare_grid:
+                axis.set_title(channel.removeprefix('I_').replace('_', ' ').title(), fontsize=10)
+            axis.tick_params(axis='x', labelbottom=axis.get_subplotspec().is_last_row())
+
     def _rebuild_axes(self):
         self.fig.clear()
         if self._selected_plot_mode == "4-Channel Compare" and self._compare_channels:
-            built = self.fig.subplots(len(self._compare_channels), 1, sharex=True)
-            if hasattr(built, "ravel"):
-                self.axes = list(built.ravel())
-            elif isinstance(built, (list, tuple)):
-                self.axes = list(built)
+            if self._compare_grid and len(self._compare_channels) == 4:
+                built = self.fig.subplots(2, 2, sharex=True, sharey=False)
+                # Channels are Drag X/Y, Drive X/Y: preserve column order.
+                self.axes = [built[0, 0], built[1, 0], built[0, 1], built[1, 1]]
+                self.fig.subplots_adjust(left=.13, right=.97, top=.91, bottom=.12,
+                                         hspace=.32, wspace=.46)
             else:
-                self.axes = [built]
-            self.fig.subplots_adjust(left=0.12, right=0.97, top=0.97, bottom=0.09, hspace=0.12)
+                built = self.fig.subplots(len(self._compare_channels), 1, sharex=True)
+                self.axes = list(built.ravel()) if hasattr(built, 'ravel') else [built]
+                self.fig.subplots_adjust(left=.12, right=.97, top=.97, bottom=.09, hspace=.12)
         else:
             self.axes = [self.fig.add_subplot(111)]
             self.fig.subplots_adjust(left=0.12, right=0.97, top=0.95, bottom=0.12)
         self.ax = self.axes[0]
         for axis in self.axes:
             axis.grid(True)
+        self.format_compare_axes()
         self.canvas.draw_idle()
 
     def clear(self):

@@ -62,6 +62,7 @@ class SRSLockinDriverTests(unittest.TestCase):
             "SLVL?": "0.01",
             "SENS?": "18",
             "RMOD?": "2",
+            "RSRV?": "0",
             "OFLT?": "10",
             "OFSL?": "1",
             "ISRC?": "2",

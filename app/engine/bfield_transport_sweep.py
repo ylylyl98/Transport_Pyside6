@@ -439,6 +439,7 @@ class TransportCsvWriter:
 
     path: str
     condition: BFieldTransportCondition
+    extra_columns: tuple = ()
     handle: object = field(init=False, repr=False)
     writer: object = field(init=False, repr=False)
 
@@ -454,7 +455,7 @@ class TransportCsvWriter:
     def __post_init__(self):
         os.makedirs(os.path.dirname(os.path.abspath(self.path)), exist_ok=True)
         self.handle = open(self.path, "x", newline="", encoding="utf-8", buffering=1)
-        self.writer = csv.DictWriter(self.handle, fieldnames=self.COLUMNS, extrasaction="ignore")
+        self.writer = csv.DictWriter(self.handle, fieldnames=self.COLUMNS + self.extra_columns, extrasaction="ignore")
         self.writer.writeheader()
         self.handle.flush()
 

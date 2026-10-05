@@ -80,6 +80,8 @@ class BaseMeasurementTab(QtWidgets.QWidget):
         devices = list(dict.fromkeys(required_devices))
         if self.device_manager.is_connected("lockin"):
             devices.append("lockin")
+        if getattr(self.device_manager.connections, "drag_drive_enabled", False):
+            devices.append("lockin_drive")
         devices = list(dict.fromkeys(devices))
         claimed, blocked = self.device_manager.mark_in_use(devices)
         if claimed:
@@ -106,6 +108,9 @@ class BaseMeasurementTab(QtWidgets.QWidget):
             signal_chain = self.get_signal_chain()
             if capture_settings:
                 signal_chain = self.capture_run_signal_chain(signal_chain)
+                dual = getattr(signal_chain, "drag_drive", None) if not isinstance(signal_chain, dict) else signal_chain.get("drag_drive")
+                if dual and dual.get("enabled"):
+                    lockin_rate = 10. / dual["drag_sensitivity_v"]
         except Exception as ex:
             QtWidgets.QMessageBox.warning(self, "Signal Chain Verification", str(ex))
             return None

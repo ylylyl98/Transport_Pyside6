@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import json
 from typing import Any
 
 from PySide6 import QtCore, QtWidgets
@@ -9,6 +10,7 @@ from PySide6.QtCore import Qt
 from app.device_manager import DeviceManager
 from app.experiment_metadata import timestamp
 from app.settings import get_app_settings
+from app.lockin_diagnostics import save_control_log
 from app.ui.helpers import apply_tooltip, set_standard_input_height, style_form_layout
 from app.ui.widgets.collapsible_section import CollapsibleSection
 from app.ui.widgets.safe_combo import SafeComboBox
@@ -39,48 +41,58 @@ class LockinWorker(QtCore.QThread):
         self.action = action
         self.payload = dict(payload or {})
 
+    progress = QtCore.Signal(str)
+
     def run(self):
         try:
-            message = "Lock-in panel refreshed."
-            if self.action == "apply":
-                self.session.apply_settings(self.payload)
-                message = f"{self.session.model} settings applied."
-            elif self.action != "refresh":
-                action_fn = getattr(self.session, self.action)
-                action_fn()
-                message = self._action_message(self.action)
-            data = self.session.read_front_panel()
+            data = self.session.run_control(
+                self.action, self.payload, progress=self.progress.emit,
+                cancelled=self.isInterruptionRequested,
+            )
+            control = data['control']
+            try:
+                control['log_path'] = save_control_log(data)
+            except OSError as ex:
+                control['log_error'] = str(ex)
+            if not control['ok']:
+                message = 'Lock-in operation failed: ' + control['error']
+            elif self.action == 'apply':
+                message = f'{self.session.model} changed settings verified by readback.'
+            elif self.action == 'refresh':
+                message = 'Lock-in panel refreshed from instrument.'
+            elif self.action in ('auto_scale', 'apply_display'):
+                message = 'SR850 display scale updated. Measurement sensitivity and analog outputs are unchanged.'
+            else:
+                message = self.action.replace('_', ' ').title() + ' completed; settings read back.'
+                if self.action == 'auto_phase':
+                    message += ' Allow the outputs to settle over several time constants.'
             self.data_ready.emit(data, message)
         except Exception as ex:
             self.failed.emit(str(ex))
 
-    @staticmethod
-    def _action_message(action: str) -> str:
-        return {
-            "auto_phase": "Auto Phase command sent.",
-            "auto_gain": "Auto Gain command sent.",
-            "auto_reserve": "Auto Reserve command sent.",
-            "auto_offset_x": "Auto Offset X command sent.",
-            "auto_offset_y": "Auto Offset Y command sent.",
-            "auto_offset_r": "Auto Offset R command sent.",
-        }.get(action, "Lock-in command sent.")
-
 
 class LockinPanel(QtWidgets.QWidget):
     sensitivity_read = QtCore.Signal(float, str)
+    sensitivity_invalidated = QtCore.Signal(str)
     settings_changed = QtCore.Signal()
     stop_sweep_requested = QtCore.Signal()
 
     SETTINGS_PREFIX = "lockin"
 
-    def __init__(self, device_manager: DeviceManager):
+    def __init__(self, device_manager: DeviceManager, *, session_name="lockin"):
         super().__init__()
         self.device_manager = device_manager
+        self.session_name = session_name
+        self.SETTINGS_PREFIX = "lockin" if session_name == "lockin" else "lockin_drive"
         self._worker: LockinWorker | None = None
         self._claimed_device = False
         self._locked_by_sweep = False
         self._stop_requested_for_settings = False
         self._suppress_updates = False
+        self._dirty_fields = set()
+        self._verified_settings = {}
+        self._last_diagnostics = {}
+        self._display = {}
         self._capabilities = dict(LOCKIN_PROFILES["SR830"])
         self._build()
         self.load_panel_settings()
@@ -90,7 +102,7 @@ class LockinPanel(QtWidgets.QWidget):
         # Quiet gate readbacks finish without emitting operation_changed.
         self.device_manager.gate_currents_read.connect(lambda _data, _message: self._update_enabled())
         self.device_manager.resources_changed.connect(lambda _resources: self._update_enabled())
-        self._on_device_status_changed("lockin", self.device_manager.state("lockin"), self.device_manager.detail("lockin"))
+        self._on_device_status_changed(self.session_name, self.device_manager.state(self.session_name), self.device_manager.detail(self.session_name))
         self._update_enabled()
 
     def _build(self):
@@ -196,9 +208,20 @@ class LockinPanel(QtWidgets.QWidget):
         self.cbo_ref_source.currentIndexChanged.connect(self._update_frequency_enabled)
         self.cbo_ref_source.currentIndexChanged.connect(self._update_reference_help)
         self.cbo_input_config.currentIndexChanged.connect(self._update_current_gain_enabled)
-        settings_form.addRow("Sensitivity:", self.cbo_sensitivity)
+        settings_form.addRow("Sensitivity (requested):", self.cbo_sensitivity)
+        self.lbl_verified_sensitivity = QtWidgets.QLabel('Instrument sensitivity: not read')
+        self.lbl_verified_sensitivity.setWordWrap(True)
+        settings_form.addRow(self.lbl_verified_sensitivity)
+        self.lbl_pending = QtWidgets.QLabel('No pending edits')
+        self.lbl_pending.setWordWrap(True)
+        settings_form.addRow(self.lbl_pending)
+        self.cbo_reserve_level = self._make_combo(['Minimum', '+10 dB', '+20 dB', '+30 dB', '+40 dB', '+50 dB'])
+        self.cbo_reserve.currentIndexChanged.connect(self._update_reserve_level_enabled)
         settings_form.addRow("Time Constant:", self.cbo_time_constant)
         settings_form.addRow("Reserve:", self.cbo_reserve)
+        settings_form.addRow("Manual reserve level:", self.cbo_reserve_level)
+        self.lbl_reserve_level = settings_form.labelForField(self.cbo_reserve_level)
+        self.cbo_reserve_level.setToolTip('Relative to minimum reserve; the instrument may cap the level at its maximum.')
         settings_form.addRow("Filter Slope:", self.cbo_filter_slope)
         settings_form.addRow("Reference:", self.cbo_ref_source)
         self.lbl_reference_help = QtWidgets.QLabel()
@@ -215,9 +238,12 @@ class LockinPanel(QtWidgets.QWidget):
         settings_form.addRow("Coupling:", self.cbo_input_coupling)
         settings_form.addRow("Shield:", self.cbo_input_ground)
         settings_form.addRow("Line Filter:", self.cbo_line_filter)
-        self.btn_apply = QtWidgets.QPushButton("Apply Settings")
+        self.btn_apply = QtWidgets.QPushButton("Apply Changed Settings")
         self.btn_apply.clicked.connect(self.apply_settings)
         settings_form.addRow("", self.btn_apply)
+        self.btn_discard = QtWidgets.QPushButton('Discard Pending Edits')
+        self.btn_discard.clicked.connect(self._discard_pending)
+        settings_form.addRow('', self.btn_discard)
         self.exp_settings = CollapsibleSection("Front Panel Settings", settings, expanded=False)
         layout.addWidget(self.exp_settings)
 
@@ -232,6 +258,7 @@ class LockinPanel(QtWidgets.QWidget):
                 ("auto_phase", "Auto Phase"),
                 ("auto_gain", "Auto Gain"),
                 ("auto_reserve", "Auto Reserve"),
+                ("auto_scale", "Auto Scale (display)"),
                 ("auto_offset_x", "Auto Offset X"),
                 ("auto_offset_y", "Auto Offset Y"),
                 ("auto_offset_r", "Auto Offset R"),
@@ -244,6 +271,26 @@ class LockinPanel(QtWidgets.QWidget):
         self.exp_actions = CollapsibleSection("Auto Functions", actions, expanded=False)
         layout.addWidget(self.exp_actions)
 
+        self.display_group = QtWidgets.QGroupBox('SR850 Active Display')
+        display_form = QtWidgets.QFormLayout(self.display_group)
+        self.lbl_display = QtWidgets.QLabel('Refresh to read the active Bar/Chart display.')
+        self.lbl_display.setWordWrap(True)
+        display_form.addRow(self.lbl_display)
+        self.txt_display_scale = QtWidgets.QLineEdit()
+        self.txt_display_center = QtWidgets.QLineEdit()
+        display_form.addRow('Range (trace units):', self.txt_display_scale)
+        display_form.addRow('Center (trace units):', self.txt_display_center)
+        self.btn_apply_display = QtWidgets.QPushButton('Apply Display Range / Center')
+        self.btn_apply_display.clicked.connect(self.apply_display)
+        display_form.addRow(self.btn_apply_display)
+        help_label = QtWidgets.QLabel('Display only. Does not set sensitivity or DAQ conversion.')
+        help_label.setWordWrap(True)
+        display_form.addRow(help_label)
+        layout.addWidget(self.display_group)
+
+        self.btn_diagnostics = QtWidgets.QPushButton('Last Operation Details')
+        self.btn_diagnostics.clicked.connect(self._show_diagnostics)
+        layout.addWidget(self.btn_diagnostics)
         self.lbl_message = QtWidgets.QLabel("Connect an SR830 or SR850 from Devices, then refresh this panel.")
         self.lbl_message.setWordWrap(True)
         self.lbl_message.setProperty("role", "hint")
@@ -268,52 +315,99 @@ class LockinPanel(QtWidgets.QWidget):
     def refresh_panel(self):
         self._start_worker("refresh", message="Refreshing lock-in panel...")
 
+    def prepare_shutdown(self):
+        if self._worker is not None:
+            self._set_message('A lock-in operation is still running. Wait for completion, then close again.', warning=True)
+            return False
+        return True
+
     def apply_settings(self):
-        self._start_worker("apply", self._collect_settings(), "Applying lock-in settings...")
+        values = self._collect_settings()
+        changes = {key: values[key] for key in self._dirty_fields if key in values}
+        if not changes:
+            self._set_message('No pending edits. Refresh to read the instrument.', warning=False)
+            return
+        self._start_worker("apply", changes, "Applying changed lock-in settings and verifying readback...")
+
+    def apply_display(self):
+        try:
+            values = {'pane': self._display.get('pane'),
+                      'scale': float(self.txt_display_scale.text()),
+                      'center': float(self.txt_display_center.text())}
+        except ValueError:
+            self._set_message('Enter numeric display range and center (scientific notation is accepted).', warning=True)
+            return
+        self._start_worker('apply_display', values, 'Updating SR850 display...')
+
+    def _discard_pending(self):
+        self._dirty_fields.clear()
+        self._apply_data({'settings': dict(self._verified_settings)}, emit_sensitivity=False)
+
+    def _show_diagnostics(self):
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle('Lock-in operation details')
+        dialog.resize(720, 520)
+        layout = QtWidgets.QVBoxLayout(dialog)
+        text = QtWidgets.QPlainTextEdit()
+        text.setReadOnly(True)
+        text.setPlainText(json.dumps(self._last_diagnostics, indent=2, ensure_ascii=False))
+        layout.addWidget(text)
+        dialog.exec()
 
     def run_action(self, action: str):
         self._start_worker(action, message="Sending lock-in command...")
 
     def _start_worker(self, action: str, payload: dict | None = None, message: str = ""):
-        if self._worker is not None and self._worker.isRunning():
+        if self._worker is not None:
             return
-        if not self.device_manager.is_connected("lockin"):
+        if not self.device_manager.is_connected(self.session_name):
             self._set_message("Connect an SR830 or SR850 before using the lock-in panel.", warning=True)
             return
         if self._is_locked_by_sweep():
             self._show_sweep_lock_message()
             return
-        ok, blocked = self.device_manager.mark_in_use(["lockin"])
+        self._claimed_device = True
+        ok, blocked = self.device_manager.mark_in_use([self.session_name])
         if not ok:
+            self._claimed_device = False
             self._set_message("Lock-in panel is waiting for: " + ", ".join(blocked), warning=True)
             return
-        session = self.device_manager.get_session("lockin")
-        self._claimed_device = True
+        session = self.device_manager.get_session(self.session_name)
         self._worker = LockinWorker(session, action, payload, self)
         self._worker.data_ready.connect(self._on_worker_data)
         self._worker.failed.connect(self._on_worker_failed)
+        self._worker.progress.connect(lambda message: self._set_message(message, warning=False))
         self._worker.finished.connect(self._on_worker_finished)
+        self.sensitivity_invalidated.emit('Reading; unverified until readback completes')
         self._set_message(message or "Working...", warning=False)
         self._update_enabled()
         self._worker.start()
 
     def _on_worker_data(self, data: dict, message: str):
+        control = data.get('control', {})
+        self._last_diagnostics = data
         self._apply_data(data)
-        self._set_message(message, warning=False)
+        session = self.device_manager.get_session(self.session_name)
+        if not data.get('settings') or getattr(session, '_control_state_uncertain', False):
+            self.sensitivity_invalidated.emit('Read failed; unverified - refresh this lock-in panel')
+        if control.get('log_error'):
+            message += ' Could not save diagnostic log: ' + control['log_error']
+        self._set_message(message, warning=not control.get('ok', True))
 
     def _on_worker_failed(self, message: str):
+        self.sensitivity_invalidated.emit('Read failed; unverified - refresh this lock-in panel')
         self._set_message(f"Lock-in operation failed: {message}", warning=True)
 
     def _on_worker_finished(self):
-        if self._claimed_device:
-            self.device_manager.release(["lockin"])
-            self._claimed_device = False
         if self._worker is not None:
             self._worker.deleteLater()
             self._worker = None
+        if self._claimed_device:
+            self.device_manager.release([self.session_name])
+            self._claimed_device = False
         self._update_enabled()
 
-    def _apply_data(self, data: dict):
+    def _apply_data(self, data: dict, *, emit_sensitivity=True):
         outputs = data.get("outputs", {})
         settings = data.get("settings", {})
         capabilities = data.get("capabilities")
@@ -334,29 +428,35 @@ class LockinPanel(QtWidgets.QWidget):
         for key, lamp in self.lamp_labels.items():
             self._set_lamp(lamp, bool(status.get(key)))
 
+        self._verified_settings.update(settings)
+        for key in data.get('control', {}).get('verified_keys', []):
+            if key in settings:
+                self._dirty_fields.discard(key)
         self._suppress_updates = True
         try:
-            self._set_combo(self.cbo_sensitivity, settings.get("sensitivity"))
-            self._set_combo(self.cbo_time_constant, settings.get("time_constant"))
-            self._set_combo(self.cbo_reserve, settings.get("reserve"))
-            self._set_combo(self.cbo_filter_slope, settings.get("filter_slope"))
-            self._set_combo(self.cbo_ref_source, settings.get("ref_source"))
-            self._set_combo(self.cbo_input_config, settings.get("input_config"))
-            self._set_combo(self.cbo_current_gain, settings.get("current_gain"))
-            self._set_combo(self.cbo_input_coupling, settings.get("input_coupling"))
-            self._set_combo(self.cbo_input_ground, settings.get("input_ground"))
-            self._set_combo(self.cbo_line_filter, settings.get("line_filter"))
-            self._set_spinbox(self.sp_phase, settings.get("phase_deg"))
-            self._set_spinbox(self.sp_frequency, settings.get("frequency_hz"))
-            self._set_spinbox(self.sp_sine_out, settings.get("sine_out_v"))
-            self._set_spinbox(self.sp_harmonic, settings.get("harmonic"))
+            for key, widget in self._field_widgets().items():
+                if key in settings and key not in self._dirty_fields:
+                    if isinstance(widget, QtWidgets.QComboBox):
+                        self._set_combo(widget, settings[key])
+                    else:
+                        self._set_spinbox(widget, settings[key])
         finally:
             self._suppress_updates = False
+        if 'display' in data:
+            self._display = data['display']
+            pane = {0: 'Full', 1: 'Top', 2: 'Bottom'}.get(self._display.get('pane'), '--')
+            kind = {0: 'Polar', 1: 'Blank', 2: 'Bar', 3: 'Chart'}.get(self._display.get('type'), '--')
+            self.lbl_display.setText(f'Active: {pane} / {kind}. Range and center are in trace units.')
+            self.txt_display_scale.setText(str(self._display.get('scale', '')))
+            self.txt_display_center.setText(str(self._display.get('center', '')))
+        self._update_pending_label()
         self._update_frequency_enabled()
         self._update_reference_help()
         self._update_current_gain_enabled()
         self.save_panel_settings()
-        self._emit_voltage_sensitivity(settings)
+        if emit_sensitivity:
+            self._emit_voltage_sensitivity(settings)
+        self._update_enabled()
 
     def _collect_settings(self) -> dict[str, Any]:
         ref_source = self.cbo_ref_source.currentData()
@@ -376,6 +476,8 @@ class LockinPanel(QtWidgets.QWidget):
         }
         if self._capabilities.get("current_gain_labels") and settings["input_config"] == 2:
             settings["current_gain"] = self.cbo_current_gain.currentData()
+        if self._capabilities.get('model') == 'SR850' and settings['reserve'] == 1:
+            settings['reserve_level'] = self.cbo_reserve_level.currentData()
         if ref_source == self._capabilities.get("internal_reference_code"):
             settings["frequency_hz"] = self.sp_frequency.value()
         return settings
@@ -395,7 +497,7 @@ class LockinPanel(QtWidgets.QWidget):
                 values[key + "_label"] = combo.currentText()
         return {"source": "saved/manual", "captured_at": timestamp(),
                 "model": self._capabilities.get("model"),
-                "address": self.device_manager.connections.lockin,
+                "address": getattr(self.device_manager.connections, "lockin" if self.session_name == "lockin" else "drive_lockin"),
                 "scope": "displayed front-panel settings; not instrument-verified",
                 "values": values}
 
@@ -411,6 +513,10 @@ class LockinPanel(QtWidgets.QWidget):
                 )
             except (TypeError, ValueError):
                 return
+        self._verified_settings['sensitivity'] = index
+        self._update_pending_label()
+        if 'sensitivity' in self._dirty_fields:
+            return
         previous = self._suppress_updates
         self._suppress_updates = True
         try:
@@ -456,37 +562,62 @@ class LockinPanel(QtWidgets.QWidget):
         settings.sync()
         self.settings_changed.emit()
 
+    def _field_widgets(self):
+        return {
+            'sensitivity': self.cbo_sensitivity, 'time_constant': self.cbo_time_constant,
+            'reserve': self.cbo_reserve, 'reserve_level': self.cbo_reserve_level,
+            'filter_slope': self.cbo_filter_slope, 'ref_source': self.cbo_ref_source,
+            'input_config': self.cbo_input_config, 'current_gain': self.cbo_current_gain,
+            'input_coupling': self.cbo_input_coupling, 'input_ground': self.cbo_input_ground,
+            'line_filter': self.cbo_line_filter, 'phase_deg': self.sp_phase,
+            'frequency_hz': self.sp_frequency, 'sine_out_v': self.sp_sine_out,
+            'harmonic': self.sp_harmonic,
+        }
+
     def _bind_panel_settings(self):
-        for combo in (
-            self.cbo_sensitivity,
-            self.cbo_time_constant,
-            self.cbo_reserve,
-            self.cbo_filter_slope,
-            self.cbo_ref_source,
-            self.cbo_input_config,
-            self.cbo_current_gain,
-            self.cbo_input_coupling,
-            self.cbo_input_ground,
-            self.cbo_line_filter,
-        ):
-            combo.currentIndexChanged.connect(self.save_panel_settings)
-        for spinbox in (self.sp_phase, self.sp_frequency, self.sp_sine_out, self.sp_harmonic):
-            spinbox.valueChanged.connect(self.save_panel_settings)
+        for key, widget in self._field_widgets().items():
+            signal = widget.currentIndexChanged if isinstance(widget, QtWidgets.QComboBox) else widget.valueChanged
+            signal.connect(lambda _value, field=key: self._on_field_edited(field))
+
+    def _on_field_edited(self, key):
+        if self._suppress_updates or self._is_locked_by_sweep():
+            return
+        widget = self._field_widgets()[key]
+        value = widget.currentData() if isinstance(widget, QtWidgets.QComboBox) else widget.value()
+        if value == self._verified_settings.get(key):
+            self._dirty_fields.discard(key)
+        else:
+            self._dirty_fields.add(key)
+        self._update_pending_label()
+        self.save_panel_settings()
+        self.btn_discard.setEnabled(bool(self._dirty_fields) and self.device_manager.is_connected(self.session_name))
+
+    def _update_pending_label(self):
+        index = self._verified_settings.get('sensitivity')
+        label = SENSITIVITY_LABELS[index] if isinstance(index, int) and 0 <= index < len(SENSITIVITY_LABELS) else 'not read'
+        self.lbl_verified_sensitivity.setText('Instrument sensitivity: ' + label)
+        self.lbl_pending.setText('Pending edits: ' + ', '.join(sorted(self._dirty_fields)) if self._dirty_fields else 'No pending edits')
 
     def _saved_value(self, settings, key: str, default, cast):
         model_key = self._settings_key(key)
         legacy_key = f"{self.SETTINGS_PREFIX}/{key}"
+        old_model_key = f"{self.SETTINGS_PREFIX}/{self._capabilities.get('model', 'SR830')}/{key}"
         model_specific = {"ref_source", "reserve", "input_config", "current_gain"}
         fallback = default if key in model_specific else settings.value(legacy_key, default)
-        value = settings.value(model_key, fallback)
+        value = settings.value(model_key, settings.value(old_model_key, fallback))
         try:
             return cast(value)
         except (TypeError, ValueError):
             return default
 
     def _on_device_status_changed(self, name: str, state: str, detail: str):
-        if name != "lockin":
+        if name != self.session_name:
             return
+        if state != 'ok':
+            self._verified_settings.clear()
+            self._dirty_fields.clear()
+            self._display = {}
+            self._update_pending_label()
         if state == "ok":
             self.lbl_status.setText("Connected")
             self.lbl_status.setProperty("role", "hint")
@@ -513,7 +644,7 @@ class LockinPanel(QtWidgets.QWidget):
 
     def _update_enabled(self):
         worker_running = self._worker is not None
-        connected = self.device_manager.is_connected("lockin")
+        connected = self.device_manager.is_connected(self.session_name)
         locked_by_sweep = self._is_locked_by_sweep()
         commands_available = (
             connected
@@ -525,10 +656,22 @@ class LockinPanel(QtWidgets.QWidget):
         self.btn_apply.setEnabled(commands_available)
         for button in self.action_buttons.values():
             button.setEnabled(commands_available)
+        self.btn_discard.setEnabled(commands_available and bool(self._dirty_fields))
+        self._update_reserve_level_enabled()
+        sr830_gain_blocked = (self._capabilities['model'] == 'SR830'
+                             and self._verified_settings.get('time_constant', 0) > 10)
+        self.action_buttons['auto_gain'].setEnabled(commands_available and not sr830_gain_blocked)
+        self.action_buttons['auto_gain'].setToolTip('SR830 requires time constant <= 1 s.' if sr830_gain_blocked else 'Auto Gain adjusts sensitivity; wait for completion and readback.')
+        display_available = commands_available and self._display.get('can_scale', False)
+        self.btn_apply_display.setEnabled(display_available)
+        self.txt_display_scale.setEnabled(display_available)
+        self.txt_display_center.setEnabled(display_available)
+        self.action_buttons['auto_scale'].setEnabled(display_available)
         for widget in self._setting_widgets():
             widget.setEnabled(connected)
         self._update_frequency_enabled()
         self._update_current_gain_enabled()
+        self._update_reserve_level_enabled()
         settings_read_only = worker_running or locked_by_sweep
         for widget in self._setting_widgets():
             self._set_setting_read_only(widget, settings_read_only)
@@ -545,7 +688,7 @@ class LockinPanel(QtWidgets.QWidget):
                 self._show_sweep_lock_message()
         elif was_locked and not worker_running:
             self._stop_requested_for_settings = False
-            self._set_message("Sweep finished - SR830 settings are available again.", warning=False)
+            self._set_message("Sweep finished - lock-in settings are available again.", warning=False)
 
     def _request_safe_sweep_stop(self) -> None:
         if not self._is_locked_by_sweep():
@@ -557,18 +700,20 @@ class LockinPanel(QtWidgets.QWidget):
 
     def _show_safe_stop_message(self) -> None:
         self._set_message(
-            "Safe stop requested - SR830 settings will unlock after outputs finish ramping.",
+            "Safe stop requested - lock-in settings will unlock after outputs finish ramping.",
             warning=True,
         )
 
     def _is_locked_by_sweep(self) -> bool:
-        return self.device_manager.is_in_use("lockin") and not self._claimed_device
+        return self.device_manager.is_in_use(self.session_name) and not self._claimed_device
 
     def _show_sweep_lock_message(self) -> None:
-        sensitivity = self.cbo_sensitivity.currentText() or "the verified value"
+        index = self._verified_settings.get('sensitivity')
+        sensitivity = (SENSITIVITY_LABELS[index] if isinstance(index, int) and 0 <= index < len(SENSITIVITY_LABELS)
+                       else self.cbo_sensitivity.currentText() or "the verified value")
         self._set_message(
             f"Locked by active sweep - sensitivity frozen at {sensitivity}. "
-            "Stop the sweep safely before changing SR830 settings.",
+            "Stop the sweep safely before changing lock-in settings.",
             warning=True,
         )
 
@@ -613,6 +758,11 @@ class LockinPanel(QtWidgets.QWidget):
         current_input = self.cbo_input_config.currentData() == 2
         self.cbo_current_gain.setEnabled(supported and current_input and self.cbo_input_config.isEnabled())
 
+    def _update_reserve_level_enabled(self):
+        self.cbo_reserve_level.setEnabled(self._capabilities.get('model') == 'SR850'
+                                         and self.cbo_reserve.currentData() == 1
+                                         and self.cbo_reserve.isEnabled())
+
     def _apply_capabilities(self, capabilities: dict[str, Any]):
         model = str(capabilities.get("model") or "").upper()
         if model not in LOCKIN_PROFILES:
@@ -637,6 +787,10 @@ class LockinPanel(QtWidgets.QWidget):
         self.cbo_current_gain.setVisible(supports_current_gain)
         if self.lbl_current_gain is not None:
             self.lbl_current_gain.setVisible(supports_current_gain)
+        self.cbo_reserve_level.setVisible(model == 'SR850')
+        self.lbl_reserve_level.setVisible(model == 'SR850')
+        self.action_buttons['auto_scale'].setVisible(model == 'SR850')
+        self.display_group.setVisible(model == 'SR850')
         self.header_group.setTitle(f"{model} Lock-in")
         self._update_frequency_enabled()
         self._update_reference_help()
@@ -644,7 +798,8 @@ class LockinPanel(QtWidgets.QWidget):
 
     def _settings_key(self, key: str) -> str:
         model = self._capabilities.get("model", "SR830")
-        return f"{self.SETTINGS_PREFIX}/{model}/{key}"
+        address = getattr(self.device_manager.connections, "lockin" if self.session_name == "lockin" else "drive_lockin")
+        return f"{self.SETTINGS_PREFIX}/{model}/{address}/{key}"
 
     def _clear_readouts(self):
         for label in self.readout_labels.values():
@@ -783,6 +938,9 @@ class LockinPanel(QtWidgets.QWidget):
         return sensitivity_value(index, use_current=use_current)
 
     def _emit_voltage_sensitivity(self, settings: dict):
+        if self._signal_unit(self._verified_settings) == 'A':
+            self.sensitivity_invalidated.emit('Voltage input required (A or A-B); sensitivity is not a voltage range')
+            return
         try:
             index = int(settings.get("sensitivity"))
         except (TypeError, ValueError):
@@ -798,6 +956,7 @@ class LockinPanel(QtWidgets.QWidget):
             self.cbo_sensitivity,
             self.cbo_time_constant,
             self.cbo_reserve,
+            self.cbo_reserve_level,
             self.cbo_filter_slope,
             self.cbo_ref_source,
             self.sp_phase,

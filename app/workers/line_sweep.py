@@ -156,8 +156,8 @@ class LineSweepWorker(RunWorker):
                 w = csv.writer(f)
                 batch = self.batch_metadata.get("gate_scan_bfield_batch", {})
                 batch_columns = ["requested_B_T", "verified_B_T"] if batch else []
-                w.writerow(["Index", "Vtg", "Vbg", "Vds", "Vds_measured", "raw_X", "raw_Y", "raw_DC", "Ids_X", "Ids_Y", "Ids_DC", KEITHLEY_CHANNEL, "Doping", "E-field", "Direction", *batch_columns])
-                w.writerow(["#", "V", "V", "V", "V", "A", "A", "A", "A", "A", "A", "A", "V", "V", "", *(('T', 'T') if batch else ())])
+                w.writerow(["Index", "Vtg", "Vbg", "Vds", "Vds_measured", "raw_X", "raw_Y", "raw_DC", "Ids_X", "Ids_Y", "Ids_DC", KEITHLEY_CHANNEL, "Doping", "E-field", "Direction", *batch_columns, *self.extra_columns()])
+                w.writerow(["#", "V", "V", "V", "V", "V", "V", "V", "A", "A", "A", "A", "V", "V", "", *(('T', 'T') if batch else ()), *self.extra_units()])
                 self.log.emit(f"Trajectory acquisition started: {grand_total} points")
                 self._run_trajectory_pass(f, w, forward_traj, "forward", 0, grand_total)
                 if backward_traj:
@@ -221,20 +221,9 @@ class LineSweepWorker(RunWorker):
             self._apply_point(point)
             time.sleep(max(0.0, self.p.delay))
 
-            raw_x = raw_y = raw_dc = 0.0
-            for _ in range(int(self.p.n_sample)):
-                self.check_abort_pause()
-                self.daq.acquire()
-                raw_x += self.daq.get_ai_value(0)
-                raw_y += self.daq.get_ai_value(1)
-                raw_dc += self.daq.get_ai_value(2)
-            raw_x /= self.p.n_sample
-            raw_y /= self.p.n_sample
-            raw_dc /= self.p.n_sample
-
-            ids_x = raw_x / (self.amp_rate * self.lkn_rate)
-            ids_y = raw_y / (self.amp_rate * self.lkn_rate)
-            ids_dc = raw_dc / self.amp_rate
+            sample = self.acquire_currents(self.p.n_sample)
+            raw_x, raw_y, raw_dc = (sample[key] for key in ("raw_X", "raw_Y", "raw_DC"))
+            ids_x, ids_y, ids_dc = (sample[key] for key in ("Ids_X", "Ids_Y", "Ids_DC"))
             ids_keithley = self._read_keithley_current()
             vds_measured = (
                 self.daq.get_ao_vs_gnd_value(self.p.ao_channel)
@@ -260,6 +249,7 @@ class LineSweepWorker(RunWorker):
                 point["efield"],
                 direction,
                 *((batch.get("requested_field_t"), batch.get("verified_field_t")) if batch else ()),
+                *self.extra_values(),
             ])
             try:
                 f.flush()
@@ -272,6 +262,7 @@ class LineSweepWorker(RunWorker):
             x_plot = self._plot_x(point, acquisition_index)
             self.point.emit(x_plot, y_val)
             self.point_data.emit({
+                **sample,
                 "x": x_plot,
                 "index": float(acquisition_index),
                 "vtg": point["vtg"],
@@ -398,6 +389,8 @@ class LineSweepWorker(RunWorker):
             return None
 
     def _plot_value(self, ids_dc, ids_x, ids_y, ids_keithley):
+        if self.plot_choice in getattr(self, "_current_sample", {}):
+            return self._current_sample[self.plot_choice]
         if self.plot_choice == "Ids_X":
             return ids_x
         if self.plot_choice == "Ids_Y":

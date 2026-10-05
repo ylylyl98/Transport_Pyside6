@@ -4,7 +4,7 @@ from app.settings import get_app_settings
 
 
 class InstrumentWorkspace(QtWidgets.QWidget):
-    def __init__(self, connections, magnet, lockin, manager, parent=None):
+    def __init__(self, connections, magnet, lockin, manager, parent=None, *, drive_lockin=None):
         super().__init__(parent)
         self.connections = connections
         self.manager = manager
@@ -21,7 +21,11 @@ class InstrumentWorkspace(QtWidgets.QWidget):
         self.pages = QtWidgets.QTabWidget()
         self.pages.addTab(self.scroll(connections), "Gate / DAQ")
         self.pages.addTab(self.scroll(magnet), "Magnet")
-        self.pages.addTab(self.scroll(lockin), "Lock-in")
+        self.lockin_pages = QtWidgets.QTabWidget()
+        self.lockin_pages.addTab(self.scroll(lockin), "Drag / Primary")
+        if drive_lockin is not None:
+            self.lockin_pages.addTab(self.scroll(drive_lockin), "Drive")
+        self.pages.addTab(self.lockin_pages, "Lock-in")
         layout.addWidget(self.pages, 1)
         self.devices_dialog = self.make_dialog("Device management", [
             ("Connections", connections.exp_connections),
@@ -87,7 +91,9 @@ class InstrumentWorkspace(QtWidgets.QWidget):
     def refresh_summary(self, *_args):
         connected = [name.upper() for name in self.manager.sessions if self.manager.is_connected(name)]
         busy = sorted(self.manager.current_in_use())
-        text = "Gate / DAQ / Lock-in connected: " + (", ".join(connected) if connected else "none")
+        mode = "Drag / Drive" if self.manager.connections.drag_drive_enabled else "Ordinary X/Y/DC"
+        text = "Measurement mode: " + mode
+        text += "\nGate / DAQ / Lock-in connected: " + (", ".join(connected) if connected else "none")
         if busy:
             text += "\nIn use: " + ", ".join(name.upper() for name in busy)
         self.summary.setText(text)

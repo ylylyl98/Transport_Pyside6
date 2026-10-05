@@ -29,6 +29,10 @@ from app.ui.tabs.bfield_gate_scan_tab import BFieldGateScanTab
 from app.ui.tabs.bfield_transport_tab import BFieldTransportTab
 from app.ui.tabs.photocurrent_tab import PhotocurrentTab
 from app.ui.sample_temperature_bar import SampleTemperatureBar
+from app.curve_history import device_history_folder
+from app.ui.history_viewer_launcher import HistoryViewerLauncher
+from app.ui.png_export_process import PngExportProcess
+from app.ui.measurement_png_coordinator import MeasurementPngCoordinator
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -71,11 +75,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.refresh_models_from_ui()
 
         self.lockin_panel = LockinPanel(self.device_manager)
-        self.lockin_panel.sensitivity_read.connect(self.conn_dock.set_lockin_sensitivity_from_sr830)
-        self.conn_dock.lockin_sensitivity_verified.connect(self.lockin_panel.set_verified_sensitivity)
+        self.drive_lockin_panel = LockinPanel(self.device_manager, session_name="lockin_drive")
+        self.drive_lockin_panel.stop_sweep_requested.connect(self._stop_active_sweep_for_lockin_settings)
+        self.conn_dock.bind_lockin_panels(self.lockin_panel, self.drive_lockin_panel)
         self.lockin_panel.stop_sweep_requested.connect(self._stop_active_sweep_for_lockin_settings)
         self.instrument_workspace = InstrumentWorkspace(
-            self.conn_dock, self.magnet_panel, self.lockin_panel, self.device_manager, self
+            self.conn_dock, self.magnet_panel, self.lockin_panel, self.device_manager, self, drive_lockin=self.drive_lockin_panel
         )
         self.instrument_dock = QtWidgets.QDockWidget("Instruments", self)
         self.instrument_dock.setObjectName("instrumentWorkspace")
@@ -181,16 +186,31 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tabs.addTab(self.tab_bfield_transport, "B-field Sweep")
         self.tabs.addTab(self.tab_cosweep, "2D Map")
         self.tabs.addTab(self.tab_photocurrent, "Photocurrent")
+        self.tab_curve_compare = HistoryViewerLauncher(
+            lambda: device_history_folder(self.conn_dock.to_models()[1]), self
+        )
+        self._png_close_pending = False
+        self.tab_curve_compare.shutdown_ready.connect(self.close)
+        self.tabs.addTab(self.tab_curve_compare, "Curve Compare")
+        self.tabs.currentChanged.connect(self._on_workspace_page_changed)
         self._bind_save_preview_updates()
         self.conn_dock.signal_chain_changed.connect(self._on_signal_chain_changed)
         self.lockin_panel.settings_changed.connect(self._on_signal_chain_changed)
         self._bind_plot_mode_settings()
         self._load_plot_mode_settings()
+        self.png_exporter = PngExportProcess(self)
+        self.png_exporter.completed.connect(self._png_export_completed)
+        self.tab_curve_compare.bind_exporter(self.png_exporter)
+        self.png_coordinator = MeasurementPngCoordinator(
+            self._measurement_tabs(), self.png_exporter, self.tab_curve_compare.auto_png_check.isChecked, self
+        )
         for tab in self._measurement_tabs():
             tab.refine_parameter_presentation()
             tab.workflow = MeasurementWorkflow(tab)
             tab.run_panel.running_changed.connect(self._update_active_measurement)
             tab.run_panel.status_changed.connect(self._update_active_measurement)
+            tab.run_panel.running_changed.connect(self._refresh_history_after_run)
+            tab.run_panel.status_changed.connect(self._refresh_history_after_run)
         self.gate_scan_field_batch.state_changed.connect(self._update_active_measurement)
         self.gate_scan_field_batch.finished.connect(self._update_active_measurement)
         self.gate_scan_field_batch.stopped.connect(self._update_active_measurement)
@@ -199,9 +219,28 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_active_measurement()
 
     def _active_measurement_tabs(self):
-        return [self.tabs.widget(i) for i in range(self.tabs.count())
-                if self.tabs.widget(i).run_panel.operation_active()
-                or (self.tabs.widget(i) is self.tab_bfield_gate_scan and self.gate_scan_field_batch.active)]
+        return [tab for tab in self._measurement_tabs()
+                if tab.run_panel.operation_active()
+                or (tab is self.tab_bfield_gate_scan and self.gate_scan_field_batch.active)]
+
+    def _on_workspace_page_changed(self, _index):
+        if self.tabs.currentWidget() is self.tab_curve_compare:
+            self.tab_curve_compare.open_viewer()
+
+    def _refresh_history_after_run(self, *_):
+        if not any(tab.run_panel.operation_active() for tab in self._measurement_tabs()):
+            self.tab_curve_compare.refresh()
+
+    def _png_export_completed(self, result):
+        if result.get("error"):
+            message = "PNG export failed: " + result["error"]
+        elif result.get("warnings"):
+            message = f"Saved {len(result.get('outputs', []))} PNGs. " + " · ".join(result["warnings"])
+        elif result.get("outputs"):
+            message = f"Saved {len(result['outputs'])} PNGs in plots."
+        else:
+            message = ""
+        self.tab_curve_compare.png_status_label.setText(message)
 
     def _update_active_measurement(self, *_args):
         active = self._active_measurement_tabs()
@@ -247,6 +286,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.connections.daq_dev = c.daq_dev
         self.connections.mono = c.mono
         self.connections.lockin = c.lockin
+        self.connections.drive_lockin = c.drive_lockin
+        self.connections.drag_drive_enabled = c.drag_drive_enabled
         self.device_manager.sync_addresses()
         if getattr(self, "tab_cosweep", None) is not None:
             self.tab_cosweep._update_sweep_summary()
@@ -271,6 +312,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _on_save_settings_edited(self):
         self.refresh_models_from_ui()
+        if getattr(self, "tab_curve_compare", None) is not None:
+            self.tab_curve_compare.folder_changed()
         for tab in self._measurement_tabs():
             if hasattr(tab, "refresh_output_preview"):
                 tab.refresh_output_preview()
@@ -282,6 +325,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.conn_dock.update_ac_voltage_estimate(self.lockin_panel.sp_sine_out.value())
         lockin_connected = self.device_manager.is_connected("lockin")
         return SignalChainSnapshot(
+            drag_drive=values.get("drag_drive"),
             ac_contact=str(values.get("ac_contact", "")),
             ac_voltage_ratio=values.get("ac_voltage_ratio"),
             lockin_settings=self.lockin_panel.settings_snapshot(),
@@ -321,6 +365,18 @@ class MainWindow(QtWidgets.QMainWindow):
         return context
 
     def _on_signal_chain_changed(self):
+        mode_changed = False
+        controls = getattr(getattr(self, 'conn_dock', None), 'drag_drive_settings', None)
+        if controls is not None:
+            enabled = controls.configuration()['enabled']
+            mode_changed = self.connections.drag_drive_enabled != enabled
+            if mode_changed:
+                self._save_plot_mode_settings()
+            self.connections.drag_drive_enabled = enabled
+            self.conn_dock._update_reconnect_indicators()
+        workspace = getattr(self, 'instrument_workspace', None)
+        if workspace is not None:
+            workspace.refresh_summary()
         for tab in tuple(
             tab for tab in (
                 getattr(self, "tab_dual", None), getattr(self, "tab_gate_scan", None),
@@ -329,7 +385,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 getattr(self, "tab_photocurrent", None),
             ) if tab is not None
         ):
+            if mode_changed and hasattr(tab, "_update_plot_axis_choices"):
+                tab._update_plot_axis_choices()
             tab.refresh_output_preview()
+        if mode_changed:
+            self._load_plot_mode_settings()
 
     def _stop_active_sweep_for_lockin_settings(self):
         for tab in tuple(
@@ -345,6 +405,20 @@ class MainWindow(QtWidgets.QMainWindow):
                 return
 
     def closeEvent(self, event):
+        prepare_lockin = getattr(getattr(self, "lockin_panel", None), "prepare_shutdown", None)
+        if callable(prepare_lockin) and not prepare_lockin():
+            event.ignore()
+            return
+        prepare_drive = getattr(getattr(self, "drive_lockin_panel", None), "prepare_shutdown", None)
+        if callable(prepare_drive) and not prepare_drive():
+            event.ignore()
+            return
+        if self._png_close_pending:
+            if self.tab_curve_compare.prepare_shutdown():
+                event.accept()
+            else:
+                event.ignore()
+            return
         self._save_plot_mode_settings()
         for tab in self._measurement_tabs():
             if hasattr(tab, "save_tab_settings"):
@@ -390,7 +464,13 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             event.ignore()
             return
-        event.accept()
+        self.png_coordinator.shutdown()
+        self.png_exporter.shutdown()
+        self._png_close_pending = True
+        if self.tab_curve_compare.prepare_shutdown():
+            event.accept()
+        else:
+            event.ignore()
 
     def _plot_mode_tabs(self):
         return {
@@ -423,10 +503,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _load_plot_mode_settings(self):
         settings = get_app_settings()
+        self._plot_measurement_mode = 'drag_drive' if self.connections.drag_drive_enabled else 'ordinary'
         for key, tab in self._plot_mode_tabs().items():
-            saved_mode = str(settings.value(f"plot_mode/{key}", "Single Plot"))
+            # Only ordinary mode inherits the pre-dual-mode preference.
+            default = ('4-Channel Compare' if self._plot_measurement_mode == 'drag_drive'
+                       else str(settings.value(f'plot_mode/{key}', 'Single Plot')))
+            saved_mode = str(settings.value(f'plot_mode/{key}/{self._plot_measurement_mode}', default))
             if saved_mode not in ("Single Plot", "4-Channel Compare"):
-                saved_mode = "Single Plot"
+                saved_mode = '4-Channel Compare' if self._plot_measurement_mode == 'drag_drive' else 'Single Plot'
             tab.plot.set_selected_plot_mode(saved_mode)
             if hasattr(tab, "_redraw_plot"):
                 tab._redraw_plot()
@@ -441,7 +525,8 @@ class MainWindow(QtWidgets.QMainWindow):
         settings = settings or get_app_settings()
         for key, candidate in self._plot_mode_tabs().items():
             if candidate is tab:
-                settings.setValue(f"plot_mode/{key}", tab.plot.current_plot_mode())
+                mode = getattr(self, '_plot_measurement_mode', 'ordinary')
+                settings.setValue(f'plot_mode/{key}/{mode}', tab.plot.current_plot_mode())
                 settings.sync()
                 break
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 
 from PySide6.QtCore import QObject, Signal
+from app.drag_drive import DUAL_COLUMNS, DUAL_UNITS, dual_enabled, acquire_current_sample
 
 
 class RunStopped(RuntimeError):
@@ -27,6 +28,21 @@ class RunWorker(QObject):
 
     def request_stop(self):
         self._stop = True
+
+    def acquire_currents(self, averages):
+        self._current_sample = acquire_current_sample(
+            self.daq, averages, self.amp_rate, self.lkn_rate,
+            self.signal_chain, self.check_abort_pause)
+        return self._current_sample
+
+    def extra_columns(self):
+        return DUAL_COLUMNS if dual_enabled(self.signal_chain) else ()
+
+    def extra_units(self):
+        return DUAL_UNITS if dual_enabled(self.signal_chain) else ()
+
+    def extra_values(self):
+        return [self._current_sample[key] for key in self.extra_columns()]
 
     def request_pause(self, paused: bool):
         self._pause = paused

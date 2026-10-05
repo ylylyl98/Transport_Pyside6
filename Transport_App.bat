@@ -55,6 +55,12 @@ if errorlevel 1 (
     exit /b 1
 )
 
+:: Keep the local shortcut's icon and taskbar identity in sync with this checkout.
+powershell.exe -NoProfile -File "%~dp0Update-TransportShortcut.ps1"
+if errorlevel 1 (
+    echo [WARN] Could not update the Transport shortcut. Application startup will continue.
+)
+
 :: Launch as a windowed Windows app. The app itself sets its Windows AppUserModelID.
 if exist "%PYTHONW_EXE%" (
     start "Transport Measurement" "%PYTHONW_EXE%" "%~dp0transport_UI.py"

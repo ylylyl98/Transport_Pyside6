@@ -30,6 +30,8 @@ from app.engine.bfield_transport_sweep import (
     APS100_FIELD_RESOLUTION_T,
 )
 from app.run_output import build_planned_output
+from app.drag_drive import DUAL_COLUMNS, dual_enabled, acquire_current_sample
+from app.signal_chain import signal_chain_metadata
 from app.utils import safe_ramp
 from utils.config import cfg
 from app.engine.transport_tasks import TaskLane
@@ -384,6 +386,9 @@ class BFieldTransportController(QtCore.QObject):
                         value = self._signal_chain.get(key)
                     if value is not None and (not math.isfinite(float(value)) or float(value) <= 0):
                         raise BFieldTransportSafetyError("Signal-chain calibration is invalid; verify calibration before transport")
+                self._signal_chain = signal_chain_metadata(self._signal_chain)
+                if dual_enabled(self._signal_chain):
+                    self._calibration = (self._calibration[0], 10. / self._signal_chain['drag_drive']['drag_sensitivity_v'])
             calibration_meta = {"amp_rate": float(self._calibration[0]), "lockin_rate": float(self._calibration[1])}
             if self._signal_chain is not None:
                 calibration_meta["signal_chain"] = (
@@ -415,6 +420,8 @@ class BFieldTransportController(QtCore.QObject):
             self._validate_biases(required)
             if self.device_manager.get_session("lockin") is not None:
                 required.append("lockin")
+            if dual_enabled(self._signal_chain):
+                required.append("lockin_drive")
             claimed, blocked = self.device_manager.mark_in_use(required)
             if not claimed:
                 self.magnet.release_exclusive(self._owner)
@@ -443,7 +450,8 @@ class BFieldTransportController(QtCore.QObject):
             for index, (condition, csv_path) in enumerate(
                 zip(self.plan.conditions, self._transport_outputs.condition_csv_paths), start=1
             ):
-                self._writers[index] = TransportCsvWriter(csv_path, condition)
+                self._writers[index] = TransportCsvWriter(
+                    csv_path, condition, extra_columns=DUAL_COLUMNS if dual_enabled(self._signal_chain) else ())
             self._active = True
             self._enable_background_work()
             self._stop_requested = False
@@ -1267,16 +1275,18 @@ class BFieldTransportController(QtCore.QObject):
         row["Acquisition_started"] = time.time()
         daq = self.device_manager.get_session("daq")
         if daq is not None and hasattr(daq, "acquire"):
-            try:
-                raw = self._acquire_daq(daq, max(1, int(self.plan.params.averages)))
-            except Exception as exc:
-                raise RuntimeError(f"DAQ acquisition failed during transport sweep: {exc}") from exc
-            row.update({"raw_X": raw[0], "raw_Y": raw[1], "raw_DC": raw[2]})
-            try:
+            if dual_enabled(self._signal_chain):
+                row.update(acquire_current_sample(
+                    daq, max(1, int(self.plan.params.averages)), *self._calibration,
+                    self._signal_chain, self._check_io_cancel))
+            else:
+                try:
+                    raw = self._acquire_daq(daq, max(1, int(self.plan.params.averages)))
+                except Exception as exc:
+                    raise RuntimeError(f"DAQ acquisition failed during transport sweep: {exc}") from exc
+                row.update({"raw_X": raw[0], "raw_Y": raw[1], "raw_DC": raw[2]})
                 amp_rate, lockin_rate = self._calibration
                 row.update({"Ids_X": raw[0] / (float(amp_rate) * float(lockin_rate)), "Ids_Y": raw[1] / (float(amp_rate) * float(lockin_rate)), "Ids_DC": raw[2] / float(amp_rate)})
-            except Exception:
-                pass
             if condition.vds_source != "Keithley 2400" and hasattr(daq, "get_ao_vs_gnd_value"):
                 row["Vds_measured"] = daq.get_ao_vs_gnd_value(int(condition.ao_channel))
         if condition.vds_source == "Keithley 2400":
@@ -1355,16 +1365,7 @@ class BFieldTransportController(QtCore.QObject):
             self.tab.set_progress(fraction)
         if hasattr(self.tab, "plot"):
             try:
-                now = time.monotonic()
-                if now - self._last_plot >= 0.25:
-                    if self._plot_line is None:
-                        self._plot_line, = self.tab.plot.ax.plot([], [], linestyle="", marker=".", color="tab:blue")
-                    self._plot_line.set_data([r["B_measured_T"] for r in self._results],
-                                             [r.get("Ids_DC", float("nan")) for r in self._results])
-                    self.tab.plot.ax.relim()
-                    self.tab.plot.ax.autoscale_view()
-                    self.tab.plot.canvas.draw_idle()
-                    self._last_plot = now
+                self.refresh_plot()
             except Exception:
                 pass
         if hasattr(self.tab, "log"):
@@ -1380,6 +1381,30 @@ class BFieldTransportController(QtCore.QObject):
                     self._last_ui_routine_log = now
             except Exception:
                 pass
+
+    def refresh_plot(self, *, force=False):
+        now = time.monotonic()
+        if not force and now - self._last_plot < .25:
+            return
+        plot = self.tab.plot
+        channels = (plot.compare_channels() if plot.current_plot_mode() == '4-Channel Compare'
+                    else [getattr(self.tab, 'plot_choice', 'Ids_DC')])
+        for axis, channel in zip(plot.get_axes(), channels):
+            axis.clear()
+            line, = axis.plot([row['B_measured_T'] for row in self._results],
+                             [row.get(channel, float('nan')) for row in self._results],
+                             linestyle='', marker='.', color='tab:blue')
+            if axis is plot.ax:
+                self._plot_line = line
+            axis.set_ylabel(f'{channel} (A)')
+            axis.relim()
+            axis.autoscale_view()
+            axis.grid(True)
+        for axis in plot.bottom_axes():
+            axis.set_xlabel('B-field (T)')
+        plot.format_compare_axes()
+        plot.canvas.draw_idle()
+        self._last_plot = now
 
     def _next_condition(self):
         self._condition_index += 1

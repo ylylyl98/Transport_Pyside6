@@ -37,6 +37,7 @@ from app.gate_transform import derived_to_gates, gates_to_derived
 from app.gate_transform import RATIO_TARGET_VBG, RATIO_TARGET_VTG, ratio_formula_text, normalize_ratio_target
 from app.models import BFieldTransportCondition, BFieldTransportParams, Connections, SaveRoot
 from app.run_output import build_planned_output
+from app.result_channels import plot_channel_options, compare_channel_options
 from app.settings import get_app_settings
 from app.ui.helpers import set_standard_input_height, style_form_layout
 from app.ui.tabs.base_tab import BaseMeasurementTab
@@ -63,6 +64,10 @@ class BFieldTransportTab(BaseMeasurementTab):
         self._locked = False
         self._execution_controller = None
         super().__init__("START B-FIELD SWEEP", "B-field (T)", "Ids (A)", ["g1", "g2", "g3", "daq"])
+        self.plot_choice = 'Ids_DC'
+        self._update_plot_axis_choices()
+        self.plot.y_axis_changed.connect(self.set_plot_axis_source)
+        self.plot.plot_mode_changed.connect(lambda _mode: self._redraw_plot())
         self.device_manager.status_changed.connect(self._on_device_status_changed)
         self.device_manager.resources_changed.connect(self.refresh_hardware_readiness)
         self._sync_measurement_statuses()
@@ -70,6 +75,33 @@ class BFieldTransportTab(BaseMeasurementTab):
         self._refresh_conditions()
         self.btn_start.clicked.connect(self.start_run)
         self.btn_stop.clicked.connect(self.stop_run)
+
+    def _update_plot_axis_choices(self):
+        options = plot_channel_options('', getattr(self.device_manager.connections, 'drag_drive_enabled', False))
+        if self.plot_choice not in options:
+            self.plot_choice = 'Ids_DC'
+        self.plot.set_y_axis_options(options, self.plot_choice)
+        dual = getattr(self.device_manager.connections, 'drag_drive_enabled', False)
+        self.plot.set_compare_channels(compare_channel_options('', dual), grid=dual)
+        self.set_plot_axis_source(self.plot_choice)
+
+    def set_plot_axis_source(self, source):
+        self.plot_choice = source
+        self.plot.set_selected_y_axis(source)
+        self._redraw_plot()
+
+    def _redraw_plot(self):
+        if self._execution_controller is not None:
+            self._execution_controller.refresh_plot(force=True)
+        else:
+            channels = (self.plot.compare_channels() if self.plot.current_plot_mode() == '4-Channel Compare'
+                        else [self.plot_choice])
+            for axis, channel in zip(self.plot.get_axes(), channels):
+                axis.set_ylabel(f'{channel} (A)')
+            for axis in self.plot.bottom_axes():
+                axis.set_xlabel('B-field (T)')
+            self.plot.format_compare_axes()
+            self.plot.canvas.draw_idle()
 
     @staticmethod
     def _spin(value=0.0, minimum=-1000.0, maximum=1000.0, decimals=6):

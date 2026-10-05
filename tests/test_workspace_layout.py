@@ -86,6 +86,84 @@ class WorkspaceLayoutTests(unittest.TestCase):
         finally:
             w.tab_dual.run_panel.set_running(False)
 
+    def test_reloading_analysis_keeps_active_measurement_and_instrument_owners(self):
+        import time
+        w = self.window
+        launcher = w.tab_curve_compare
+        owners = (w.device_manager, w.magnet1000, w.magnet2100, w.bfield_transport_controller)
+        messages = []
+        launcher.message_received.connect(messages.append)
+        w.tab_dual.run_panel.set_running(True)
+        try:
+            launcher.open_viewer()
+            end = time.monotonic() + 15
+            while not any(m.get("event") == "ready" for m in messages) and time.monotonic() < end:
+                self.app.processEvents()
+                QtTest.QTest.qWait(20)
+            self.assertTrue(any(m.get("event") == "ready" for m in messages))
+            first_pid = launcher.process.processId()
+            launcher.reload_button.click()
+            end = time.monotonic() + 15
+            while not any(m.get("event") == "session_loaded" for m in messages) and time.monotonic() < end:
+                self.app.processEvents()
+                QtTest.QTest.qWait(20)
+            self.assertTrue(any(m.get("event") == "session_loaded" for m in messages))
+            self.assertNotEqual(launcher.process.processId(), first_pid)
+            self.assertTrue(w.tab_dual.run_panel.operation_active())
+            self.assertIn("Vds Sweep", w.active_run_button.text())
+            self.assertEqual(owners, (w.device_manager, w.magnet1000, w.magnet2100, w.bfield_transport_controller))
+        finally:
+            w.tab_dual.run_panel.set_running(False)
+            launcher.message_received.disconnect(messages.append)
+            launcher._send("close")
+            end = time.monotonic() + 5
+            while launcher.process.state() != QtCore.QProcess.ProcessState.NotRunning and time.monotonic() < end:
+                self.app.processEvents()
+                QtTest.QTest.qWait(20)
+
+    def test_history_entry_does_not_participate_in_measurement_control(self):
+        w = self.window
+        self.assertNotIn(w.tab_curve_compare, w._measurement_tabs())
+        self.assertFalse(hasattr(w.tab_curve_compare, "run_panel"))
+        try:
+            w.tab_dual.run_panel.set_running(True)
+            with patch.object(w.tab_curve_compare, "open_viewer"):
+                w.tabs.setCurrentWidget(w.tab_curve_compare)
+                self.assertIn("Vds Sweep", w.active_run_button.text())
+                w.active_run_button.click()
+                self.assertIs(w.tabs.currentWidget(), w.tab_dual)
+        finally:
+            w.tab_dual.run_panel.set_running(False)
+
+    def test_measurement_completion_automatically_creates_png_with_viewer_closed(self):
+        import json
+        import tempfile
+        import time
+        from pathlib import Path
+        from PySide6 import QtTest
+        w = self.window
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "run.csv"
+            path.write_text("Vds,Ids_DC\nV,A\n0,1e-9\n1,2e-9\n")
+            metadata = path.with_name("run_metadata.json")
+            metadata.write_text(json.dumps({"measurement": "vds_sweep", "status": "finished", "csv_path": str(path)}))
+            tab = w.tab_dual
+            previous = (tab.p.output_csv_path, tab.p.output_metadata_path)
+            tab.p.output_csv_path, tab.p.output_metadata_path = str(path), str(metadata)
+            try:
+                w.tab_curve_compare.auto_png_check.setChecked(True)
+                tab.run_panel.set_running(True)
+                tab.run_panel.set_running(False)
+                deadline = time.monotonic() + 15
+                while time.monotonic() < deadline and not (path.parent / "plots/run_Ids_DC.png").exists():
+                    self.app.processEvents()
+                    QtTest.QTest.qWait(30)
+                self.assertTrue((path.parent / "plots/run_Ids_DC.png").exists())
+                self.assertEqual(w.tab_curve_compare.process.state(), QtCore.QProcess.ProcessState.NotRunning)
+            finally:
+                tab.run_panel.set_running(False)
+                tab.p.output_csv_path, tab.p.output_metadata_path = previous
+
     def test_offline_render_fits_and_global_stop_is_not_in_overflow(self):
         from pathlib import Path
         w = self.window

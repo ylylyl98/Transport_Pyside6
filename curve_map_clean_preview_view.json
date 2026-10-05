@@ -1,0 +1,109 @@
+{
+  "schema": "transport_plot_view_v1",
+  "sources": [
+    {
+      "path": "C:\\Users\\commo\\AppData\\Local\\Temp\\tmpx6d1fyet\\YZ324_1.67K0T_REFImgon_ACDCMoTe2E2_DCMoTe2E1_AmpMoS2E1_20261003_120000.csv",
+      "created_at": "2026-10-03T12:00:00",
+      "status": "finished",
+      "fingerprint": [
+        1791052631348495200,
+        854271
+      ],
+      "metadata": {
+        "measurement": "map_2d",
+        "status": "finished",
+        "created_at": "2026-10-03T12:00:00",
+        "save_root": {
+          "device_id": "YZ324"
+        },
+        "params": {
+          "axis_fast": "Doping",
+          "axis_slow": "Vds",
+          "base_name": "ACDCMoTe2E2_DCMoTe2E1_AmpMoS2E1"
+        },
+        "experiment_context": {
+          "temperature": {
+            "available": true,
+            "values": {
+              "sample_temperature_k": 1.67
+            }
+          },
+          "magnet1000": {
+            "available": true,
+            "values": {
+              "field_t": 0
+            }
+          }
+        },
+        "signal_chain": {
+          "preamp_gain_v_per_a": 10000000.0,
+          "frequency_hz": 17,
+          "lockin_settings": {
+            "values": {
+              "sine_out_v": 0.02,
+              "phase_deg": 30
+            }
+          }
+        },
+        "csv_conditions": {
+          "Vds": "−1.15 V → −900 mV",
+          "Doping": "−1.5 V → 1.5 V"
+        }
+      }
+    }
+  ],
+  "view": {
+    "x": "Doping",
+    "signal": "I_drag_X",
+    "direction": "All",
+    "legend": true,
+    "normalization": "raw",
+    "map_y": "Vds",
+    "fixed_axis": "Vds",
+    "fixed_value": -1.1024999999999998,
+    "pass": "All rows",
+    "primary_path": "C:\\Users\\commo\\AppData\\Local\\Temp\\tmpx6d1fyet\\YZ324_1.67K0T_REFImgon_ACDCMoTe2E2_DCMoTe2E1_AmpMoS2E1_20261003_120000.csv",
+    "auto_axes": true,
+    "cmap": "RdBu_r",
+    "xlim": [
+      -1.65,
+      1.65
+    ],
+    "ylim": [
+      3.648109208392019e-12,
+      4.161890791607981e-12
+    ],
+    "xscale": "linear",
+    "yscale": "linear",
+    "map_xlim": [
+      -1.5150000000000001,
+      1.5150000000000001
+    ],
+    "map_ylim": [
+      -1.1512499999999999,
+      -0.8987499999999999
+    ],
+    "clim": [
+      3.2664629167200173e-12,
+      4.233537083279983e-12
+    ],
+    "kind": "map_2d",
+    "cut_only": false
+  },
+  "image": {
+    "width": 1200,
+    "height": 900,
+    "dpi": 150
+  },
+  "images": [
+    {
+      "path": "D:\\Insturment control v3\\Transport_Pyside6\\curve_map_clean_preview_heatmap.png",
+      "kind": "heatmap"
+    },
+    {
+      "path": "D:\\Insturment control v3\\Transport_Pyside6\\curve_map_clean_preview_cut.png",
+      "kind": "cut"
+    }
+  ],
+  "warnings": []
+}

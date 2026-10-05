@@ -633,7 +633,7 @@ class PhotocurrentTab(BaseMeasurementTab):
         return self.cbo_source.currentText() if self.chk_use_vds.isChecked() else "None"
 
     def _update_plot_axis_choices(self):
-        options = plot_channel_options(self._plot_vds_source_for_choices())
+        options = plot_channel_options(self._plot_vds_source_for_choices(), getattr(self.device_manager.connections, "drag_drive_enabled", False))
         current = self.cbo_y.currentText()
         if current not in options:
             current = "Ids_DC"
@@ -643,7 +643,7 @@ class PhotocurrentTab(BaseMeasurementTab):
         self.cbo_y.setCurrentText(current)
         self.cbo_y.blockSignals(False)
         self.plot.set_y_axis_options(options, current)
-        self.plot.set_compare_channels(compare_channel_options(self._plot_vds_source_for_choices()))
+        self.plot.set_compare_channels(compare_channel_options(self._plot_vds_source_for_choices(), getattr(self.device_manager.connections, "drag_drive_enabled", False)), grid=getattr(self.device_manager.connections, "drag_drive_enabled", False))
         self.set_plot_axis_source(current)
 
     def _on_device_status_changed(self, name: str, _state: str, _detail: str):
@@ -875,7 +875,7 @@ class PhotocurrentTab(BaseMeasurementTab):
         self._redraw_plot()
 
     def set_plot_axis_source(self, source: str):
-        if source not in plot_channel_options(self._plot_vds_source_for_choices()):
+        if source not in plot_channel_options(self._plot_vds_source_for_choices(), getattr(self.device_manager.connections, "drag_drive_enabled", False)):
             source = "Ids_DC"
         if self.cbo_y.currentText() != source:
             self.cbo_y.blockSignals(True)
@@ -916,8 +916,9 @@ class PhotocurrentTab(BaseMeasurementTab):
                         axis.legend(fontsize="x-small")
                 axis.set_ylabel(f"{channel} (A)")
                 axis.grid(True)
-            if axes:
-                axes[-1].set_xlabel("Wavelength (nm)")
+            for axis in self.plot.bottom_axes():
+                axis.set_xlabel("Wavelength (nm)")
+            self.plot.format_compare_axes()
         else:
             source = self.cbo_y.currentText()
             ax = self.plot.ax

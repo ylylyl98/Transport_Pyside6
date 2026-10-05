@@ -487,7 +487,7 @@ class DeviceManager(QtCore.QObject):
     def __init__(self, connections: Connections):
         super().__init__()
         self.connections = connections
-        self.sessions: Dict[str, object | None] = {"g1": None, "g2": None, "g3": None, "daq": None, "mono": None, "lockin": None}
+        self.sessions: Dict[str, object | None] = {"g1": None, "g2": None, "g3": None, "daq": None, "mono": None, "lockin": None, "lockin_drive": None}
         self.states: Dict[str, str] = {name: "idle" for name in self.sessions}
         self.details: Dict[str, str] = {name: "" for name in self.sessions}
         self._connected_addresses: Dict[str, str] = {name: self._address_for(name) for name in self.sessions}
@@ -516,6 +516,7 @@ class DeviceManager(QtCore.QObject):
             "daq": self.connections.daq_dev,
             "mono": self.connections.mono,
             "lockin": self.connections.lockin,
+            "lockin_drive": self.connections.drive_lockin,
         }[name]
 
     def _mode_for(self, name: str) -> str:
@@ -526,6 +527,7 @@ class DeviceManager(QtCore.QObject):
             "daq": "",
             "mono": "",
             "lockin": "",
+            "lockin_drive": "",
         }[name]
 
     def _protection_for(self, name: str) -> tuple[float, float]:
@@ -558,6 +560,10 @@ class DeviceManager(QtCore.QObject):
         session = self.sessions.get(name)
         if session is None:
             return False
+        if name == "daq":
+            desired = list(range(5 if self.connections.drag_drive_enabled else 4))
+            if list(getattr(session, "ai_channel_indexes", [])) != desired:
+                return True
         return (
             self._address_for(name) != self._connected_addresses.get(name, "")
             or self._mode_for(name) != self._connected_modes.get(name, "")
@@ -657,6 +663,10 @@ class DeviceManager(QtCore.QObject):
         return self._daq_output_channels()
 
     def sync_addresses(self):
+        # UI settings can be edited before Connect All checks ownership. Keep
+        # those edits pending; never close or zero a session used by a run/worker.
+        if self._in_use or self.is_busy():
+            return
         changed = []
         for name in self.sessions:
             new_addr = self._address_for(name)
@@ -1015,6 +1025,7 @@ class DeviceManager(QtCore.QObject):
         self._connect_daq(emitter=emitter)
         self._connect_mono(emitter=emitter)
         self._connect_lockin(emitter=emitter)
+        self._connect_lockin(emitter=emitter, name="lockin_drive")
 
     def _disconnect_all_in_thread(self, emitter):
         zero_failures: list[str] = []
@@ -1033,7 +1044,7 @@ class DeviceManager(QtCore.QObject):
         # Do not change DAQ AO on a normal disconnect. The last held values
         # may belong to equipment outside this run; only explicit Ramp/Zero
         # controls or Emergency Stop are allowed to modify them.
-        for name in ("g1", "g2", "g3", "daq", "mono", "lockin"):
+        for name in ("g1", "g2", "g3", "daq", "mono", "lockin", "lockin_drive"):
             self._close_device(name)
             emitter.emit(name, "idle", "")
 
@@ -1148,7 +1159,9 @@ class DeviceManager(QtCore.QObject):
             self._close_device("daq")
             emitter.emit("daq", "idle", "")
             return
-        if self.sessions["daq"] is not None and self._connected_addresses.get("daq") == address:
+        ai_indexes = list(range(5 if self.connections.drag_drive_enabled else 4))
+        if (self.sessions["daq"] is not None and self._connected_addresses.get("daq") == address
+                and list(getattr(self.sessions["daq"], "ai_channel_indexes", [])) == ai_indexes):
             emitter.emit("daq", "ok", self._daq_detail(self.sessions["daq"]))
             return
         self._close_device("daq")
@@ -1156,7 +1169,7 @@ class DeviceManager(QtCore.QObject):
         try:
             ao_items = self.get_ao_items()
             ao_indexes = [int(i[2:]) for i in ao_items if i.startswith("ao")]
-            session = DaqCard(address=address, ao_channel_indexes=ao_indexes, ai_channel_indexes=[0, 1, 2, 3], read_delay=0.5)
+            session = DaqCard(address=address, ao_channel_indexes=ao_indexes, ai_channel_indexes=ai_indexes, read_delay=0.5)
             session.connect()
             self.sessions["daq"] = session
             self._connected_addresses["daq"] = address
@@ -1204,25 +1217,46 @@ class DeviceManager(QtCore.QObject):
             self.sessions["mono"] = None
             emitter.emit("mono", "err", str(ex))
 
-    def _connect_lockin(self, emitter):
-        address = self._address_for("lockin")
+    def _connect_lockin(self, emitter, name="lockin"):
+        address = self._address_for(name)
+        if name == "lockin_drive" and not self.connections.drag_drive_enabled:
+            self._close_device(name)
+            emitter.emit(name, "idle", "Disabled in ordinary measurement mode")
+            return
         if not address:
-            self._close_device("lockin")
-            emitter.emit("lockin", "idle", "")
+            self._close_device(name)
+            emitter.emit(name, "idle", "")
             return
-        if self.sessions["lockin"] is not None and self._connected_addresses.get("lockin") == address:
-            emitter.emit("lockin", "ok", getattr(self.sessions["lockin"], "identity", ""))
+        if self.connections.drag_drive_enabled:
+            try:
+                from pyvisa.rname import ResourceName
+                def resource_key(value):
+                    resource = ResourceName.from_string(value)
+                    # VISA keeps leading zeros in address strings: 08 and 8
+                    # still refer to the same physical GPIB instrument.
+                    if resource.interface_type == 'GPIB':
+                        return ('GPIB', int(resource.board), int(resource.primary_address),
+                                int(resource.secondary_address) if resource.secondary_address else None)
+                    return str(resource)
+                if resource_key(self.connections.drive_lockin) == resource_key(self.connections.lockin):
+                    raise ValueError("Drag and Drive must use different GPIB addresses.")
+            except Exception as ex:
+                self._close_device(name)
+                emitter.emit(name, "err", str(ex))
+                return
+        if self.sessions[name] is not None and self._connected_addresses.get(name) == address:
+            emitter.emit(name, "ok", getattr(self.sessions[name], "identity", ""))
             return
-        self._close_device("lockin")
+        self._close_device(name)
         try:
-            session = SRSLockin("lockin", address)
+            session = SRSLockin(name, address)
             session.connect()
-            self.sessions["lockin"] = session
-            self._connected_addresses["lockin"] = address
-            emitter.emit("lockin", "ok", getattr(session, "identity", ""))
+            self.sessions[name] = session
+            self._connected_addresses[name] = address
+            emitter.emit(name, "ok", getattr(session, "identity", ""))
         except Exception as ex:
-            self.sessions["lockin"] = None
-            emitter.emit("lockin", "err", str(ex))
+            self.sessions[name] = None
+            emitter.emit(name, "err", str(ex))
 
     def _close_device(self, name: str):
         session = self.sessions.get(name)
@@ -1329,6 +1363,6 @@ class DeviceManager(QtCore.QObject):
         if self._emergency_worker is not None and self._emergency_worker.isRunning():
             self._emergency_worker.wait()
         self._disconnect_all_in_thread(self.status_changed)
-        for name in ("g1", "g2", "g3", "daq", "mono", "lockin"):
+        for name in ("g1", "g2", "g3", "daq", "mono", "lockin", "lockin_drive"):
             self._close_device(name)
             self._emit_status(name, "idle", "")

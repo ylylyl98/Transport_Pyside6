@@ -158,8 +158,8 @@ class PhotocurrentWorker(RunWorker):
                 with open(condition_path, "x", newline="", buffering=1, encoding="utf-8") as f:
                     generated_paths.append(condition_path)
                     w = csv.writer(f)
-                    w.writerow(["Condition", "Wavelength", "Vtg", "Vbg", "Vds", "raw_X", "raw_Y", "raw_DC", "Ids_X", "Ids_Y", "Ids_DC", KEITHLEY_CHANNEL])
-                    w.writerow(["", "nm", "V", "V", "V", "A", "A", "A", "A", "A", "A", "A"])
+                    w.writerow(["Condition", "Wavelength", "Vtg", "Vbg", "Vds", "raw_X", "raw_Y", "raw_DC", "Ids_X", "Ids_Y", "Ids_DC", KEITHLEY_CHANNEL, *self.extra_columns()])
+                    w.writerow(["", "nm", "V", "V", "V", "V", "V", "V", "A", "A", "A", "A", *self.extra_units()])
                     self.log.emit(f"[csv] condition {condition_number} -> {condition_path}")
                     for wavelength_index, wl in enumerate(wavelengths, start=1):
                         self.check_abort_pause()
@@ -169,20 +169,9 @@ class PhotocurrentWorker(RunWorker):
                         self.mono.set_wavelength(float(wl))
                         self._wait_with_abort(max(0.0, self.p.delay))
 
-                        raw_x = raw_y = raw_dc = 0.0
-                        for _ in range(int(self.p.n_sample)):
-                            self.check_abort_pause()
-                            self.daq.acquire()
-                            raw_x += self.daq.get_ai_value(0)
-                            raw_y += self.daq.get_ai_value(1)
-                            raw_dc += self.daq.get_ai_value(2)
-                        raw_x /= self.p.n_sample
-                        raw_y /= self.p.n_sample
-                        raw_dc /= self.p.n_sample
-
-                        ids_x = raw_x / (self.amp_rate * self.lkn_rate)
-                        ids_y = raw_y / (self.amp_rate * self.lkn_rate)
-                        ids_dc = raw_dc / self.amp_rate
+                        sample = self.acquire_currents(self.p.n_sample)
+                        raw_x, raw_y, raw_dc = (sample[key] for key in ("raw_X", "raw_Y", "raw_DC"))
+                        ids_x, ids_y, ids_dc = (sample[key] for key in ("Ids_X", "Ids_Y", "Ids_DC"))
                         ids_keithley = self._read_keithley_current()
                         w.writerow([
                             condition_number,
@@ -197,6 +186,7 @@ class PhotocurrentWorker(RunWorker):
                             ids_y,
                             ids_dc,
                             ids_keithley,
+                            *self.extra_values(),
                         ])
                         try:
                             f.flush()
@@ -207,6 +197,7 @@ class PhotocurrentWorker(RunWorker):
                         y = self._plot_value(ids_dc, ids_x, ids_y, ids_keithley)
                         self.point.emit(float(wl), y)
                         self.point_data.emit({
+                            **sample,
                             "x": float(wl),
                             "condition": condition_number,
                             "Vtg": condition.vtg,
@@ -342,6 +333,8 @@ class PhotocurrentWorker(RunWorker):
             return None
 
     def _plot_value(self, ids_dc, ids_x, ids_y, ids_keithley):
+        if self.plot_choice in getattr(self, "_current_sample", {}):
+            return self._current_sample[self.plot_choice]
         if self.plot_choice == "Ids_X":
             return ids_x
         if self.plot_choice == "Ids_Y":
