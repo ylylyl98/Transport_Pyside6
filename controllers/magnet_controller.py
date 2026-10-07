@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import threading
+import time
 import traceback
 import uuid
 import math
 from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Optional
+from types import SimpleNamespace
 
 from PySide6.QtCore import QObject, QMetaObject, QThread, QTimer, Qt, Signal, Slot
 
@@ -16,6 +18,7 @@ from PySide6.QtCore import QObject, QMetaObject, QThread, QTimer, Qt, Signal, Sl
 from app.devices.aps100_attodry1000_adapter import (
     APS100AttoDry1000Adapter,
     APS100SafetyError,
+    APS100OperationCancelled,
     MockAPS100Adapter,
 )
 from utils.config import cfg
@@ -29,6 +32,8 @@ class _MagnetWorker(QObject):
     safe_move_audit = Signal(object)
     safe_move_result = Signal(object)
     transition_progress = Signal(str, float)
+    diagnostic_readback = Signal(object)
+    thermal_field_updated = Signal(object)
     operation_finished = Signal(str)
     error = Signal(str)
     fault = Signal(str)
@@ -39,6 +44,8 @@ class _MagnetWorker(QObject):
     def __init__(self) -> None:
         super().__init__()
         self.adapter = None
+        self.thermal_source = None
+        self._thermal_target = None
         self._terminal_session_notified = False
         self._last_fault_key = None
         self._stop_event = threading.Event()
@@ -63,8 +70,69 @@ class _MagnetWorker(QObject):
         if self._timer.interval() != interval_ms:
             self._timer.setInterval(interval_ms)
 
-    def request_stop(self) -> None:
+    def request_stop(self, reason="user") -> None:
+        self._stop_event.reason = str(reason)
         self._stop_event.set()
+
+    def _check_thermal(self, status=None, *, target=None, precharge=False):
+        """Runs in the APS worker; it cannot be starved by a queued GUI pause.
+
+        Reads only temperature snapshots from the separate LS worker. Never
+        changes the heater or zeros leads. No automatic retry or resume.
+        """
+        source = self.thermal_source
+        if source is None:
+            return  # Standalone adapter/tests without the application's gate.
+        from app.thermal_safety import ThermalSafetyEvaluator
+        adapter = self.adapter
+        try:
+            status = status if status is not None else adapter.get_status()
+            field = adapter.get_field_t()
+            if not isinstance(field, (int, float)) or isinstance(field, bool) or not math.isfinite(field):
+                raise ValueError("Invalid magnet field readback")
+        except Exception as exc:
+            self.request_stop("thermal")
+            message = f"Thermal stop: cannot verify magnet field/status: {exc}"
+            try:
+                adapter.pause()
+            except Exception as pause_exc:
+                message += f"; PAUSE NOT CONFIRMED: {pause_exc}"
+            self.fault.emit(message)
+            raise APS100SafetyError(message) from exc
+        observation = SimpleNamespace(field_t=field, monotonic_s=time.monotonic())
+        self.thermal_field_updated.emit(observation)
+        evaluator = ThermalSafetyEvaluator(source.config)
+        evaluator.note_magnet_snapshot(observation)
+        temperature = source.latest_snapshot
+        destination = target if target is not None else self._thermal_target
+        # Check the next field segment, not the distant destination: a 9 T
+        # destination must not impose its 4.2 K boundary on the whole low-field ramp.
+        next_field = None
+        if destination is not None:
+            from app.field_thermal_policy import temperature_ceiling
+            if temperature_ceiling(destination) is None:
+                next_field = destination
+            else:
+                next_field = field + max(-0.05, min(0.05, destination - field))
+        decision = evaluator.evaluate(temperature, for_continuation=True, target_t=next_field)
+        reason = None if decision.magnet_permission else decision.reason
+        if reason is None and precharge and temperature.reservoir_temperature_k > 4.2:
+            reason = "Magnet must be <=4.2 K before a new charging cycle"
+        if reason is not None:
+            self.request_stop("thermal")
+            pause_error = ""
+            if status.sweep_active:
+                try:
+                    adapter.pause()
+                except Exception as exc:
+                    pause_error = f" PAUSE NOT CONFIRMED: {exc}"
+            message = f"Thermal stop: {reason}. Manual restart required; heater state is unchanged.{pause_error}"
+            if not getattr(self, "_thermal_stop_reported", False):
+                self._thermal_stop_reported = True
+                self.fault.emit(message)
+            if getattr(adapter, "thermal_dwell_active", False) is True and not pause_error:
+                return  # Preserve the mandatory switch dwell; stop before any next action.
+            raise APS100SafetyError(message)
 
     @Slot(str, bool)
     def connect_instrument(self, resource: str, use_mock: bool) -> None:
@@ -88,6 +156,7 @@ class _MagnetWorker(QObject):
             )
             adapter = self.adapter
             identity = adapter.connect()
+            adapter.thermal_guard = self._check_thermal
             self.connected.emit(identity)
             self.refresh_snapshot()
             if self.adapter is adapter:
@@ -132,6 +201,8 @@ class _MagnetWorker(QObject):
             return
         try:
             snapshot = self.adapter.read_snapshot()
+            if self.thermal_source is not None and snapshot.status.sweep_active:
+                self._check_thermal(snapshot.status)
             self._update_poll_interval(snapshot)
             self.snapshot_updated.emit(snapshot)
             fault_key = (
@@ -223,7 +294,10 @@ class _MagnetWorker(QObject):
             self.error.emit("APS100 is not connected")
             return
         self._stop_event.clear()
+        self._thermal_stop_reported = False
         try:
+            self._thermal_target = None
+            self._check_thermal(precharge=True)
             self.adapter.enter_driven_mode(
                 progress=lambda label, remaining: self.transition_progress.emit(
                     label, remaining
@@ -241,6 +315,7 @@ class _MagnetWorker(QObject):
             self.error.emit("APS100 is not connected")
             return
         self._stop_event.clear()
+        self._thermal_stop_reported = False
         try:
             self.adapter.enter_persistent_mode(
                 zero_leads=bool(zero_leads),
@@ -255,7 +330,7 @@ class _MagnetWorker(QObject):
             self.error.emit(f"Enter persistent mode failed: {exc}")
             self.operation_finished.emit("failed:enter_persistent_mode")
 
-    @Slot(str, float, str, bool, bool, float, float, float)
+    @Slot(str, float, str, bool, bool, float, float, float, bool)
     def safe_move_to_field(
         self,
         request_id: str,
@@ -266,6 +341,7 @@ class _MagnetWorker(QObject):
         settle_s: float,
         timeout_s: float,
         tolerance_t: float | None = None,
+        use_gate_scan_rate: bool = False,
     ) -> None:
         if self.adapter is None:
             message = "APS100 is not connected"
@@ -280,6 +356,7 @@ class _MagnetWorker(QObject):
             })
             return
         self._stop_event.clear()
+        self._thermal_stop_reported = False
         adapter = self.adapter
         commands = []
         previous_observer = getattr(adapter, "command_observer", None)
@@ -289,13 +366,49 @@ class _MagnetWorker(QObject):
         voltage_limit_v = None
         outcome = "failed"
         failure = ""
+        cancellation_reason = None
         snapshot = None
         audit_record = None
+        gate_scan_rate_plan = None
         try:
             starting_snapshot = adapter.read_snapshot()
+            self._thermal_target = float(target_t)
+            self._check_thermal(starting_snapshot.status, target=float(target_t),
+                                precharge=starting_snapshot.heater_on is False)
             stored_rates = adapter.get_rates()
             voltage_limit_v = adapter.get_voltage_limit_v()
-            adapter.command_observer = commands.append
+            def observe_command(event):
+                commands.append(event)
+                if event.get("kind") == "query" and event.get("command") in {
+                    "IMAG?", "IOUT?", "VMAG?", "VOUT?", "PSHTR?", "*STB?", "SWEEP?",
+                }:
+                    self.diagnostic_readback.emit({**event, "request_id": str(request_id),
+                                                   "monotonic_s": time.monotonic()})
+            adapter.command_observer = observe_command
+            if use_gate_scan_rate:
+                gate_scan_rate_plan = self._prepare_gate_scan_rate(
+                    adapter, starting_snapshot, target_t, stored_rates
+                )
+                timeout_s = gate_scan_rate_plan["timeout_s"]
+                self.transition_progress.emit(
+                    f"Gate Scan default {gate_scan_rate_plan['rate_a_per_s']:.5g} A/s "
+                    f"({gate_scan_rate_plan['rate_t_per_min']:.4g} T/min); "
+                    f"ramp estimate {gate_scan_rate_plan['expected_ramp_s'] / 60:.1f} min; "
+                    f"timeout {timeout_s / 60:.1f} min", 0.0,
+                )
+            last_progress = [None, time.monotonic()]
+            def report_progress(label, value):
+                if use_gate_scan_rate and label == "ramping field":
+                    now = time.monotonic()
+                    if last_progress[0] is None or abs(value - last_progress[0]) >= 0.001:
+                        last_progress[:] = [value, now]
+                    elif now - last_progress[1] > 120.0:
+                        adapter.pause(confirm=False)
+                        raise APS100SafetyError(
+                            f"Gate Scan magnet stalled at {value:.6g} T towards {target_t:g} T; "
+                            "no measurable field change for 120 s"
+                        )
+                self.transition_progress.emit(label, value)
             snapshot = adapter.safe_move_to_field(
                 float(target_t),
                 final_mode=str(final_mode),
@@ -309,9 +422,7 @@ class _MagnetWorker(QObject):
                 persistent_field_confirmed=bool(persistent_field_confirmed),
                 max_magnet_voltage_v=cfg.magnet.persistent_zero_max_magnet_voltage_v,
                 stop_event=self._stop_event,
-                progress=lambda label, value: self.transition_progress.emit(
-                    label, value
-                ),
+                progress=report_progress,
             )
             self.snapshot_updated.emit(snapshot)
             outcome = "completed"
@@ -320,14 +431,20 @@ class _MagnetWorker(QObject):
             )
         except Exception as exc:
             failure = str(exc)
-            self.error.emit(f"Safe magnet move failed: {exc}")
-            self.operation_finished.emit("failed:safe_move")
+            if isinstance(exc, APS100OperationCancelled):
+                outcome = "cancelled"
+                cancellation_reason = exc.reason
+                self.operation_finished.emit("cancelled:safe_move")
+            else:
+                self.error.emit(f"Safe magnet move failed: {exc}")
+                self.operation_finished.emit("failed:safe_move")
             snapshot = None
             try:
                 snapshot = adapter.read_snapshot()
             except Exception:
                 pass
         finally:
+            self._thermal_target = None
             adapter.command_observer = previous_observer
             audit_record = {
                 "schema": "aps100_safe_move_audit_v1",
@@ -335,6 +452,7 @@ class _MagnetWorker(QObject):
                 "started_utc": started_utc,
                 "finished_utc": datetime.now(timezone.utc).isoformat(),
                 "outcome": outcome,
+                "cancellation_reason": cancellation_reason,
                 "error": failure,
                 "request": {
                     "target_t": float(target_t),
@@ -348,6 +466,7 @@ class _MagnetWorker(QObject):
                     "vmag_limit_v": cfg.magnet.persistent_zero_max_magnet_voltage_v,
                 },
                 "stored_rates": stored_rates,
+                "gate_scan_rate_plan": gate_scan_rate_plan,
                 "aps_voltage_limit_v": voltage_limit_v,
                 "starting_snapshot": (
                     asdict(starting_snapshot) if starting_snapshot is not None else None
@@ -360,12 +479,45 @@ class _MagnetWorker(QObject):
                 {
                     "request_id": str(request_id),
                     "success": outcome == "completed",
+                    "cancelled": outcome == "cancelled",
+                    "cancellation_reason": audit_record["cancellation_reason"],
                     "target_t": float(target_t),
                     "snapshot": snapshot,
                     "audit": audit_record,
                     "error": failure,
                 }
             )
+
+    def _prepare_gate_scan_rate(self, adapter, snapshot, target_t, stored_rates):
+        """Verify the commissioned range before replacing a residual sweep rate."""
+        rate_a = float(cfg.magnet.gate_scan_rate_a_per_s)
+        coil = float(adapter.coil_constant_t_per_a)
+        values = (rate_a, coil, float(target_t), float(snapshot.field_t),
+                  float(snapshot.output_field_t))
+        if not all(math.isfinite(v) for v in values) or rate_a <= 0 or coil <= 0:
+            raise APS100SafetyError("Invalid Gate Scan default rate or field readback")
+        if rate_a > min(cfg.magnet.maximum_rate_a_per_s, 0.0343):
+            raise APS100SafetyError("Gate Scan default rate exceeds the commissioned limit")
+        extent = max(abs(v) for v in values[2:])
+        if extent > cfg.magnet.safe_control_max_field_t or extent / coil > 40.0:
+            raise APS100SafetyError("Gate Scan default rate requires fields within 8 T and 40 A")
+        first = stored_rates.get(0)
+        if first is None or abs(float(first[0]) - 40.0) > 1e-6:
+            raise APS100SafetyError("APS100 range 0 does not match the commissioned 40 A boundary")
+        rate_t = rate_a * coil * 60.0
+        adapter.take_remote()
+        if adapter.get_status().sweep_active:
+            adapter.pause()
+        applied = adapter.set_rate_t_per_min(rate_t, max_abs_field_t=extent)
+        # Verify independently as well: no move follows a mismatched readback.
+        actual = adapter.get_rates()
+        if not math.isclose(float(actual[0][1]), rate_t, rel_tol=0.005, abs_tol=1e-7):
+            raise APS100SafetyError("APS100 Gate Scan default rate readback mismatch")
+        expected = abs(float(target_t) - float(snapshot.field_t)) / (rate_t / 60.0)
+        return {"rate_a_per_s": rate_a, "rate_t_per_min": float(actual[0][1]),
+                "expected_ramp_s": expected,
+                "timeout_s": max(900.0, expected * 2.0 + 180.0),
+                "applied_rates_t_per_min": applied, "readback_rates": actual}
 
     def _run_simple(self, name: str, callback) -> None:
         if self.adapter is None:
@@ -459,6 +611,8 @@ class _MagnetWorker(QObject):
             self.transport_sweep_result.emit({"success": False, "error": "APS100 is not connected"})
             return
         try:
+            self._thermal_target = float(target_t)
+            self._check_thermal(target=float(target_t))
             direction = self.adapter.start_sweep_to(float(target_t))
             self.transport_sweep_result.emit({"success": True, "target_t": float(target_t), "direction": direction})
         except Exception as exc:
@@ -480,7 +634,13 @@ class _MagnetWorker(QObject):
                 self.adapter.set_limits_t(*limits)
         except Exception as exc:
             failures.append(f"limit restoration failed: {exc}")
-        self.transport_restore_result.emit({"success": not failures, "failures": failures})
+        readback = None
+        try:
+            readback = self.adapter.get_rates()
+        except Exception as exc:
+            failures.append(f"RATE readback after restoration unavailable: {exc}")
+        self.transport_restore_result.emit({"success": not failures, "failures": failures,
+                                            "actual_rates_t_per_min": readback})
 
     @Slot()
     def shutdown(self) -> None:
@@ -498,6 +658,7 @@ class MagnetController(QObject):
     safe_move_audit = Signal(object)
     safe_move_result = Signal(object)
     transition_progress = Signal(str, float)
+    diagnostic_readback = Signal(object)
     operation_finished = Signal(str)
     error = Signal(str)
     fault = Signal(str)
@@ -514,7 +675,7 @@ class MagnetController(QObject):
     _pause_requested = Signal()
     _driven_requested = Signal()
     _persistent_requested = Signal(bool)
-    _safe_move_requested = Signal(str, float, str, bool, bool, float, float, float)
+    _safe_move_requested = Signal(str, float, str, bool, bool, float, float, float, bool)
     _polling_requested = Signal(bool)
     _transport_config_requested = Signal(float, float)
     _transport_sweep_requested = Signal(float)
@@ -581,6 +742,7 @@ class MagnetController(QObject):
         self._worker.safe_move_audit.connect(self.safe_move_audit)
         self._worker.safe_move_result.connect(self.safe_move_result)
         self._worker.transition_progress.connect(self.transition_progress)
+        self._worker.diagnostic_readback.connect(self.diagnostic_readback)
         self._worker.operation_finished.connect(self.operation_finished)
         self._worker.error.connect(self.error)
         self._worker.fault.connect(self.fault)
@@ -655,6 +817,11 @@ class MagnetController(QObject):
         self._worker.request_stop()
         self._pause_requested.emit()
 
+    def pause_for(self, reason: str) -> None:
+        """Pause with a durable origin for controller-managed interruption."""
+        self._worker.request_stop(reason)
+        self._pause_requested.emit()
+
     def enter_driven_mode(self) -> None:
         if not cfg.magnet.allow_remote_heater_control:
             self.error.emit("Remote heater control is disabled in configuration")
@@ -677,6 +844,7 @@ class MagnetController(QObject):
         settle_s: float = 2.0,
         timeout_s: float = 3600.0,
         tolerance_t: float | None = None,
+        use_gate_scan_rate: bool = False,
     ) -> str:
         request_id = uuid.uuid4().hex
         if not cfg.magnet.allow_remote_heater_control:
@@ -714,6 +882,7 @@ class MagnetController(QObject):
             float(settle_s),
             float(timeout_s),
             float(cfg.magnet.field_tolerance_t if tolerance_t is None else tolerance_t),
+            bool(use_gate_scan_rate),
         )
         return request_id
 

@@ -45,6 +45,52 @@ def new_run_id() -> str:
     return stamp if count == 1 else f"{stamp}_{count:02d}"
 
 
+def planned_output_at(output_dir: str, stem: str, run_id: str) -> PlannedOutput:
+    return PlannedOutput(run_id, output_dir, stem,
+                         os.path.join(output_dir, stem + ".csv"),
+                         os.path.join(output_dir, stem + "_metadata.json"),
+                         os.path.join(output_dir, stem + "_run_log.txt"))
+
+
+def unique_planned_output(planned: PlannedOutput, reserved=()) -> PlannedOutput:
+    """Check the complete output family before freezing a run's paths."""
+    names = set(os.listdir(planned.output_dir)) if os.path.isdir(planned.output_dir) else set()
+    names.update(os.path.basename(path) for path in reserved)
+
+    def occupied(candidate):
+        for name in names:
+            if name.startswith(candidate.stem + ".") or name.startswith(candidate.stem + "_"):
+                return True
+            # Photocurrent inserts condition tags before the run timestamp.
+            if name.startswith(candidate.display_stem + "_") and (
+                f"_{candidate.run_id}." in name or f"_{candidate.run_id}_" in name
+            ):
+                return True
+        return False
+
+    match = re.fullmatch(r"(\d{8}_\d{6})(?:_(\d+))?", planned.run_id)
+    base_id = match.group(1) if match else planned.run_id
+    sequence = int(match.group(2) or 1) if match else 1
+    candidate = planned
+    while occupied(candidate):
+        sequence += 1
+        run_id = f"{base_id}_{sequence:02d}"
+        stem = (f"{planned.display_stem}_{run_id}"
+                if planned.stem.endswith("_" + planned.run_id)
+                else f"{planned.stem}_{sequence:02d}")
+        candidate = planned_output_at(planned.output_dir, stem, run_id)
+    return candidate
+
+
+def gate_scan_filename_parts(params, signal_chain=None, field_t=None):
+    """Use the same recipe tags for ordinary and frozen field scans."""
+    from app.measurement_output import gate_scan_filename_parts as recipe_parts
+    parts = recipe_parts(params, signal_chain)
+    if field_t is not None:
+        parts.append(field_output_tag(field_t))
+    return parts
+
+
 def sanitize_segment(value: str, fallback: str) -> str:
     return _sanitize_base(str(value or "")) or fallback
 
@@ -120,32 +166,15 @@ def build_planned_output(
     run_id: str | None = None,
     create_dir: bool = False,
     filename_measurement_type: str | None = None,
+    freeze: bool = False,
 ) -> PlannedOutput:
     run_id = sanitize_segment(run_id, "") or new_run_id()
     measurement_type = sanitize_segment(measurement_type, "measurement")
     output_dir = save_directory(save, measurement_type, create=create_dir)
-    summary_parts = tuple(summary_parts)
-    match = re.fullmatch(r"(\d{8}_\d{6})(?:_(\d+))?", run_id)
-    base_id = match.group(1) if match else run_id
-    sequence = int(match.group(2) or 1) if match else 1
-    while True:
-        stem = compose_output_stem(
-            save.device_id, measurement_type, filename_stem, summary_parts,
-            run_id, filename_measurement_type,
-        )
-        if not any(os.path.exists(os.path.join(output_dir, stem + suffix))
-                   for suffix in (".csv", "_metadata.json", "_run_log.txt")):
-            break
-        sequence += 1
-        run_id = f"{base_id}_{sequence:02d}"
-    return PlannedOutput(
-        run_id=run_id,
-        output_dir=output_dir,
-        stem=stem,
-        csv_path=os.path.join(output_dir, stem + ".csv"),
-        metadata_path=os.path.join(output_dir, stem + "_metadata.json"),
-        log_path=os.path.join(output_dir, stem + "_run_log.txt"),
-    )
+    stem = compose_output_stem(save.device_id, measurement_type, filename_stem,
+                               summary_parts, run_id, filename_measurement_type)
+    planned = planned_output_at(output_dir, stem, run_id)
+    return planned if freeze else unique_planned_output(planned)
 
 
 def planned_output_warning(planned: PlannedOutput, save: SaveRoot) -> str:

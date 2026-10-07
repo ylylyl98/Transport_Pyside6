@@ -13,6 +13,9 @@ class RunPanel(QtWidgets.QWidget):
         super().__init__(parent)
         self._running = False
         self._phase_state = "idle"
+        self._continuation = False
+        self._continuation_ready = False
+        self._start_text = start_text
         self._start_available = True
         self._external_start_blocks: set[str] = set()
         layout = QtWidgets.QVBoxLayout(self)
@@ -62,6 +65,8 @@ class RunPanel(QtWidgets.QWidget):
     def set_running(self, running: bool):
         changed = self._running != bool(running)
         self._running = bool(running)
+        if not running:
+            self.set_continuation(False, False)
         self._refresh_start_enabled()
         self.btn_stop.setEnabled(self._running)
         if changed:
@@ -91,10 +96,22 @@ class RunPanel(QtWidgets.QWidget):
 
     def _refresh_start_enabled(self):
         self.btn_start.setEnabled(
-            not self._running
-            and self._start_available
+            (self._continuation_ready if self._continuation else
+             (not self._running and self._start_available))
             and not self._external_start_blocks
         )
+
+    def set_continuation(self, waiting: bool, ready: bool, reason: str = ""):
+        was_waiting = self._continuation
+        if waiting and not self._continuation:
+            self._start_text = self.btn_start.text()
+        self._continuation, self._continuation_ready = bool(waiting), bool(ready)
+        if waiting:
+            self.btn_start.setText("Continue scan")
+        elif was_waiting:
+            self.btn_start.setText(self._start_text)
+        self.btn_start.setToolTip(reason if waiting else "")
+        self._refresh_start_enabled()
 
     def set_progress_fraction(self, fraction: float):
         self.progress.setValue(int(max(0.0, min(1.0, fraction)) * 100))

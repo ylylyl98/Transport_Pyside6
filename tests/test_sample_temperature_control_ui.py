@@ -41,6 +41,47 @@ def _snapshot(now, *, temperature=10.0, status="0", connected=True,
 
 
 class SampleTemperatureControlUiTests(unittest.TestCase):
+    def test_primary_button_continuation_keeps_external_gates_and_stop(self):
+        panel = RunPanel("Start scan")
+        panel.set_running(True)
+        panel.set_start_available(False)  # Recipe editing is locked during run.
+        panel.set_continuation(True, False, "Temperature still high")
+        self.assertEqual(panel.btn_start.text(), "Continue scan")
+        self.assertFalse(panel.btn_start.isEnabled())
+        self.assertTrue(panel.btn_stop.isEnabled())
+        panel.set_continuation(True, True, "Ready")
+        self.assertTrue(panel.btn_start.isEnabled())
+        panel.set_start_blocked("sample_temperature", True)
+        self.assertFalse(panel.btn_start.isEnabled())
+        panel.set_start_blocked("sample_temperature", False)
+        panel.set_continuation(False, False)
+        self.assertEqual(panel.btn_start.text(), "Start scan")
+        self.assertFalse(panel.btn_start.isEnabled())
+        panel.set_running(False)
+        panel.set_start_available(True)
+        self.assertTrue(panel.btn_start.isEnabled())
+        panel.deleteLater()
+
+    def test_initial_unchecked_wait_and_first_toggle_update_all_start_gates(self):
+        controller = _FakeLakeShoreController()
+        bar = SampleTemperatureBar(controller, SimpleNamespace(maximum_reading_age_s=3))
+        bar._age_timer.stop()
+        bar.set_backend("1000")
+        panels = [RunPanel("Start") for _ in range(5)]
+        def update(ready):
+            for panel in panels:
+                panel.set_start_blocked("sample_temperature", bar.wait_check.isChecked() and not ready)
+        bar.readiness_changed.connect(update)
+        update(bar.is_ready())
+        self.assertTrue(all(panel.btn_start.isEnabled() for panel in panels))
+        bar.wait_check.setChecked(True)
+        self.assertTrue(all(not panel.btn_start.isEnabled() for panel in panels))
+        bar.wait_check.setChecked(False)
+        self.assertTrue(all(panel.btn_start.isEnabled() for panel in panels))
+        bar.deleteLater()
+        for panel in panels:
+            panel.deleteLater()
+
     @classmethod
     def setUpClass(cls):
         cls.app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])

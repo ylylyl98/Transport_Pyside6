@@ -33,6 +33,9 @@ class BFieldGateScanTab(GateScanTab):
         self._bfield_orchestrator: GateScanFieldBatch | None = None
         self._bfield_backend = "1000"
         self._loading_condition = False
+        self._series_error_dialog = None
+        self._saved_condition_index = None
+        self._blocked_by_unsaved_edits = False
         super().__init__(
             save, conns, device_manager,
             get_global_rates_callable=get_global_rates_callable,
@@ -41,6 +44,7 @@ class BFieldGateScanTab(GateScanTab):
             include_field_batch=False,
             start_text="START B-FIELD GATE SCAN",
         )
+        self._build_condition_header()
         # Capture the settings loaded by GateScanTab as the first editable row.
         self.collect_params()
         self._conditions = [GateScanCondition("Condition 1", deepcopy(self.p))]
@@ -50,6 +54,42 @@ class BFieldGateScanTab(GateScanTab):
         # Keep the long-running series history useful without allowing an
         # accidental multi-hour scan to grow the UI document without bound.
         self.log.setMaximumBlockCount(5000)
+        self.run_panel.lbl_status.setWordWrap(True)
+        self.run_panel.lbl_status.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+
+    def _build_condition_header(self):
+        """Pin selection and save feedback above the scrolling editor."""
+        self.condition_header = QtWidgets.QFrame()
+        self.condition_header.setObjectName("conditionEditorHeader")
+        self.condition_header.setStyleSheet(
+            "QFrame#conditionEditorHeader { background: #eff6ff; border: 1px solid #93c5fd; border-radius: 6px; }"
+        )
+        header_layout = QtWidgets.QVBoxLayout(self.condition_header)
+        header_layout.setContentsMargins(10, 8, 10, 8)
+        self.condition_heading = QtWidgets.QLabel()
+        self.condition_heading.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+        self.condition_heading.setWordWrap(True)
+        self.condition_heading.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Preferred)
+        self.condition_heading.setStyleSheet("font-weight: bold; color: #1e3a8a;")
+        header_layout.addWidget(self.condition_heading)
+        row = QtWidgets.QHBoxLayout()
+        self.condition_edit_status.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+        row.addWidget(self.condition_edit_status, 1)
+        row.addWidget(self.condition_update)
+        header_layout.addLayout(row)
+        self.condition_update.setProperty("role", "primary")
+        self.condition_update.setMinimumHeight(32)
+        sizes = self.main_splitter.sizes()
+        self.condition_editor_panel = QtWidgets.QWidget()
+        self.condition_editor_panel.setMinimumWidth(self.PANEL_MIN_WIDTH)
+        self.condition_editor_panel.setMaximumWidth(self.PANEL_MAX_WIDTH)
+        panel_layout = QtWidgets.QVBoxLayout(self.condition_editor_panel)
+        panel_layout.setContentsMargins(0, 0, 0, 0)
+        panel_layout.setSpacing(6)
+        self.main_splitter.replaceWidget(0, self.condition_editor_panel)
+        panel_layout.addWidget(self.condition_header)
+        panel_layout.addWidget(self.control_scroll, 1)
+        self.main_splitter.setSizes(sizes)
 
     def set_temperature_safety(self, snapshot=None, error_message=""):
         """Render a compact external LS335 safety banner.
@@ -68,14 +108,27 @@ class BFieldGateScanTab(GateScanTab):
         reservoir = getattr(snapshot, "reservoir_temperature_k", None)
         state = "DISARMED"
         permission = "NO"
+        reason = ""
         orchestrator = getattr(self, "_bfield_orchestrator", None)
         evaluator = getattr(orchestrator, "thermal_safety", None)
+        scope = "New magnet cycle"
         if evaluator is not None:
-            decision = evaluator.evaluate(snapshot)
+            phase = getattr(getattr(orchestrator, "_state", None), "phase", None)
+            if phase in {"moving", "measuring"}:
+                scope = "Operating limits"
+                decision = evaluator.evaluate_continuation(snapshot)
+            elif getattr(orchestrator, "_thermal_wait_context", None) == "post_move":
+                scope = "Measurement readiness"
+                evaluator.latest_snapshot = snapshot
+                decision = orchestrator._evaluate_thermal(measurement=True)
+            else:
+                decision = evaluator.evaluate(snapshot)
             state, permission = decision.state.value, ("YES" if decision.magnet_permission else "NO")
+            reason = decision.reason
         self.bfield_temperature_banner.setText(
             f"Lake Shore 335: sample {sample if sample is not None else '—'} K, "
-            f"reservoir {reservoir if reservoir is not None else '—'} K | {state} | permission {permission}"
+            f"reservoir {reservoir if reservoir is not None else '—'} K | {state} | {scope}: {permission}"
+            + (f"\n{reason}" if reason else "")
         )
 
     def _build_control_panel(self, ctl_layout):
@@ -102,6 +155,14 @@ class BFieldGateScanTab(GateScanTab):
             "start:stop:step (stop is exclusive)."
         )
         field_row.addWidget(self.bfield_fields, 1)
+        self.btn_series_more = QtWidgets.QToolButton()
+        self.btn_series_more.setText("More")
+        self.btn_series_more.setPopupMode(QtWidgets.QToolButton.ToolButtonPopupMode.InstantPopup)
+        menu = QtWidgets.QMenu(self.btn_series_more)
+        self.resume_series_action = menu.addAction("Restore from checkpoint...")
+        self.resume_series_action.triggered.connect(self.resume_series)
+        self.btn_series_more.setMenu(menu)
+        field_row.addWidget(self.btn_series_more)
         layout.addLayout(field_row)
 
         self.bfield_help = QtWidgets.QLabel(
@@ -114,6 +175,12 @@ class BFieldGateScanTab(GateScanTab):
         self.bfield_temperature_banner.setWordWrap(True)
         self.bfield_temperature_banner.setProperty("role", "hint")
         layout.addWidget(self.bfield_temperature_banner)
+        self.bfield_envelope_banner = QtWidgets.QLabel(
+            "Live protection: attoDRY1000 Table 3; manual temperature continuation. "
+            "First-stage temperature is not monitored.")
+        self.bfield_envelope_banner.setWordWrap(True)
+        self.bfield_envelope_banner.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+        layout.addWidget(self.bfield_envelope_banner)
         self.bfield_preview = QtWidgets.QLabel()
         self.lbl_bfield_preview = self.bfield_preview
         self.bfield_preview.setWordWrap(False)
@@ -237,6 +304,14 @@ class BFieldGateScanTab(GateScanTab):
             if signal is not None:
                 signal.connect(self._update_condition_edit_state)
 
+    def set_field_thermal_comparison(self, report):
+        self.bfield_envelope_banner.setText(
+            "Live: Table 3 field-dependent protection; no automatic thermal resume.\n"
+            + report.display())
+        self.bfield_envelope_banner.setToolTip(
+            "Last comparison observation. This does not pause, resume, or change live protection. "
+            "Live protection uses a separate 0.1 K stop margin. First-stage temperature is not monitored.")
+
     def _load_tab_settings(self):
         """Load inherited and B-field settings, then refresh the preview.
 
@@ -312,15 +387,33 @@ class BFieldGateScanTab(GateScanTab):
         if self._loading_condition or not hasattr(self, "condition_edit_status"):
             return
         modified = self._editor_is_modified()
+        if modified:
+            self._saved_condition_index = None
         name = self._conditions[self._selected_condition].name if 0 <= self._selected_condition < len(self._conditions) else ""
+        number = self._selected_condition + 1
+        saved = self._saved_condition_index == self._selected_condition and number > 0
+        if hasattr(self, "condition_heading"):
+            self.condition_heading.setText(f"Editing #{number} · {name}" if number > 0 else "No condition selected")
+        self.condition_update.setText(f"Save #{number}" if number > 0 else "Save")
+        self.condition_update.setToolTip(f"Save the editor values to condition #{number}: {name}")
         self.condition_edit_status.setText(
-            f"Editing saved condition: {name}" + (" — Modified" if modified else "")
+            "Unsaved changes" if modified else (f"✓ #{number} saved" if saved else "No unsaved changes")
         )
+        self.condition_edit_status.setStyleSheet(
+            "font-weight: bold; color: #92400e;" if modified else "font-weight: bold; color: #166534;"
+        )
+        if not modified and self._blocked_by_unsaved_edits:
+            self._blocked_by_unsaved_edits = False
+            message = f"#{number} has no unsaved changes."
+            self.bfield_status.setText(message)
+            self.set_status(message, "idle")
+            if self._series_error_dialog is not None:
+                self._series_error_dialog.close()
         if 0 <= self._selected_condition < self.condition_table.rowCount():
             item = self.condition_table.item(self._selected_condition, 1)
             if item is not None:
                 base_name = self._conditions[self._selected_condition].name
-                item.setText(base_name + (" (Modified)" if modified else ""))
+                item.setText(base_name + (" (Modified)" if modified else " · ✓ Saved" if saved else ""))
 
     def _refresh_condition_table(self):
         self.condition_table.setRowCount(len(self._conditions))
@@ -340,7 +433,7 @@ class BFieldGateScanTab(GateScanTab):
     def _update_series_buttons(self):
         has = bool(self._conditions)
         selected = has and 0 <= self._selected_condition < len(self._conditions)
-        self.condition_update.setEnabled(selected)
+        self.condition_update.setEnabled(selected and not self._batch_locked)
         self.condition_duplicate.setEnabled(selected)
         self.condition_remove.setEnabled(len(self._conditions) > 1 and selected)
 
@@ -352,6 +445,8 @@ class BFieldGateScanTab(GateScanTab):
         if not 0 <= row < len(self._conditions):
             return
         previous = self._selected_condition
+        if previous != row:
+            self._saved_condition_index = None
         if previous != row and 0 <= previous < self.condition_table.rowCount():
             # Switching conditions intentionally discards unsaved editor
             # values; remove the stale marker from the row being left.
@@ -367,10 +462,11 @@ class BFieldGateScanTab(GateScanTab):
         finally:
             self._loading_condition = False
         self.condition_details.setText(self._condition_details(condition.params))
-        self.condition_edit_status.setText(f"Editing saved condition: {condition.name}")
+        self._update_condition_edit_state()
         self._update_series_buttons()
 
     def _add_condition(self):
+        self._saved_condition_index = None
         self.collect_params()
         name = self.condition_name.text().strip() or f"Condition {len(self._conditions) + 1}"
         self._conditions.append(GateScanCondition(name, deepcopy(self.p)))
@@ -378,18 +474,20 @@ class BFieldGateScanTab(GateScanTab):
         self._refresh_condition_table()
 
     def _update_condition(self):
-        if not 0 <= self._selected_condition < len(self._conditions):
+        if self._batch_locked or not 0 <= self._selected_condition < len(self._conditions):
             return
         self.collect_params()
         name = self.condition_name.text().strip() or f"Condition {self._selected_condition + 1}"
         self._conditions[self._selected_condition] = GateScanCondition(name, deepcopy(self.p))
         self._refresh_condition_table()
-        self.condition_edit_status.setText(f"Editing saved condition: {name}")
+        self._saved_condition_index = self._selected_condition
+        self._update_condition_edit_state()
 
     def _duplicate_condition(self):
         if not 0 <= self._selected_condition < len(self._conditions):
             return
         source = self._conditions[self._selected_condition]
+        self._saved_condition_index = None
         self._conditions.insert(self._selected_condition + 1, GateScanCondition(
             source.name + " copy", deepcopy(source.params), source.enabled,
         ))
@@ -400,6 +498,7 @@ class BFieldGateScanTab(GateScanTab):
         if len(self._conditions) <= 1 or not 0 <= self._selected_condition < len(self._conditions):
             return
         self._conditions.pop(self._selected_condition)
+        self._saved_condition_index = None
         self._selected_condition = min(self._selected_condition, len(self._conditions) - 1)
         self._refresh_condition_table()
 
@@ -444,7 +543,7 @@ class BFieldGateScanTab(GateScanTab):
         if self._editor_is_modified():
             self.bfield_status.setText(
                 "Unsaved editor changes are not part of this series. "
-                "Press Update selected to save them before starting."
+                f"Press Save #{self._selected_condition + 1} to save them before starting."
             )
         calibration = self.verified_run_calibration(capture_settings=False)
         if calibration is None:
@@ -487,6 +586,7 @@ class BFieldGateScanTab(GateScanTab):
         """Lock every editor while the reserved series owns the instruments."""
         if not hasattr(self, "control_widget"):
             return
+        self.condition_update.setEnabled(not self._batch_locked and self._selected_condition >= 0)
         for widget in self.control_widget.findChildren(QtWidgets.QWidget):
             if widget is self.btn_stop:
                 continue
@@ -511,6 +611,8 @@ class BFieldGateScanTab(GateScanTab):
         self._bfield_orchestrator = orchestrator
         orchestrator.set_review_validator(self._batch_review_valid)
         orchestrator.state_changed.connect(self._on_batch_state_changed)
+        if hasattr(orchestrator, "continuation_changed"):
+            orchestrator.continuation_changed.connect(self.run_panel.set_continuation)
         orchestrator.progress_changed.connect(self._on_batch_progress_changed)
         orchestrator.error.connect(self._on_batch_error)
         orchestrator.finished.connect(self._on_batch_finished)
@@ -541,7 +643,12 @@ class BFieldGateScanTab(GateScanTab):
         self.log.verticalScrollBar().setValue(self.log.verticalScrollBar().maximum())
 
     def _on_batch_state_changed(self, phase: str, detail: str):
-        self.set_status(detail or phase, phase, detail)
+        self.resume_series_action.setEnabled(not bool(self._bfield_orchestrator and self._bfield_orchestrator.active))
+        status_detail = detail
+        if phase == "thermal_wait":
+            status_detail = (detail + "\nNormal waits continue automatically. "
+                             "Protection pauses require confirmation.").strip()
+        self.set_status(detail or phase, phase, status_detail)
         self.bfield_status.setText(f"{phase}: {detail}")
         self._append_series_display(f"{phase}: {detail}", "PHASE")
 
@@ -553,9 +660,24 @@ class BFieldGateScanTab(GateScanTab):
         )
 
     def _on_batch_error(self, message: str):
-        self.set_status(message, "error", message)
+        self._blocked_by_unsaved_edits = False
+        self._show_series_error(message)
+
+    def _show_series_error(self, message: str):
+        """Keep errors beside Start and surface them without blocking cleanup."""
         self.bfield_status.setText(f"Error: {message}")
+        self.set_status(f"B-field Gate Scan: {message}", "error", message)
         self._append_series_display(str(message), "ERROR")
+        if self._series_error_dialog is None:
+            dialog = QtWidgets.QMessageBox(self)
+            dialog.setWindowTitle("B-field Gate Scan — action required")
+            dialog.setIcon(QtWidgets.QMessageBox.Icon.Warning)
+            dialog.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+            dialog.setStandardButtons(QtWidgets.QMessageBox.StandardButton.Ok)
+            self._series_error_dialog = dialog
+        self._series_error_dialog.setText(str(message))
+        # open() returns immediately: magnet/error cleanup must keep running.
+        self._series_error_dialog.open()
 
     def _on_batch_finished(self):
         self.set_status("B-field series complete", "finished")
@@ -594,6 +716,10 @@ class BFieldGateScanTab(GateScanTab):
         if context.get("job_count"):
             parts.append(f"job {context.get('job_index')}/{context['job_count']}")
         suffix = f" [{', '.join(parts)}]" if parts else ""
+        if category in {"WAIT", "COOLDOWN", "FAULT"} or (category == "MAGNET" and any(word in message.lower() for word in ("match", "settling", "waiting", "default"))):
+            prefix = "Instrument fault" if category == "FAULT" else "Waiting / verifying"
+            self.bfield_status.setText(f"{prefix}: {message}")
+            self.set_status(f"{prefix}: {message}", "error" if category == "FAULT" else "running")
         self.log.appendPlainText(f"{timestamp} [{category}] {message}{suffix}")
         self.log.verticalScrollBar().setValue(self.log.verticalScrollBar().maximum())
 
@@ -602,22 +728,43 @@ class BFieldGateScanTab(GateScanTab):
         self._update_connection_hint()
 
     def start_series(self):
+        if self._bfield_orchestrator is not None and self._bfield_orchestrator.active:
+            self._bfield_orchestrator.continue_after_temperature_check()
+            return
         # A B-field series must be reproducible: never run an older frozen
         # recipe while the selected editor visibly contains a newer one.
         if self._editor_is_modified():
-            self.bfield_status.setText(
-                "Cannot start: the selected condition is Modified. "
-                "Press Update selected (or switch to a saved condition) before starting."
+            self._blocked_by_unsaved_edits = True
+            self._show_series_error(
+                f"Cannot start: condition #{self._selected_condition + 1} has unsaved changes. "
+                f"Press Save #{self._selected_condition + 1} (or switch to a saved condition) before starting."
             )
             return
         if self._bfield_orchestrator is None:
-            self.bfield_status.setText("B-field controller is unavailable")
+            self._show_series_error("B-field controller is unavailable")
             return
         if self._bfield_backend != "1000":
-            self.bfield_status.setText("Select attoDRY1000 (APS100) in Magnet Control")
+            self._show_series_error("Select attoDRY1000 (APS100) in Magnet Control")
             return
         self.bfield_status.setText("Starting B-field series…")
+        self.set_status("Starting B-field series…", "running")
         self._bfield_orchestrator.start(self.bfield_fields.text())
+
+    def resume_series(self):
+        if self._bfield_orchestrator is None or self._bfield_orchestrator.active:
+            return
+        if self._editor_is_modified():
+            self._show_series_error("Save the selected condition before verifying a resume checkpoint")
+            return
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Resume B-field Gate Scan", self._planned_output.output_dir,
+            "Gate Scan checkpoints (*_bfield_batch_checkpoint.json)",
+        )
+        if not path:
+            return
+        self.set_status("Verifying checkpoint, recipes and completed files...", "running")
+        if self._bfield_orchestrator.resume(path):
+            self.bfield_fields.setText(", ".join(str(v) for v in self._bfield_orchestrator._state.request.fields_t))
 
     def stop_series(self):
         if self._bfield_orchestrator is not None and self._bfield_orchestrator.active:

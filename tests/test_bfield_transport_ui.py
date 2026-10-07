@@ -38,6 +38,15 @@ class BFieldTransportUiTests(unittest.TestCase):
             get_signal_chain_callable=lambda: SignalChainSnapshot(1000.0, 0.02, 100e-9),
         )
 
+    def test_restoration_warning_survives_completion_and_clears_only_on_success(self):
+        self.tab._show_restoration_warning("RATE restoration failed; actual 0.02 T/min")
+        self.tab._on_transport_finished()
+        self.assertFalse(self.tab.restoration_banner.isHidden())
+        self.assertIn("0.02", self.tab.restoration_banner.text())
+        self.tab._restoration_dialog.close()
+        self.tab._show_restoration_warning("")
+        self.assertTrue(self.tab.restoration_banner.isHidden())
+
     def test_device_status_panel_tracks_existing_and_future_manager_state(self):
         for name in ("g1", "g2", "g3", "daq"):
             self.manager.sessions[name] = object()

@@ -31,7 +31,7 @@ class SampleTemperatureBar(QtWidgets.QFrame):
         self._target = None
         self._snapshot = None
         self._stable_since = None
-        self._wait = True
+        self._wait = False  # Must match the initially unchecked checkbox.
         layout = QtWidgets.QHBoxLayout(self)
         layout.setContentsMargins(8, 4, 8, 4)
         layout.addWidget(QtWidgets.QLabel("Sample T (1000):"))
@@ -66,6 +66,9 @@ class SampleTemperatureBar(QtWidgets.QFrame):
     def _wait_changed(self, enabled):
         self._wait = bool(enabled); self._update_ready()
 
+    def measurement_settings(self):
+        return self.wait_check.isChecked(), self._target
+
     def _set_target(self):
         self._target = float(self.target.value())
         self._stable_since = None
@@ -87,7 +90,8 @@ class SampleTemperatureBar(QtWidgets.QFrame):
         else:
             self._stable_since = None
             try:
-                display = "—" if value is None else f"{float(value):.3f} K — Not stable"
+                state = "No target set" if self._target is None else "Not stable"
+                display = "—" if value is None else f"{float(value):.3f} K — {state}"
             except (TypeError, ValueError):
                 display = "Invalid sample-temperature reading"
             self._set_status(display)

@@ -497,6 +497,7 @@ class MainWindowMagnetLifecycleTests(unittest.TestCase):
         view_actions = {action.text() for action in window.view_menu.actions()}
         self.assertIn(window.instrument_dock.windowTitle(), view_actions)
         window.magnet1000.shutdown()
+        window.lakeshore335.shutdown()
         self.assertTrue(window.magnet2100.shutdown(0.5))
         window.deleteLater()
 
@@ -528,3 +529,17 @@ class MainWindowMagnetLifecycleTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RestorationReadbackTests(unittest.TestCase):
+    def test_restore_failure_reports_actual_rate(self):
+        from unittest.mock import MagicMock
+        worker = _MagnetWorker()
+        worker.adapter = MagicMock()
+        worker.adapter.restore_rates.side_effect = RuntimeError("write failed")
+        worker.adapter.get_rates.return_value = {0: (40.0, 0.02)}
+        results = []
+        worker.transport_restore_result.connect(results.append)
+        worker.restore_transport({0: (40.0, 0.4)}, None)
+        self.assertFalse(results[-1]["success"])
+        self.assertEqual(results[-1]["actual_rates_t_per_min"], {0: (40.0, 0.02)})

@@ -497,6 +497,72 @@ class BFieldTransportSweepTests(unittest.TestCase):
         controller._on_magnet_operation("failed:pause")
         self.assertEqual(transitions, ["persistent"])
 
+    def test_failed_thermal_cleanup_pause_retains_ownership_until_acknowledgement(self):
+        class Magnet(QtCore.QObject):
+            transport_config_result = QtCore.Signal(object)
+            safe_move_result = QtCore.Signal(object)
+            transport_sweep_result = QtCore.Signal(object)
+            fault = QtCore.Signal(str)
+            operation_finished = QtCore.Signal(str)
+            snapshot_updated = QtCore.Signal(object)
+            def __init__(self):
+                super().__init__()
+                self.events = []
+            def pause(self):
+                self.events.append("pause")
+            def enter_persistent_mode(self, **kwargs):
+                self.events.append(("persistent", kwargs))
+            def release_exclusive(self, _owner):
+                self.events.append("release")
+        released = []
+        devices = SimpleNamespace(get_session=lambda _name: None, release=released.append)
+        controller = BFieldTransportController(Magnet(), SimpleNamespace(), devices)
+        self.addCleanup(lambda: controller._cleanup_timer.stop())
+        controller._active = controller._exclusive_acquired = True
+        controller._claimed = ["daq"]
+        controller._log = lambda *_args, **_kwargs: None
+        controller._checkpoint_runtime = lambda *_args: None
+        states = []
+        controller.state_changed.connect(lambda phase, detail: states.append((phase, detail)))
+        controller._cleanup("failed", "Lake Shore thermal stop")
+        controller.magnet.operation_finished.emit("failed:pause")
+        self.assertEqual(controller.magnet.events, ["pause"])
+        self.assertTrue(controller._cleanup_in_progress)
+        self.assertTrue(controller._exclusive_acquired)
+        self.assertEqual(controller._cleanup_waiting, "pause")
+        self.assertEqual(controller._cleanup_final_mode, "unchanged")
+        self.assertEqual(released, [])
+        self.assertEqual(states[-1][0], "cleanup_overdue")
+        controller.magnet.operation_finished.emit("pause")
+        self.assertEqual(controller.magnet.events, ["pause", "release"])
+        self.assertFalse(controller._cleanup_in_progress)
+        self.assertEqual(released, [["daq"]])
+
+    def test_thermal_cleanup_pause_exception_retains_ownership_without_restore(self):
+        class Magnet(QtCore.QObject):
+            transport_config_result = QtCore.Signal(object)
+            safe_move_result = QtCore.Signal(object)
+            transport_sweep_result = QtCore.Signal(object)
+            fault = QtCore.Signal(str)
+            snapshot_updated = QtCore.Signal(object)
+            def pause(self):
+                raise RuntimeError("pause request rejected")
+        controller = BFieldTransportController(Magnet(), SimpleNamespace(),
+            SimpleNamespace(get_session=lambda _name: None))
+        self.addCleanup(lambda: controller._cleanup_timer.stop())
+        controller._active = controller._exclusive_acquired = True
+        controller._log = lambda *_args, **_kwargs: None
+        controller._checkpoint_runtime = lambda *_args: None
+        transitions = []
+        controller._begin_persistent_cleanup = lambda: transitions.append("persistent")
+        controller._request_restore = lambda: transitions.append("restore")
+        controller._cleanup("failed", "Lake Shore thermal stop")
+        self.assertEqual(transitions, [])
+        self.assertTrue(controller._cleanup_in_progress)
+        self.assertTrue(controller._exclusive_acquired)
+        self.assertEqual(controller._cleanup_waiting, "pause")
+        self.assertTrue(any("pause request rejected" in detail for detail in controller._cleanup_failures))
+
     def test_sync_persistent_cleanup_failure_retains_ownership_and_skips_restore(self):
         class Magnet(QtCore.QObject):
             transport_config_result = QtCore.Signal(object)
@@ -1009,6 +1075,7 @@ class BFieldTransportSweepTests(unittest.TestCase):
             fault = QtCore.Signal(str)
             def __init__(self):
                 super().__init__(); self.events = []; self.is_connected = True; self.latest_snapshot = type("Snapshot", (), {"heater_on": True, "field_t": 0.0})()
+            def set_polling_enabled(self, enabled): self.events.append(("polling", enabled))
             def acquire_exclusive(self, owner): self.events.append(("claim", owner)); return True
             def release_exclusive(self, owner): self.events.append(("release", owner))
             def configure_transport(self, rate, limit):
@@ -1057,6 +1124,7 @@ class BFieldTransportSweepTests(unittest.TestCase):
         controller = BFieldTransportController(magnet, tab, manager, thermal_safety=thermal)
         self.assertTrue(controller.start())
         self.assertEqual(controller._manifest, tab.frozen_paths.manifest_path)
+        self.assertEqual(magnet.events[1], ("polling", True))
         self.assertEqual(tuple(writer.path for writer in controller._writers.values()), tab.frozen_paths.condition_csv_paths)
         self.assertIn(("configure", .1, 6.0), magnet.events)
         self.assertTrue(controller.active)

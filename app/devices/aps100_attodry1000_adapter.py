@@ -33,6 +33,13 @@ class APS100SafetyError(APS100Error):
     """Raised when a requested operation violates a configured guard."""
 
 
+class APS100OperationCancelled(APS100SafetyError):
+    """An explicit cancellation, distinct from hardware/communication failure."""
+    def __init__(self, stop_event=None):
+        self.reason = getattr(stop_event, "reason", "user")
+        super().__init__(f"Magnet operation cancelled: {self.reason}")
+
+
 class APS100CommandBlockedError(APS100Error):
     """Raised when the front panel or local state blocks a remote command."""
 
@@ -520,6 +527,9 @@ class APS100AttoDry1000Adapter:
             raise APS100SafetyError("APS100 reports a power-module failure")
         if status.menu_locked:
             raise APS100SafetyError("APS100 front-panel menu is locking remote commands")
+        thermal_guard = getattr(self, "thermal_guard", None)
+        if callable(thermal_guard):
+            thermal_guard(status)
         return status
 
     def read_snapshot(self) -> MagnetSnapshot:
@@ -632,14 +642,28 @@ class APS100AttoDry1000Adapter:
     def _set_directional_target(self, target_t: float, current_t: float) -> str:
         target = self._validate_field(target_t)
         self.select_field_units()
-        if target >= current_t:
-            self._write(f"ULIM {self._tesla_to_kg(target):.6f}")
+        low, high = self.get_limits_t()
+        # Lead zeroing can leave IOUT outside the previous sweep limits. The
+        # stored magnet readback may also lie just beyond the previous endpoint.
+        # Keep the opposite limit on the current side of the target before
+        # programming the endpoint; otherwise APS100 rejects crossed limits.
+        upward = target >= current_t
+        if target == current_t and target <= low:
+            upward = False
+        if upward:
+            if target < low:
+                self.set_limits_t(current_t, target)
+            else:
+                self._write(f"ULIM {self._tesla_to_kg(target):.6f}")
             actual = field_response_to_tesla(
                 self._query("ULIM?"), self.coil_constant_t_per_a
             )
             direction = "UP"
         else:
-            self._write(f"LLIM {self._tesla_to_kg(target):.6f}")
+            if target > high:
+                self.set_limits_t(target, current_t)
+            else:
+                self._write(f"LLIM {self._tesla_to_kg(target):.6f}")
             actual = field_response_to_tesla(
                 self._query("LLIM?"), self.coil_constant_t_per_a
             )
@@ -714,14 +738,28 @@ class APS100AttoDry1000Adapter:
         progress: Optional[Callable[[float], None]] = None,
     ) -> float:
         target = self._validate_field(target_t)
-        deadline = time.monotonic() + float(timeout_s)
+        started = time.monotonic()
+        deadline = started + float(timeout_s)
+        value = None
+        last_progress = started
+        previous = None
         reader = self.get_output_field_t if read_output else self.get_field_t
-        while time.monotonic() < deadline:
+        while True:
+            now = time.monotonic()
+            if now >= deadline:
+                if now - last_progress >= 180.0:
+                    break
+                deadline = now + 180.0
             if stop_event is not None and stop_event.is_set():
                 self.pause(confirm=False)
-                raise APS100SafetyError("Magnet operation stopped by user")
+                raise APS100OperationCancelled(stop_event)
             self._ensure_no_fault()
             value = reader()
+            if not math.isfinite(value):
+                self.pause(confirm=False)
+                raise APS100SafetyError("Nonfinite field during magnet movement")
+            if previous is None or abs(value - target) < abs(previous - target) - 0.0001:
+                previous, last_progress = value, time.monotonic()
             if progress is not None:
                 progress(value)
             if abs(value - target) <= abs(float(tolerance_t)):
@@ -736,7 +774,11 @@ class APS100AttoDry1000Adapter:
                 )
             self._sleep(0.1)
         self.pause(confirm=False)
-        raise APS100TimeoutError(f"Timed out moving magnet to {target:g} T")
+        raise APS100TimeoutError(
+            f"Timed out moving magnet to {target:g} T; "
+            f"last field {value} T, elapsed {time.monotonic() - started:.1f} s, "
+            f"timeout {timeout_s:g} s"
+        )
 
     def move_to_field(
         self,
@@ -765,10 +807,14 @@ class APS100AttoDry1000Adapter:
         max_magnet_voltage_v: Optional[float] = None,
         stop_event=None,
         progress: Optional[Callable[[float], None]] = None,
+        transition_progress: Optional[Callable[[str, float], None]] = None,
     ) -> float:
         """Use the APS100 ZERO operation and require its automatic Standby state."""
-        if abs(self.get_output_field_t()) <= abs(float(tolerance_t)):
-            return self.get_output_field_t()
+        initial_output = self.get_output_field_t()
+        if not math.isfinite(initial_output):
+            raise APS100SafetyError("Nonfinite output before ZERO")
+        if abs(initial_output) <= abs(float(tolerance_t)):
+            return initial_output
         if verify_persistent_switch:
             if max_magnet_voltage_v is None or not math.isfinite(
                 float(max_magnet_voltage_v)
@@ -777,18 +823,38 @@ class APS100AttoDry1000Adapter:
                     "Persistent lead zeroing requires a commissioned positive "
                     "VMAG safety limit"
                 )
+            if self.get_heater_state() != 0:
+                raise APS100SafetyError("Fast lead zeroing requires heater OFF")
         self._ensure_no_fault()
-        self._write("SWEEP ZERO")
+        self._write("SWEEP ZERO SLOW")
+        if transition_progress is not None:
+            transition_progress("zeroing leads SLOW: checking persistent voltage", initial_output)
         deadline = time.monotonic() + float(timeout_s)
-        while time.monotonic() < deadline:
+        last_progress = time.monotonic()
+        previous = abs(initial_output)
+        fast_selected = False
+        while True:
+            now = time.monotonic()
+            if now >= deadline:
+                if now - last_progress >= 180.0:
+                    break
+                deadline = now + 180.0
             if stop_event is not None and stop_event.is_set():
                 self.pause(confirm=False)
-                raise APS100SafetyError("Magnet operation stopped by user")
+                raise APS100OperationCancelled(stop_event)
             self._ensure_no_fault()
             output_t = self.get_output_field_t()
+            if not math.isfinite(output_t):
+                self.pause(confirm=False)
+                raise APS100SafetyError("Nonfinite output while zeroing")
+            if abs(output_t) < previous - 0.0001:
+                previous, last_progress = abs(output_t), time.monotonic()
             if verify_persistent_switch:
+                if self.get_heater_state() != 0:
+                    self.pause(confirm=False)
+                    raise APS100SafetyError("Heater changed state while zeroing leads")
                 magnet_v = abs(self.get_magnet_voltage_v())
-                if magnet_v > float(max_magnet_voltage_v):
+                if not math.isfinite(magnet_v) or magnet_v > float(max_magnet_voltage_v):
                     self.pause(confirm=False)
                     raise APS100SafetyError(
                         f"VMAG {magnet_v:.6g} V exceeded the commissioned "
@@ -801,6 +867,16 @@ class APS100AttoDry1000Adapter:
             at_zero = abs(output_t) <= abs(float(tolerance_t))
             if at_zero and status.standby and not status.sweep_active:
                 return output_t
+            if verify_persistent_switch and not fast_selected and not at_zero:
+                rate = self.get_fast_rate_a_per_s()
+                expected_s = abs(output_t) / (rate * self.coil_constant_t_per_a)
+                deadline = max(deadline, time.monotonic() + expected_s * 2.0 + 180.0)
+                self._write("SWEEP ZERO FAST")
+                if transition_progress is not None:
+                    transition_progress(f"zeroing leads FAST: {rate:g} A/s (RATE 5)", output_t)
+                fast_selected = True
+                self._sleep(0.1)
+                continue
             if not status.sweep_active and "zero" not in state:
                 raise APS100SafetyError(
                     "APS100 stopped without confirming Standby after SWEEP ZERO: "
@@ -811,6 +887,16 @@ class APS100AttoDry1000Adapter:
         raise APS100TimeoutError("Timed out waiting for SWEEP ZERO and Standby")
 
     def _hold_transition(
+        self, seconds: float, *, label: str,
+        progress: Optional[Callable[[str, float], None]] = None,
+    ) -> None:
+        self.thermal_dwell_active = True
+        try:
+            self._hold_transition_impl(seconds, label=label, progress=progress)
+        finally:
+            self.thermal_dwell_active = False
+
+    def _hold_transition_impl(
         self,
         seconds: float,
         *,
@@ -876,7 +962,35 @@ class APS100AttoDry1000Adapter:
     @staticmethod
     def _raise_if_stopped(stop_event) -> None:
         if stop_event is not None and stop_event.is_set():
-            raise APS100SafetyError("Magnet operation stopped by user")
+            raise APS100OperationCancelled(stop_event)
+
+    def _settled_current_match(self, *, heater_state, action, stop_event=None, progress=None):
+        """Require two matched readings after pause, without relaxing the limit."""
+        tolerance = float(self.current_match_tolerance_a)
+        if not math.isfinite(tolerance) or tolerance <= 0:
+            raise APS100SafetyError("Current-match tolerance must be positive and finite")
+        deadline = time.monotonic() + 5.0
+        matched = 0
+        mismatch_a = float("inf")
+        for _ in range(20):
+            self._raise_if_stopped(stop_event)
+            self._ensure_no_fault()
+            if self.get_heater_state() != heater_state:
+                raise APS100SafetyError(f"Cannot {action} heater: switch state changed during current verification")
+            magnet_t = self.get_field_t()
+            output_t = self.get_output_field_t()
+            if not math.isfinite(magnet_t) or not math.isfinite(output_t):
+                raise APS100SafetyError("Nonfinite field readback during current matching")
+            mismatch_a = abs(output_t - magnet_t) / self.coil_constant_t_per_a
+            matched = matched + 1 if mismatch_a <= tolerance else 0
+            if progress is not None:
+                progress(f"Current mismatch {mismatch_a * 1000:.3f} mA; allowed {tolerance * 1000:g} mA; verifying stable match", mismatch_a)
+            if matched >= 2:
+                return True, magnet_t, output_t, mismatch_a
+            if time.monotonic() >= deadline:
+                break
+            self._sleep(0.25)
+        return False, magnet_t, output_t, mismatch_a
 
     def enter_driven_mode(
         self,
@@ -911,40 +1025,47 @@ class APS100AttoDry1000Adapter:
         requested_tolerance_t = abs(float(tolerance_t))
         if not math.isfinite(requested_tolerance_t) or requested_tolerance_t <= 0.0:
             raise APS100SafetyError("Field tolerance must be positive and finite")
-        if abs(output_t - magnet_t) / self.coil_constant_t_per_a > tolerance_a:
-            # RATE? 5 is read-only verification here. FAST is permitted by the
-            # APS100 only while the persistent heater is confirmed OFF.
-            if self.get_heater_state() != 0:
-                raise APS100SafetyError(
-                    "Fast lead matching requires APS100 heater OFF confirmation"
+        for attempt in range(3):
+            if abs(output_t - magnet_t) / self.coil_constant_t_per_a > tolerance_a:
+                # RATE? 5 is read-only verification here. FAST is permitted by the
+                # APS100 only while the persistent heater is confirmed OFF.
+                if self.get_heater_state() != 0:
+                    raise APS100SafetyError(
+                        "Fast lead matching requires APS100 heater OFF confirmation"
+                    )
+                fast_rate_a_per_s = self.get_fast_rate_a_per_s()
+                fast_rate_t_per_s = fast_rate_a_per_s * self.coil_constant_t_per_a
+                mismatch_t = abs(output_t - magnet_t)
+                expected_s = mismatch_t / fast_rate_t_per_s
+                # A configured slow fast-rate must not hit the old fixed 900 s
+                # cap while making normal progress. Allow several serial reads.
+                match_timeout_s = max(float(timeout_s), expected_s * 2.0 + 30.0)
+                self._start_output_sweep_to(magnet_t)
+                self.wait_for_field(
+                    magnet_t,
+                    tolerance_t=min(requested_tolerance_t, tolerance_a * self.coil_constant_t_per_a),
+                    timeout_s=match_timeout_s,
+                    read_output=True,
+                    stop_event=stop_event,
+                    progress=(
+                        (lambda value: progress("matching leads", value))
+                        if progress is not None else None
+                    ),
                 )
-            fast_rate_a_per_s = self.get_fast_rate_a_per_s()
-            fast_rate_t_per_s = fast_rate_a_per_s * self.coil_constant_t_per_a
-            mismatch_t = abs(output_t - magnet_t)
-            expected_s = mismatch_t / fast_rate_t_per_s
-            # A configured slow fast-rate must not hit the old fixed 900 s
-            # cap while making normal progress. Allow several serial reads.
-            match_timeout_s = max(float(timeout_s), expected_s * 2.0 + 30.0)
-            self._start_output_sweep_to(magnet_t)
-            self.wait_for_field(
-                magnet_t,
-                tolerance_t=min(requested_tolerance_t, tolerance_a * self.coil_constant_t_per_a),
-                timeout_s=match_timeout_s,
-                read_output=True,
-                stop_event=stop_event,
-                progress=(
-                    (lambda value: progress("matching leads", value))
-                    if progress is not None else None
-                ),
+            self.pause()
+            matched, magnet_t, output_t, mismatch_a = self._settled_current_match(
+                heater_state=0, action="enable", stop_event=stop_event, progress=progress,
             )
-        self.pause()
-        magnet_t = self.get_field_t()
-        output_t = self.get_output_field_t()
-        mismatch_a = abs(output_t - magnet_t) / self.coil_constant_t_per_a
-        if mismatch_a > tolerance_a:
-            raise APS100SafetyError(
-                f"Cannot enable heater: current mismatch is {mismatch_a:.6g} A"
-            )
+            if matched:
+                break
+            if attempt == 2:
+                raise APS100SafetyError(
+                    f"Cannot enable heater: current mismatch is {mismatch_a:.6g} A "
+                    f"after settling and 2 rematching attempts (limit {tolerance_a:g} A)"
+                )
+            if progress is not None:
+                progress("retrying lead matching", float(attempt + 1))
+        self._raise_if_stopped(stop_event)
         self._write("PSHTR ON")
         self._confirm_heater_state(
             1,
@@ -971,6 +1092,9 @@ class APS100AttoDry1000Adapter:
         max_magnet_voltage_v: Optional[float] = None,
         stop_event=None,
         progress: Optional[Callable[[str, float], None]] = None,
+        target_t: Optional[float] = None,
+        tolerance_t: float = 0.002,
+        settle_s: float = 2.0,
     ) -> None:
         """Pause, turn the heater off, cool, and optionally zero the leads."""
         self._ensure_no_fault()
@@ -998,6 +1122,7 @@ class APS100AttoDry1000Adapter:
                 self.zero_output(
                     tolerance_t=0.002,
                     timeout_s=timeout_s,
+                    transition_progress=progress,
                     verify_persistent_switch=True,
                     max_magnet_voltage_v=max_magnet_voltage_v,
                     stop_event=stop_event,
@@ -1007,13 +1132,24 @@ class APS100AttoDry1000Adapter:
                     ),
                 )
             return
-        magnet_t = self.get_field_t()
-        output_t = self.get_output_field_t()
-        mismatch_a = abs(output_t - magnet_t) / self.coil_constant_t_per_a
-        if mismatch_a > self.current_match_tolerance_a:
-            raise APS100SafetyError(
-                f"Cannot disable heater: current mismatch is {mismatch_a:.6g} A"
+        if target_t is not None:
+            # Target accuracy and current matching must hold together in the
+            # last readings before OFF, not in separate settling windows.
+            self._settle_persistent_target(
+                target_t, tolerance_t, settle_s, timeout_s,
+                stop_event=stop_event, progress=progress,
             )
+            matched = True
+        else:
+            matched, magnet_t, output_t, mismatch_a = self._settled_current_match(
+                heater_state=1, action="disable", stop_event=stop_event, progress=progress,
+            )
+        if not matched:
+            raise APS100SafetyError(
+                f"Cannot disable heater: current mismatch is {mismatch_a:.6g} A "
+                f"after settling (limit {self.current_match_tolerance_a:g} A)"
+            )
+        self._raise_if_stopped(stop_event)
         self._write("PSHTR OFF")
         self._confirm_heater_state(
             0,
@@ -1034,6 +1170,7 @@ class APS100AttoDry1000Adapter:
             self.zero_output(
                 tolerance_t=0.002,
                 timeout_s=timeout_s,
+                transition_progress=progress,
                 verify_persistent_switch=True,
                 max_magnet_voltage_v=max_magnet_voltage_v,
                 stop_event=stop_event,
@@ -1042,6 +1179,100 @@ class APS100AttoDry1000Adapter:
                     if progress is not None else None
                 ),
             )
+
+    def _settle_persistent_target(self, target, tolerance, settle_s, timeout_s, *, stop_event=None, progress=None):
+        """Verify a stable target before trapping flux; allow two driven corrections."""
+        target = self._validate_field(target)
+        if not math.isfinite(tolerance) or tolerance <= 0:
+            raise APS100SafetyError("Field tolerance must be positive and finite")
+        if not math.isfinite(settle_s) or settle_s < 0:
+            raise APS100SafetyError("Field settling time must be nonnegative and finite")
+        if not math.isfinite(self.current_match_tolerance_a) or self.current_match_tolerance_a <= 0:
+            raise APS100SafetyError("Current-match tolerance must be positive and finite")
+        # Reserve half of the final acceptance band for switch-time drift.
+        inner = tolerance / 2.0
+        reason = "No stable target readings"
+        for attempt in range(3):
+            deadline = time.monotonic() + max(5.0, settle_s + 5.0)
+            stable_since = None
+            fields, outputs = [], []
+            for _ in range(max(40, int(settle_s / 0.25) + 40)):
+                self._raise_if_stopped(stop_event)
+                status = self._ensure_no_fault()
+                if status.sweep_active or self.get_heater_state() != 1:
+                    raise APS100SafetyError("Persistent target verification requires paused driven mode")
+                field, output = self.get_field_t(), self.get_output_field_t()
+                if not all(math.isfinite(v) for v in (field, output)):
+                    raise APS100SafetyError("Nonfinite field during persistent target verification")
+                mismatch = abs(field - output) / self.coil_constant_t_per_a
+                reason = (f"field {field:.6g} T; supply {output:.6g} T; target {target:g} T; "
+                          f"pre-switch tolerance {inner:g} T; current mismatch {mismatch:g} A")
+                if max(abs(field - target), abs(output - target)) <= inner and mismatch <= self.current_match_tolerance_a:
+                    fields.append(field)
+                    outputs.append(output)
+                    if stable_since is None:
+                        stable_since = time.monotonic()
+                    if max(max(fields) - min(fields), max(outputs) - min(outputs)) > inner / 2.0:
+                        fields, outputs = [field], [output]
+                        stable_since = time.monotonic()
+                    if len(fields) >= 3 and time.monotonic() - stable_since >= settle_s:
+                        return
+                else:
+                    fields, outputs, stable_since = [], [], None
+                if progress is not None:
+                    progress("Verifying persistent target: " + reason, field)
+                if time.monotonic() >= deadline:
+                    break
+                self._sleep(0.25)
+            if attempt == 2:
+                break
+            if mismatch > self.current_match_tolerance_a:
+                raise APS100SafetyError("Cannot correct persistent target: current mismatch after settling; " + reason)
+            self._raise_if_stopped(stop_event)
+            self._ensure_no_fault()
+            if self.get_heater_state() != 1:
+                raise APS100SafetyError("Cannot correct target: heater is not ON")
+            if progress is not None:
+                progress(f"Correcting persistent target ({attempt + 1}/2): " + reason, field)
+            # Use the normal driven ramp and its configured rates, never the
+            # FAST lead-matching path while the switch is open.
+            self.move_to_field(target, tolerance_t=inner / 2.0, timeout_s=timeout_s,
+                               stop_event=stop_event,
+                               progress=(lambda value: progress("correcting field", value)) if progress else None)
+        raise APS100SafetyError("Persistent target not stable after 2 corrections; heater OFF withheld: " + reason)
+
+    def _verify_final_readings(self, target, mode, zero_leads, tolerance, *, stop_event=None, progress=None):
+        deadline = time.monotonic() + 5.0
+        consecutive = 0
+        reason = "No stable readings"
+        for _ in range(20):
+            self._raise_if_stopped(stop_event)
+            self._ensure_no_fault()
+            snapshot = self.read_snapshot()
+            if snapshot.status.quench or snapshot.status.power_module_failure:
+                raise APS100SafetyError("APS100 hardware fault in final readings")
+            if snapshot.heater_on is not (mode == "driven"):
+                raise APS100SafetyError(f"Final APS100 state is not {mode} mode")
+            if snapshot.status.sweep_active:
+                raise APS100SafetyError("Final APS100 sweep is still active")
+            if not all(math.isfinite(v) for v in (snapshot.field_t, snapshot.output_field_t, snapshot.output_current_a)):
+                raise APS100SafetyError("Nonfinite final APS100 readings")
+            reason = ""
+            if abs(snapshot.field_t - target) > abs(tolerance):
+                reason = f"field {snapshot.field_t:.6g} T; target {target:g} T; tolerance {tolerance:g} T"
+            elif mode == "persistent" and zero_leads and (
+                abs(snapshot.output_field_t) > 0.002 or abs(snapshot.output_current_a) > self.current_match_tolerance_a
+            ):
+                reason = f"lead current {snapshot.output_current_a:.6g} A; zero limit {self.current_match_tolerance_a:g} A"
+            consecutive = consecutive + 1 if not reason else 0
+            if consecutive >= 2:
+                return snapshot
+            if progress is not None:
+                progress("Waiting for stable final readings: " + (reason or "confirming second reading"), 0.0)
+            if time.monotonic() >= deadline:
+                break
+            self._sleep(0.25)
+        raise APS100SafetyError("Measurement not ready after final settling: " + reason)
 
     def safe_move_to_field(
         self,
@@ -1091,6 +1322,7 @@ class APS100AttoDry1000Adapter:
                     tolerance_t=tolerance_t,
                     timeout_s=timeout_s,
                     verify_persistent_switch=True,
+                    transition_progress=progress,
                     max_magnet_voltage_v=max_magnet_voltage_v,
                     stop_event=stop_event,
                     progress=(
@@ -1098,7 +1330,7 @@ class APS100AttoDry1000Adapter:
                         if progress is not None else None
                     ),
                 )
-            return self.read_snapshot()
+            return self._verify_final_readings(target, mode, zero_leads, tolerance_t, stop_event=stop_event, progress=progress)
 
         if not heater_on:
             if not persistent_field_confirmed:
@@ -1139,40 +1371,40 @@ class APS100AttoDry1000Adapter:
         else:
             self.pause()
 
-        stable_deadline = time.monotonic() + max(0.0, float(settle_s))
+        # Persistent moves use the joint target/current stability check directly
+        # before OFF; an earlier independent dwell could fail before correction.
+        stable_deadline = time.monotonic() + (max(0.0, float(settle_s)) if mode == "driven" else 0.0)
+        settling_limit = stable_deadline + 5.0
         while time.monotonic() < stable_deadline:
             self._raise_if_stopped(stop_event)
             self._ensure_no_fault()
             field_t = self.get_field_t()
             if abs(field_t - target) > abs(float(tolerance_t)):
-                raise APS100SafetyError(
-                    f"Field drifted to {field_t:.6g} T while settling at {target:.6g} T"
-                )
+                if time.monotonic() >= settling_limit:
+                    raise APS100SafetyError(
+                        f"Field did not settle: {field_t:.6g} T; target {target:.6g} T; tolerance {tolerance_t:g} T"
+                    )
+                stable_deadline = min(settling_limit, time.monotonic() + max(0.25, float(settle_s)))
+            if not math.isfinite(field_t):
+                raise APS100SafetyError("Nonfinite field while settling")
             if progress is not None:
                 progress("field settling", max(0.0, stable_deadline - time.monotonic()))
             self._sleep(min(0.1, max(0.0, stable_deadline - time.monotonic())))
 
         if mode == "persistent":
             self.enter_persistent_mode(
+                target_t=target,
+                tolerance_t=tolerance_t,
+                settle_s=settle_s,
                 zero_leads=zero_leads,
                 timeout_s=timeout_s,
                 max_magnet_voltage_v=max_magnet_voltage_v,
                 stop_event=stop_event,
                 progress=progress,
             )
-        self._ensure_no_fault()
-        snapshot = self.read_snapshot()
-        if abs(snapshot.field_t - target) > abs(float(tolerance_t)):
-            raise APS100SafetyError(
-                f"Final field {snapshot.field_t:.6g} T does not match target {target:.6g} T"
-            )
-        if mode == "driven" and snapshot.heater_on is not True:
-            raise APS100SafetyError("Final APS100 state is not Driven mode")
-        if mode == "persistent" and snapshot.heater_on is not False:
-            raise APS100SafetyError("Final APS100 state is not Persistent mode")
-        if mode == "persistent" and zero_leads and abs(snapshot.output_field_t) > 0.002:
-            raise APS100SafetyError("Persistent mode confirmed, but lead current is not zero")
-        return snapshot
+        return self._verify_final_readings(
+            target, mode, zero_leads, tolerance_t, stop_event=stop_event, progress=progress,
+        )
 
     def close(self, *, pause_if_sweeping: bool = True, return_local: bool = True) -> None:
         with self._lock:
@@ -1432,7 +1664,7 @@ class MockAPS100Adapter:
         while time.monotonic() < deadline:
             if stop_event is not None and stop_event.is_set():
                 self.pause()
-                raise APS100SafetyError("Magnet operation stopped by user")
+                raise APS100OperationCancelled(stop_event)
             value = self.get_output_field_t() if read_output else self.get_field_t()
             if progress:
                 progress(value)
@@ -1457,7 +1689,7 @@ class MockAPS100Adapter:
         **_kwargs,
     ):
         if stop_event is not None and stop_event.is_set():
-            raise APS100SafetyError("Magnet operation stopped by user")
+            raise APS100OperationCancelled(stop_event)
         if verify_persistent_switch:
             if max_magnet_voltage_v is None or float(max_magnet_voltage_v) <= 0:
                 raise APS100SafetyError(
@@ -1541,7 +1773,7 @@ class MockAPS100Adapter:
         del settle_s
         self.take_remote()
         if stop_event is not None and stop_event.is_set():
-            raise APS100SafetyError("Magnet operation stopped by user")
+            raise APS100OperationCancelled(stop_event)
         if self.get_status().sweep_active:
             self.pause()
         mode = str(final_mode).strip().lower()

@@ -86,9 +86,17 @@ class _FakeAPS100Resource:
         elif upper.startswith("RATE?"):
             response = str(self.rates[int(command.split()[1])])
         elif upper.startswith("LLIM "):
-            self.low_kg = float(command.split()[1])
+            value = float(command.split()[1])
+            if value > self.high_kg:
+                self.event_status |= 16
+            else:
+                self.low_kg = value
         elif upper.startswith("ULIM "):
-            self.high_kg = float(command.split()[1])
+            value = float(command.split()[1])
+            if value < self.low_kg:
+                self.event_status |= 16
+            else:
+                self.high_kg = value
         elif upper.startswith("RATE "):
             _, index, value = command.split()
             self.rates[int(index)] = float(value)
@@ -135,7 +143,7 @@ class _InstantSweepAPS100Resource(_FakeAPS100Resource):
                 self.field_kg = self.output_kg
             self.sweep = "pause"
             self.status &= ~1
-        elif upper == "SWEEP ZERO":
+        elif upper.startswith("SWEEP ZERO"):
             self.output_kg = 0.0
             if self.heater:
                 self.field_kg = 0.0
@@ -144,6 +152,46 @@ class _InstantSweepAPS100Resource(_FakeAPS100Resource):
 
 
 class APS100AdapterTests(unittest.TestCase):
+    def test_opposite_limit_failure_never_starts_sweep(self):
+        adapter, fake = self.make_adapter()
+        fake.low_kg, fake.high_kg = 4., 4.5
+        fake.field_kg = 0.
+        fake.block_commands.add("LLIM 0.000000")
+        adapter.connect()
+        adapter.take_remote()
+        with self.assertRaises(APS100CommandBlockedError):
+            adapter.start_sweep_to(.2)
+        self.assertFalse(any(c.startswith("SWEEP ") for c in fake.commands))
+
+    def test_directional_targets_repair_crossed_limits_before_sweep(self):
+        cases = [
+            (-.4509, -.4, 0., -.3997, 0),
+            (.4, .4509, 0., .3997, 0),
+            (.4, .45, 0., .2, 1),
+            (-.45, -.4, 0., -.2, 1),
+            (-.5, .5, -.5, .5, 1),
+            (-.5, .5, .5, -.5, 1),
+            (-.45, -.4, 0., -.4003, 0),
+            (.4, .45, 0., .4003, 0),
+            (.4, .45, 0., 0., 1),
+            (-.45, -.4, 0., 0., 1),
+        ]
+        for low, high, current, target, heater in cases:
+            with self.subTest(low=low, high=high, current=current, target=target, heater=heater):
+                adapter, fake = self.make_adapter()
+                fake.low_kg, fake.high_kg = low * 10, high * 10
+                fake.field_kg = fake.output_kg = current * 10
+                fake.heater = heater
+                adapter.connect()
+                adapter.take_remote()
+                direction = (adapter.start_sweep_to if heater else adapter._start_output_sweep_to)(target)
+                endpoint = fake.high_kg if direction == "up" else fake.low_kg
+                self.assertAlmostEqual(endpoint / 10, target)
+                self.assertLessEqual(fake.low_kg, fake.high_kg)
+                self.assertEqual(fake.event_status, 0)
+                self.assertIn(f"SWEEP {direction.upper()} {'SLOW' if heater else 'FAST'}", fake.commands)
+                self.assertFalse(any(c.startswith("RATE ") for c in fake.commands))
+
     def make_adapter(self, resource=None, **kwargs):
         fake = resource or _FakeAPS100Resource()
         adapter = APS100AttoDry1000Adapter(
@@ -276,11 +324,11 @@ class APS100AdapterTests(unittest.TestCase):
         ):
             fake.heater = 0
             adapter.enter_driven_mode()
-            self.assertAlmostEqual(clock[0], 60.0)
+            self.assertAlmostEqual(clock[0], 60.25)
             self.assertIn("PSHTR ON", fake.commands)
 
             adapter.enter_persistent_mode(zero_leads=False)
-            self.assertAlmostEqual(clock[0], 180.0)
+            self.assertAlmostEqual(clock[0], 180.5)
             self.assertLess(fake.commands.index("PSHTR ON"), fake.commands.index("PSHTR OFF"))
 
     def test_pause_accepts_standby_response_from_firmware_1_67(self):
@@ -382,7 +430,7 @@ class APS100AdapterTests(unittest.TestCase):
 
         match_index = fake.commands.index("SWEEP UP FAST")
         heater_on_index = fake.commands.index("PSHTR ON")
-        zero_index = fake.commands.index("SWEEP ZERO")
+        zero_index = fake.commands.index("SWEEP ZERO SLOW")
         heater_off_index = fake.commands.index("PSHTR OFF")
         self.assertLess(match_index, heater_on_index)
         self.assertLess(heater_on_index, zero_index)

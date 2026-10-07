@@ -3,6 +3,8 @@ import math
 
 from PySide6 import QtCore, QtWidgets
 
+from app.ui.widgets.safe_combo import SafeComboBox
+
 from app.map_view import visible_clim
 
 
@@ -28,7 +30,7 @@ class MapViewRanges:
             row = QtWidgets.QWidget()
             layout = QtWidgets.QHBoxLayout(row)
             layout.setContentsMargins(0, 0, 0, 0)
-            mode = QtWidgets.QComboBox()
+            mode = SafeComboBox()
             mode.addItems(['Auto', 'Fixed'])
             layout.addWidget(mode)
             edits = []

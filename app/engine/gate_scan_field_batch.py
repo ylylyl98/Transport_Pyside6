@@ -10,17 +10,24 @@ import math
 import os
 import time
 import uuid
+from types import SimpleNamespace
 
 from PySide6 import QtCore, QtWidgets
 
 from app.models import LineSweepParams
-from app.run_output import PlannedOutput, field_output_tag, output_blocking_reason, to_jsonable
+from app.run_output import (PlannedOutput, field_output_tag, output_blocking_reason, to_jsonable,
+                            new_run_id, compose_output_stem, planned_output_at,
+                            unique_planned_output, gate_scan_filename_parts)
 from utils.config import cfg
 
 
 def _system_local_iso(*, timespec="seconds"):
     """Return an aware timestamp in the PC's configured local timezone."""
     return datetime.now().astimezone().isoformat(timespec=timespec)
+
+
+class _SnapshotUnavailable(ValueError):
+    """A readback that may recover after a bounded refresh."""
 
 
 @dataclass(frozen=True)
@@ -56,6 +63,7 @@ class GateScanFieldBatch(QtCore.QObject):
     """
 
     state_changed = QtCore.Signal(str, str)
+    continuation_changed = QtCore.Signal(bool, bool, str)
     progress_changed = QtCore.Signal(int, int, str)
     # Structured events are consumed by the B-field tab and also persisted in
     # the series log.  The existing signals remain for compatibility.
@@ -85,8 +93,10 @@ class GateScanFieldBatch(QtCore.QObject):
         self._batch_log_path = None
         self._base_output_dir = None
         self._base_display_stem = None
+        self._field_outputs = {}
         self._review_valid = lambda: True
         self._series_id = None
+        self._resumed_from = None
         self._persistent_confirmation_granted = False
         self._last_transition_log_at = None
         self._last_transition_log_key = None
@@ -97,20 +107,40 @@ class GateScanFieldBatch(QtCore.QObject):
         self._last_snapshot_phase_key = None
         self._cooldown_started_at = None
         self._thermal_wait_context = None
+        self._thermal_manual_required = False
+        self.measurement_temperature_provider = None
         self._last_persistent_field_t = None
         self._move_started_from_persistent = False
         self._temperature_telemetry_path = None
+        self._field_comparison = (self.thermal_safety.new_field_comparison()
+                                  if hasattr(self.thermal_safety, "new_field_comparison") else None)
+        self._comparison_job = None
+        self._comparison_readbacks = {}
+        self._comparison_last_key = None
+        self._comparison_record = None
         self._thermal_observed = {
             "sample_min_k": None, "sample_max_k": None,
             "reservoir_min_k": None, "reservoir_max_k": None,
             "maximum_positive_sample_slope_k_per_min": None,
             "maximum_positive_reservoir_slope_k_per_min": None,
         }
+        self._verification_deadline = None
+        self._verification_reason = ""
+        self._verification_timer = QtCore.QTimer(self)
+        self._verification_timer.setInterval(1000)
+        self._verification_timer.timeout.connect(self._poll_verification)
+        self._measurement_monitor_timer = QtCore.QTimer(self)
+        self._measurement_monitor_timer.setInterval(250)
+        self._measurement_monitor_timer.timeout.connect(self._poll_measurement_thermal)
+        self._dispatching_move = False
+        self._early_move_results = []
         self._cooldown_timer = QtCore.QTimer(self)
         self._cooldown_timer.setInterval(250)
         self._cooldown_timer.timeout.connect(self._poll_cooldown)
-        self._snapshot_max_age_s = max(2.0, float(getattr(cfg.magnet, "poll_interval_s", 0.5)) * 3.0)
+        self._snapshot_max_age_s = float(cfg.lakeshore335.maximum_field_reading_age_s)
         self.magnet.snapshot_updated.connect(self._on_snapshot)
+        if hasattr(self.magnet, "diagnostic_readback"):
+            self.magnet.diagnostic_readback.connect(self._on_diagnostic_readback)
         if hasattr(self.magnet, "connected"):
             self.magnet.connected.connect(self._on_connected)
         if hasattr(self.magnet, "disconnected"):
@@ -222,6 +252,11 @@ class GateScanFieldBatch(QtCore.QObject):
     def _on_magnet_operation(self, name: str):
         if self.active:
             self._emit_activity("MAGNET", f"APS100 operation complete: {name}")
+            if self._state.phase == "stopping" and self.tab.worker is None:
+                if name == "pause":
+                    self._finish_stopped("Stopped; APS100 pause acknowledged")
+                elif name == "failed:pause":
+                    self._fail("APS100 pause failed while stopping")
 
     def _on_magnet_error(self, message: str):
         if self.active:
@@ -232,6 +267,22 @@ class GateScanFieldBatch(QtCore.QObject):
         # before the batch transitions to its terminal state.
         if self.active or self._batch_log_path:
             self._emit_activity("FAULT", str(message))
+        if self.active:
+            self._abort_batch(f"APS100 fault: {message}")
+
+    def _abort_batch(self, message):
+        if not self.active:
+            return
+        if self.tab.worker is not None:
+            self._measurement_monitor_timer.stop()
+            self._pending_failure = str(message)
+            self._state.phase = "stopping"
+            self.tab.stop_run()
+        elif self._state.phase == "moving":
+            self._pending_failure = str(message)
+            self.magnet.pause()
+        else:
+            self._fail(str(message))
 
     def _on_measurement_log(self, message: str):
         if self.active:
@@ -345,7 +396,7 @@ class GateScanFieldBatch(QtCore.QObject):
     def validate_text(self, text: str) -> tuple[float, ...]:
         return self.parse_fields(text)
 
-    def start(self, text: str):
+    def start(self, text: str, *, resume_checkpoint=None):
         if self.active:
             self.error.emit("A Gate Scan B-field batch is already running")
             return False
@@ -362,11 +413,24 @@ class GateScanFieldBatch(QtCore.QObject):
             if not requests:
                 raise ValueError("Add at least one enabled scan condition")
             self._validate_requests(requests)
+            resume = self._validate_resume(resume_checkpoint, requests) if resume_checkpoint else None
+            start_index = resume["next_job_index"] if resume else 0
             self._base_output_dir = self.tab._planned_output.output_dir
-            self._base_display_stem = (
-                f"{self.tab._planned_output.display_stem}_"
-                f"{datetime.now():%Y%m%d_%H%M%S}_{series_id[:12]}"
-            )
+            run_id = new_run_id()
+            series_stem = compose_output_stem(self.tab.save.device_id, "gate_scan",
+                                             requests[0].params.base_name, ("series",), run_id)
+            series_output = unique_planned_output(planned_output_at(self._base_output_dir, series_stem, run_id))
+            self._base_display_stem = series_output.stem
+            self._field_outputs = {}
+            reserved = []
+            for request in requests:
+                for field_t in fields:
+                    signal_chain = request.calibration[2] if request.calibration is not None else None
+                    parts = gate_scan_filename_parts(request.params, signal_chain, field_t)
+                    stem = compose_output_stem(self.tab.save.device_id, "gate_scan", request.params.base_name, parts, run_id)
+                    output = unique_planned_output(planned_output_at(self._base_output_dir, stem, run_id), reserved)
+                    self._field_outputs[(request.condition_index, field_t)] = output
+                    reserved.extend((output.csv_path, output.metadata_path, output.log_path))
             preflight_thermal_hold = self._check_preflight(
                 fields, check_outputs=True, requests=requests
             )
@@ -379,6 +443,12 @@ class GateScanFieldBatch(QtCore.QObject):
             self.error.emit("APS100 is already reserved by another operation")
             return False
         try:
+            # Exclusive ownership prevents competing commands, but temperature
+            # protection still needs fresh field readings throughout cooldown
+            # and measurement. The APS worker serializes polls with moves.
+            polling = getattr(self.magnet, "set_polling_enabled", None)
+            if callable(polling):
+                polling(True)
             required = tuple(dict.fromkeys(device for request in requests for device in request.required_devices))
             reserved = self.tab.begin_field_batch(
                 requests[0].params, required, requests[0].calibration
@@ -395,7 +465,11 @@ class GateScanFieldBatch(QtCore.QObject):
         self._series_id = series_id
         self._persistent_confirmation_granted = True
         initial_phase = "thermal_wait" if preflight_thermal_hold is not None else "moving"
-        self._state = _BatchState(request=requests[0], phase=initial_phase, jobs=jobs)
+        self._thermal_manual_required = False
+        self._resumed_from = os.path.abspath(resume_checkpoint) if resume else None
+        self._state = _BatchState(request=jobs[start_index][0], index=start_index, phase=initial_phase, jobs=jobs,
+                                  results=deepcopy(resume["results"]) if resume else [])
+        self._pending_failure = None
         self._checkpoint_path = os.path.join(
             self._base_output_dir,
             f"{self._base_display_stem}_bfield_batch_checkpoint.json",
@@ -425,8 +499,13 @@ class GateScanFieldBatch(QtCore.QObject):
         except Exception:
             pass
         self._write_checkpoint("running")
+        if getattr(self, "_checkpoint_write_error", None):
+            self._fail(self._checkpoint_write_error)
+            return False
         self.tab.set_batch_locked(True)
         self._emit_activity("RESERVATION", "APS100 reservation acquired")
+        if resume:
+            self._emit_activity("RESUME", f"Verified {start_index} completed jobs; resuming at job {start_index + 1}. Previous files preserved.")
         self._emit_activity(
             "SERIES",
             f"B-field series started with {len(jobs)} jobs",
@@ -446,7 +525,83 @@ class GateScanFieldBatch(QtCore.QObject):
         else:
             self._emit_state("moving", 0)
             self._request_next_move()
-        return True
+        return self._state.phase != "failed"
+
+    @staticmethod
+    def _recipe_values(params):
+        return {key: value for key, value in to_jsonable(params).items()
+                if not key.startswith("output_")}
+
+    def _validate_resume(self, path, requests):
+        """Validate an external checkpoint as data before any instrument mutation."""
+        with open(path, encoding="utf-8") as handle:
+            saved = json.load(handle)
+        if saved.get("schema") != "gate_scan_bfield_batch_checkpoint_v1":
+            raise ValueError("Unsupported Gate Scan checkpoint")
+        if saved.get("status") == "complete":
+            raise ValueError("This series is already complete")
+        fields = list(requests[0].fields_t)
+        if saved.get("fields_t") != fields:
+            raise ValueError("Resume field list differs from the saved series")
+        conditions = saved.get("conditions", [])
+        if len(conditions) != len(requests):
+            raise ValueError("Resume condition count differs from the saved series")
+        results = saved.get("results", [])
+        cursor = saved.get("next_job_index")
+        if type(cursor) is not int or not 0 <= cursor < len(fields) * len(requests) or len(results) != cursor:
+            raise ValueError("Checkpoint completion cursor is inconsistent or has no unfinished jobs")
+        directory = os.path.realpath(self.tab._planned_output.output_dir)
+        if os.path.realpath(os.path.dirname(path)) != directory:
+            raise ValueError("Select the same data output folder as the checkpoint before resuming")
+        for index, (request, condition) in enumerate(zip(requests, conditions), start=1):
+            if self._recipe_values(condition["frozen_gate_scan_params"]) != self._recipe_values(request.params):
+                raise ValueError(f"Resume settings differ for condition {index}; restore the saved settings first")
+            if "calibration" in condition:
+                if condition["calibration"] != to_jsonable(request.calibration):
+                    raise ValueError(f"Resume calibration differs for condition {index}")
+            elif request.calibration is not None:
+                # Older checkpoints retain calibration in completed run metadata.
+                prior = next((item for item in results if item.get("condition_index") == index), None)
+                if prior is None:
+                    raise ValueError(f"Older checkpoint has no calibration evidence for condition {index}")
+                csv = os.path.realpath(prior["path"])
+                if os.path.dirname(csv) != directory:
+                    raise ValueError("Completed file is outside the selected data folder")
+                with open(os.path.splitext(csv)[0] + "_metadata.json", encoding="utf-8") as handle:
+                    metadata = json.load(handle)
+                from app.signal_chain import signal_chain_metadata
+                current = signal_chain_metadata(request.calibration[2])
+                previous = metadata.get("signal_chain", {})
+                for key in ("frequency_hz", "lockin_sensitivity_v", "preamp_sensitivity_a", "lockin_scale", "preamp_gain_v_per_a"):
+                    if previous.get(key) != current.get(key):
+                        raise ValueError(f"Resume {key} differs for condition {index}")
+        for index, result in enumerate(results):
+            expected_field = fields[index // len(requests)]
+            expected_condition = index % len(requests) + 1
+            if result.get("field_t") != expected_field or result.get("condition_index") != expected_condition or result.get("status") != "job_complete":
+                raise ValueError("Checkpoint completed jobs are not a verified contiguous sequence")
+            csv = os.path.realpath(result["path"])
+            if os.path.dirname(csv) != directory or not os.path.isfile(csv) or os.path.getsize(csv) == 0:
+                raise ValueError(f"Completed output is missing, empty, or outside the data folder: job {index + 1}")
+            with open(os.path.splitext(csv)[0] + "_metadata.json", encoding="utf-8") as handle:
+                metadata = json.load(handle)
+            if metadata.get("status") not in {"finished", "complete", "completed"}:
+                raise ValueError(f"Completed output metadata does not confirm success: job {index + 1}")
+            if metadata.get("safe_state", {}).get("ok") is False:
+                raise ValueError(f"Completed output has failed output cleanup: job {index + 1}")
+            if self._recipe_values(metadata["params"]) != self._recipe_values(requests[expected_condition - 1].params):
+                raise ValueError(f"Completed output recipe differs: job {index + 1}")
+        return saved
+
+    def resume(self, checkpoint_path):
+        try:
+            with open(checkpoint_path, encoding="utf-8") as handle:
+                saved = json.load(handle)
+            text = ", ".join(str(float(value)) for value in saved["fields_t"])
+        except Exception as exc:
+            self.error.emit(f"Cannot read resume checkpoint: {exc}")
+            return False
+        return self.start(text, resume_checkpoint=checkpoint_path)
 
     def stop(self):
         if not self.active:
@@ -454,6 +609,9 @@ class GateScanFieldBatch(QtCore.QObject):
         if self._state.stop_requested:
             return
         self._state.stop_requested = True
+        if self._state.phase == "verifying":
+            self._finish_stopped("Stopped while waiting for valid APS100 readings")
+            return
         # Keep an in-flight APS move in the ``moving`` phase until its
         # terminal result arrives; this lets the result handler consume the
         # request exactly once.  Measurement stops retain ``stopping`` so the
@@ -564,22 +722,15 @@ class GateScanFieldBatch(QtCore.QObject):
         return preflight_thermal_hold
 
     def _field_output(self, request, field_t, multi_condition=None):
-        base = self._base_display_stem or self.tab._planned_output.display_stem
-        if multi_condition is None:
-            multi_condition = bool(getattr(request, "condition_index", 0))
-        condition_tag = ""
-        if multi_condition:
-            condition_tag = f"_C{int(request.condition_index) + 1}"
-        stem = f"{base}{condition_tag}_{self.format_field_tag(field_t)}"
+        frozen = self._field_outputs.get((request.condition_index, field_t))
+        if frozen is not None:
+            return frozen
+        run_id = self.tab._planned_output.run_id
+        signal_chain = request.calibration[2] if request.calibration is not None else None
+        parts = gate_scan_filename_parts(request.params, signal_chain, field_t)
+        stem = compose_output_stem(self.tab.save.device_id, "gate_scan", request.params.base_name, parts, run_id)
         directory = self._base_output_dir or self.tab._planned_output.output_dir
-        return PlannedOutput(
-            run_id="batch",
-            output_dir=directory,
-            stem=stem,
-            csv_path=os.path.join(directory, stem + ".csv"),
-            metadata_path=os.path.join(directory, stem + "_metadata.json"),
-            log_path=os.path.join(directory, stem + "_run_log.txt"),
-        )
+        return planned_output_at(directory, stem, run_id)
 
     def _request_next_move(self):
         if self._state.stop_requested:
@@ -598,13 +749,15 @@ class GateScanFieldBatch(QtCore.QObject):
         if (self._last_persistent_field_t is not None and
                 abs(float(self._last_persistent_field_t) - float(target)) <= float(cfg.magnet.field_tolerance_t) and
                 self._snapshot is not None and getattr(self._snapshot, "heater_on", None) is False):
-            self._start_measurement_after_move(self._snapshot, target)
+            self._state.audit = None
+            self._move_started_from_persistent = False
+            self._complete_move_verification(self._snapshot)
             return
         # Fail closed before every operation that may require a new
         # persistent-switch heater cycle.  The separate post-move gate below
         # handles heat released by the cycle that has just completed.
         if self._thermal_armed():
-            decision = self._evaluate_thermal()
+            decision = self._evaluate_thermal(measurement=False)
             if decision is None or not decision.magnet_permission:
                 self._state.phase = "thermal_wait"
                 self._thermal_wait_context = "pre_move"
@@ -627,7 +780,20 @@ class GateScanFieldBatch(QtCore.QObject):
             > float(cfg.magnet.field_tolerance_t)
         )
         self._emit_state(f"Moving to {self.format_field_tag(target)} persistent", self._state.index)
-        self._state.move_request_id = self._call_safe_move(target)
+        # Local validation can emit a terminal result before the call returns
+        # its request ID. Buffer only during dispatch, then apply the usual ID
+        # check so stale/duplicate results still cannot advance this job.
+        self._dispatching_move = True
+        self._early_move_results = []
+        try:
+            self._state.move_request_id = self._call_safe_move(target)
+        except Exception as exc:
+            self._fail(f"APS100 move request failed: {exc}")
+        finally:
+            self._dispatching_move = False
+        results, self._early_move_results = self._early_move_results, []
+        for result in results:
+            self._on_move_result(result)
 
     def _thermal_armed(self):
         return self.thermal_safety is not None and bool(getattr(self.thermal_safety, "is_armed", getattr(self.thermal_safety, "armed", False)))
@@ -638,10 +804,23 @@ class GateScanFieldBatch(QtCore.QObject):
             "stable_recovery_dwell", "minimum_heater_interval",
         }
 
-    def _evaluate_thermal(self):
+    def _evaluate_thermal(self, *, measurement=None):
         if self.thermal_safety is None:
             return None
         snapshot = getattr(self.thermal_safety, "latest_snapshot", None)
+        if measurement is None:
+            measurement = self._thermal_wait_context == "post_move" or self._state.phase == "measuring"
+        if measurement and hasattr(self.thermal_safety, "evaluate_measurement"):
+            target = None
+            if callable(self.measurement_temperature_provider):
+                waiting, target = self.measurement_temperature_provider()
+                if waiting and target is None:
+                    from app.thermal_safety import ThermalDecision, ThermalState
+                    return ThermalDecision(ThermalState.COOLDOWN_HOLD, False,
+                        "Wait until stable is selected; set a sample temperature target first")
+                if not waiting:
+                    target = None
+            return self.thermal_safety.evaluate_measurement(snapshot, sample_target_k=target)
         try:
             return self.thermal_safety.evaluate(snapshot)
         except TypeError:
@@ -652,7 +831,10 @@ class GateScanFieldBatch(QtCore.QObject):
         if callable(refresh):
             refresh()
 
-    def _poll_cooldown(self):
+    def continue_after_temperature_check(self):
+        self._poll_cooldown(manual=True)
+
+    def _poll_cooldown(self, *, manual=False):
         if not self.active or self._state.phase != "thermal_wait":
             self._cooldown_timer.stop()
             return
@@ -662,7 +844,17 @@ class GateScanFieldBatch(QtCore.QObject):
             self._fail("Lake Shore cooldown timeout expired; operator inspection and restart are required")
             return
         decision = self._evaluate_thermal()
+        state = str(getattr(getattr(decision, "state", None), "value", ""))
+        if state in {"WARNING", "TRIPPED", "MONITOR_FAULT", "DISARMED"}:
+            self._thermal_manual_required = True
+        ready = decision is not None and decision.magnet_permission
+        reason = getattr(decision, "reason", "Temperature monitoring unavailable")
+        self.continuation_changed.emit(self._thermal_manual_required, bool(ready), str(reason))
         if decision is not None and decision.magnet_permission:
+            if self._thermal_manual_required and not manual:
+                return
+            self._thermal_manual_required = False
+            self.continuation_changed.emit(False, False, "")
             self._cooldown_timer.stop()
             self._thermal_wait_context = None
             self._emit_activity("RECOVERY", "Lake Shore thermal permission recovered; continuing B-field batch")
@@ -707,18 +899,30 @@ class GateScanFieldBatch(QtCore.QObject):
             refresh()
 
     def _call_safe_move(self, target):
+        self._comparison_readbacks.clear()
+        self._update_field_comparison(
+            getattr(self.thermal_safety, "latest_snapshot", None),
+            phase_override="precharge", target_override=target,
+        )
         result = self.magnet.safe_move_to_field(
             target,
             final_mode="persistent",
             zero_leads=True,
             persistent_field_confirmed=bool(self._persistent_confirmation_granted),
+            use_gate_scan_rate=True,
         )
         return result if isinstance(result, str) else None
 
     def _on_snapshot(self, snapshot):
         self._snapshot = snapshot
         self._snapshot_received_at = datetime.now(timezone.utc)
+        note_field = getattr(self.thermal_safety, "note_magnet_snapshot", None)
+        if callable(note_field):
+            note_field(snapshot)
         if not self.active:
+            return
+        if self._state.phase == "verifying":
+            self._complete_move_verification(snapshot)
             return
         status = getattr(snapshot, "status", None)
         if status is not None and (
@@ -753,16 +957,115 @@ class GateScanFieldBatch(QtCore.QObject):
 
     def on_lakeshore_snapshot(self, snapshot):
         """Receive external LS335 telemetry without touching APS move state."""
-        if self.thermal_safety is not None:
-            self.thermal_safety.evaluate(snapshot)
-            if self.active and self._state.phase == "thermal_wait":
-                self._poll_cooldown()
+        self._update_field_comparison(snapshot)
+        self._check_live_thermal(snapshot)
+        if self.active and self._state.phase == "thermal_wait":
+            self._poll_cooldown()
         self._record_temperature_telemetry(snapshot)
+
+    def _poll_measurement_thermal(self):
+        if not self.active or self._state.phase != "measuring":
+            self._measurement_monitor_timer.stop()
+            return
+        # A stalled/disconnected monitor may deliver no new signal at all.
+        # Re-evaluate the cached timestamps without issuing hardware reads.
+        self._check_live_thermal()
+
+    def _check_live_thermal(self, snapshot=None):
+        if self.thermal_safety is not None:
+            evaluate = (self.thermal_safety.evaluate_continuation
+                        if self._state.phase in {"moving", "measuring"} and hasattr(self.thermal_safety, "evaluate_continuation")
+                        else self.thermal_safety.evaluate)
+            try:
+                decision = evaluate(snapshot)
+            except Exception as exc:
+                if self.active:
+                    self._abort_batch(f"Lake Shore thermal evaluation failed: {exc}; manual restart required")
+                return
+            state = str(getattr(getattr(decision, "state", None), "value", ""))
+            if self.active and (state == "TRIPPED" or
+                                (self._state.phase in {"moving", "measuring"} and state in {"WARNING", "MONITOR_FAULT", "DISARMED"})):
+                self._abort_batch(f"Lake Shore thermal stop: {decision.reason}; manual restart required")
+
+    def _on_diagnostic_readback(self, event):
+        # Copies of existing APS queries, not extra instrument I/O.
+        if not self.active or event.get("request_id") != self._state.move_request_id:
+            return
+        self._comparison_readbacks[event["command"]] = dict(event)
+
+    def _update_field_comparison(self, temperature, **kwargs):
+        # Diagnostic code must never prevent the independent live interlock
+        # from evaluating a temperature sample.
+        try:
+            self._evaluate_field_comparison(temperature, **kwargs)
+        except Exception as exc:
+            self._comparison_record = {
+                "mode": "comparison_only", "state": "MONITOR_FAULT",
+                "reason": f"Comparison failed: {type(exc).__name__}: {exc}",
+                "timestamp": _system_local_iso(),
+            }
+            if self.thermal_safety is not None:
+                self.thermal_safety.latest_field_comparison = None
+
+    def _evaluate_field_comparison(self, temperature, *, phase_override=None, target_override=None):
+        if not self.active or self._field_comparison is None:
+            return
+        if not getattr(self.thermal_safety.config, "field_envelope_comparison_enabled", True):
+            self.thermal_safety.latest_field_comparison = None
+            self._comparison_record = None
+            return
+        from app.devices.aps100_attodry1000_adapter import (
+            field_response_to_tesla, parse_heater_state, decode_status_byte,
+        )
+        now = time.monotonic()
+        key = (self._series_id, self._state.index)
+        if key != self._comparison_job:
+            self._field_comparison.reset()
+            self._comparison_job = key
+            self._comparison_last_key = None
+        magnet = self._snapshot
+        raw = self._comparison_readbacks
+        if self._state.phase == "moving" and phase_override != "precharge":
+            # Never pass a pre-move snapshot off as current telemetry.
+            magnet = None
+            try:
+                field = raw["IMAG?"]
+                status = raw["*STB?"]
+                heater = parse_heater_state(raw["PSHTR?"]["response"])
+                magnet = SimpleNamespace(
+                    field_t=field_response_to_tesla(field["response"], cfg.magnet.coil_constant_t_per_a),
+                    monotonic_s=min(field["monotonic_s"], status["monotonic_s"]),
+                    heater_on=None if heater == 2 else bool(heater),
+                    status=decode_status_byte(status["response"]),
+                )
+            except (KeyError, TypeError, ValueError, RuntimeError):
+                pass
+        target = self.event_context.get("target_t")
+        phase = "operating" if self._state.phase == "moving" else "measurement"
+        if self._state.phase == "thermal_wait" and self._thermal_wait_context == "preflight":
+            phase = "precharge"
+        if phase_override is not None:
+            phase = phase_override
+            target = target_override
+        report = self._field_comparison.evaluate(temperature, magnet, now=now, phase=phase, target_t=target)
+        record = report.to_dict()
+        record.update({"timestamp": _system_local_iso(), "monotonic_s": now,
+                       "context": self.event_context, "readbacks": deepcopy(raw)})
+        self._comparison_record = record
+        self.thermal_safety.latest_field_comparison = report
+        setter = getattr(self.tab, "set_field_thermal_comparison", None)
+        if callable(setter):
+            setter(report)
+        state_key = (report.state, report.ceiling_k, report.trajectory_ceiling_k)
+        if state_key != self._comparison_last_key:
+            self._comparison_last_key = state_key
+            self._emit_activity("THERMAL_COMPARISON", report.display())
 
     def on_lakeshore_disconnected(self):
         if self.thermal_safety is not None:
             self.thermal_safety.latest_snapshot = None
             self.thermal_safety.evaluate(None)
+        self._abort_batch("Lake Shore disconnected; temperature readings unavailable")
 
     def _record_temperature_telemetry(self, snapshot):
         path = self._temperature_telemetry_path
@@ -783,6 +1086,17 @@ class GateScanFieldBatch(QtCore.QObject):
                 "communication_valid": getattr(snapshot, "communication_valid", False),
                 "identity": getattr(snapshot, "identity", None),
             }
+            record["field_envelope_comparison"] = self._comparison_record
+            if self.thermal_safety is not None and hasattr(self.thermal_safety, "evaluate_continuation"):
+                operating = self.thermal_safety.evaluate_continuation(snapshot)
+                record["operating_permission"] = operating.magnet_permission
+                record["operating_reason"] = operating.reason
+                field_observation = getattr(self.thermal_safety, "latest_magnet_snapshot", None)
+                record["live_field_observation"] = {
+                    "field_t": getattr(field_observation, "field_t", None),
+                    "monotonic_s": getattr(field_observation, "monotonic_s", None),
+                }
+            record["magnet_snapshot"] = to_jsonable(self._snapshot) if self._snapshot is not None else None
             for key, value in (("sample_min_k", getattr(snapshot, "sample_temperature_k", None)),
                                ("sample_max_k", getattr(snapshot, "sample_temperature_k", None)),
                                ("reservoir_min_k", getattr(snapshot, "reservoir_temperature_k", None)),
@@ -818,18 +1132,28 @@ class GateScanFieldBatch(QtCore.QObject):
         # A snapshot from a previous physical connection must never authorize
         # persistent movement after reconnecting.
         self._snapshot = None
+        self._comparison_readbacks.clear()
         self._snapshot_received_at = None
         self._persistent_confirmation_granted = False
 
     def _on_disconnected(self, *_args):
         self._snapshot = None
+        self._comparison_readbacks.clear()
         self._snapshot_received_at = None
         self._persistent_confirmation_granted = False
+        if self.active:
+            if self._state.phase == "moving":
+                self._fail("APS100 disconnected during persistent move")
+            else:
+                self._abort_batch("APS100 disconnected during Gate Scan")
 
     def _on_move_result(self, result):
         if not self.active:
             return
         if self._state.phase != "moving":
+            return
+        if self._dispatching_move:
+            self._early_move_results.append(result)
             return
         request_id = result.get("request_id") if isinstance(result, dict) else None
         if not self._state.move_request_id or request_id != self._state.move_request_id:
@@ -837,6 +1161,10 @@ class GateScanFieldBatch(QtCore.QObject):
         # Consume the request before any verification or measurement start so
         # a duplicate/late signal cannot restart a completed job.
         self._state.move_request_id = None
+        self._state.audit = result.get("audit")
+        if getattr(self, "_pending_failure", None):
+            self._fail(self._pending_failure)
+            return
         if self._state.stop_requested:
             self._finish_stopped("Stopped during APS100 persistent move")
             return
@@ -844,14 +1172,27 @@ class GateScanFieldBatch(QtCore.QObject):
             self._fail(f"APS100 persistent move failed: {result.get('error', 'unknown error') if isinstance(result, dict) else result}")
             return
         self._state.audit = result.get("audit")
-        snapshot = result.get("snapshot") or self._snapshot
+        self._complete_move_verification(result.get("snapshot"))
+
+    def _complete_move_verification(self, snapshot):
         try:
             request, target = self._state.jobs[self._state.index]
             self._state.request = request
             self._verify_persistent_snapshot(snapshot, target)
+        except _SnapshotUnavailable as exc:
+            self._verification_reason = str(exc)
+            if self._verification_deadline is None:
+                self._verification_deadline = time.monotonic() + 5.0
+                self._state.phase = "verifying"
+                self._emit_state("Waiting for valid APS100 readings (up to 5 s)", self._state.index)
+                self._emit_activity("WAIT", self._verification_reason)
+                self._verification_timer.start()
+            return
         except Exception as exc:
             self._fail(f"Persistent field verification failed: {exc}")
             return
+        self._verification_timer.stop()
+        self._verification_deadline = None
         self._snapshot = snapshot
         self._last_persistent_field_t = float(target)
         if self.thermal_safety is not None:
@@ -864,7 +1205,7 @@ class GateScanFieldBatch(QtCore.QObject):
             verified_field_t=float(snapshot.field_t),
         )
         if self._thermal_armed():
-            decision = self._evaluate_thermal()
+            decision = self._evaluate_thermal(measurement=True)
             if decision is None or not decision.magnet_permission:
                 self._state.phase = "thermal_wait"
                 self._thermal_wait_context = "post_move"
@@ -881,6 +1222,18 @@ class GateScanFieldBatch(QtCore.QObject):
         self._emit_state("Thermal recovery verified; starting Gate Scan", self._state.index)
         self._start_measurement_after_move(snapshot, target)
 
+    def _poll_verification(self):
+        if not self.active or self._state.phase != "verifying":
+            self._verification_timer.stop()
+            return
+        if time.monotonic() >= self._verification_deadline:
+            self._fail("APS100 readings did not recover within 5 s: " + self._verification_reason)
+            return
+        try:
+            self._request_snapshot_refresh()
+        except Exception as exc:
+            self._verification_reason = f"Status refresh failed: {exc}"
+
     def _start_measurement_after_move(self, snapshot, target):
         """Start one frozen Gate Scan after APS persistent verification."""
         request = self._state.request
@@ -895,6 +1248,8 @@ class GateScanFieldBatch(QtCore.QObject):
         if not self.tab.start_field_batch_measurement(planned, metadata):
             self._fail("Gate Scan could not start after persistent field verification")
             return
+        if self.thermal_safety is not None:
+            self._measurement_monitor_timer.start()
         worker = getattr(self.tab, "worker", None)
         if worker is not None:
             log_signal = getattr(worker, "log", None)
@@ -910,7 +1265,25 @@ class GateScanFieldBatch(QtCore.QObject):
 
     def _verify_persistent_snapshot(self, snapshot, target, require_target=True):
         if snapshot is None:
-            raise ValueError("no final APS100 snapshot was returned")
+            raise _SnapshotUnavailable("No final APS100 snapshot was returned")
+        status = getattr(snapshot, "status", None)
+        if status is not None and (getattr(status, "quench", False) or getattr(status, "power_module_failure", False)):
+            raise ValueError("APS100 reports a quench or power-module fault")
+        timestamp = getattr(snapshot, "monotonic_s", None)
+        if timestamp is not None and (not math.isfinite(float(timestamp)) or
+                                     not 0 <= time.monotonic() - float(timestamp) <= self._snapshot_max_age_s):
+            raise _SnapshotUnavailable("APS100 snapshot is stale")
+        for name in ("field_t", "output_field_t", "output_current_a"):
+            try:
+                valid = math.isfinite(float(getattr(snapshot, name, None)))
+            except (TypeError, ValueError):
+                valid = False
+            if not valid:
+                raise _SnapshotUnavailable(f"APS100 {name} readback is unavailable")
+        if status is None or not isinstance(getattr(status, "sweep_active", None), bool):
+            raise _SnapshotUnavailable("APS100 sweep status is unavailable")
+        if not isinstance(getattr(snapshot, "heater_on", None), bool):
+            raise _SnapshotUnavailable("APS100 heater status is unavailable")
         if require_target and abs(float(snapshot.field_t) - float(target)) > float(cfg.magnet.field_tolerance_t):
             raise ValueError(f"stored field {snapshot.field_t:g} T does not match requested {target:g} T")
         if snapshot.heater_on is not False:
@@ -921,8 +1294,15 @@ class GateScanFieldBatch(QtCore.QObject):
         status = snapshot.status
         if getattr(status, "sweep_active", False):
             raise ValueError("sweep is still active")
-        if not getattr(status, "standby", False):
-            raise ValueError("APS100 is not in standby/persistent state")
+        # APS100 firmware can report Pause / STB=0 with the persistent
+        # switch off. Standby is a supply state, not the switch state.
+        sweep_state = " ".join(str(getattr(snapshot, "sweep_state", "")).lower().split())
+        paused = sweep_state in {"pause", "paused", "sweep paused"}
+        if not getattr(status, "standby", False) and not paused:
+            raise _SnapshotUnavailable(
+                f"APS100 idle state is not confirmed: sweep={sweep_state!r}, "
+                f"standby={getattr(status, 'standby', None)}"
+            )
         if getattr(status, "quench", False) or getattr(status, "power_module_failure", False):
             raise ValueError("APS100 reports a quench or power-module fault")
 
@@ -981,6 +1361,10 @@ class GateScanFieldBatch(QtCore.QObject):
     def _on_measurement_terminal(self, status, detail):
         if not self.active or self._state.phase not in {"measuring", "stopping"}:
             return
+        self._measurement_monitor_timer.stop()
+        if getattr(self, "_pending_failure", None):
+            self._fail(self._pending_failure)
+            return
         if self._state.stop_requested:
             self._finish_stopped(f"Stopped during Gate Scan: {detail}")
             return
@@ -1001,6 +1385,9 @@ class GateScanFieldBatch(QtCore.QObject):
         # A completed job does not mean the whole series is complete.  Keep
         # the checkpoint resumable/nonterminal until the final job succeeds.
         self._checkpoint("job_complete")
+        if getattr(self, "_checkpoint_write_error", None):
+            self._fail(self._checkpoint_write_error)
+            return
         self._emit_activity(
             "COMPLETE",
             f"Gate Scan complete: {detail}",
@@ -1017,11 +1404,13 @@ class GateScanFieldBatch(QtCore.QObject):
         self._write_checkpoint(status)
 
     def _write_checkpoint(self, status, error=""):
+        self._checkpoint_write_error = None
         if self._checkpoint_path is None or self._state.request is None:
             return
         payload = {
             "schema": "gate_scan_bfield_batch_checkpoint_v1",
             "batch_id": self._series_id or self._state.request.batch_id,
+            "resumed_from": self._resumed_from,
             "status": str(status),
             "updated_at": _system_local_iso(timespec="microseconds"),
             "fields_t": list(self._state.request.fields_t),
@@ -1038,9 +1427,12 @@ class GateScanFieldBatch(QtCore.QObject):
                     "index": int(request.condition_index) + 1,
                     "name": request.condition_name,
                     "frozen_gate_scan_params": to_jsonable(request.params),
+                    "calibration": to_jsonable(request.calibration),
                 }
                 for request in dict((job[0].condition_index, job[0]) for job in self._state.jobs).values()
             ],
+            "safe_move_audit": to_jsonable(self._state.audit),
+            "field_envelope_comparison": self._comparison_record,
             "results": list(self._state.results),
             "frozen_gate_scan_params": to_jsonable(self._state.request.params),
         }
@@ -1062,7 +1454,9 @@ class GateScanFieldBatch(QtCore.QObject):
                 json.dump(payload, handle, default=str, indent=2)
                 handle.write("\n")
             os.replace(temporary, self._checkpoint_path)
-        except Exception:
+        except Exception as exc:
+            self._checkpoint_write_error = f"Checkpoint save failed: {exc}"
+            self._emit_activity("ERROR", self._checkpoint_write_error)
             try:
                 if os.path.exists(temporary):
                     os.remove(temporary)
@@ -1070,6 +1464,8 @@ class GateScanFieldBatch(QtCore.QObject):
                 pass
 
     def _emit_state(self, phase, index):
+        if phase != "thermal_wait":
+            self.continuation_changed.emit(False, False, "")
         total = len(self._state.jobs)
         detail = f"Step {min(index + 1, total)} of {total}"
         self.state_changed.emit(str(phase), detail)
@@ -1102,10 +1498,20 @@ class GateScanFieldBatch(QtCore.QObject):
         self._state.phase = "complete"
         self._emit_activity("COMPLETE", "B-field Gate Scan series complete")
         self._write_checkpoint("complete")
+        if self._checkpoint_write_error:
+            message = self._checkpoint_write_error
+            self._state.phase = "failed"
+            self.error.emit(message)
+            self._cleanup()
+            return
         self.finished.emit()
         self._cleanup()
 
     def _cleanup(self):
+        self._measurement_monitor_timer.stop()
+        self._early_move_results = []
+        self._verification_timer.stop()
+        self._verification_deadline = None
         self._cooldown_timer.stop()
         self.tab.finish_field_batch()
         self.tab.set_batch_locked(False)
@@ -1120,7 +1526,9 @@ class GateScanFieldBatch(QtCore.QObject):
         self._persistent_confirmation_granted = False
         self._base_output_dir = None
         self._base_display_stem = None
-        self._temperature_telemetry_path = None
+        self._field_outputs = {}
+        # Keep recording the final temperature trajectory after a stop. The
+        # next explicitly started series selects a new telemetry file.
         self._cooldown_started_at = None
         self._thermal_wait_context = None
         self._last_persistent_field_t = None

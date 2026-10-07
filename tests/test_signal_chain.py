@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 
 class SignalChainTests(unittest.TestCase):
-    def test_same_second_runs_have_distinct_ids(self):
+    def test_run_ids_are_readable_timestamps_without_random_suffixes(self):
         with patch("app.run_output.datetime") as clock:
             clock.datetime.now.return_value.strftime.return_value = "20260905_120000"
             ids = {new_run_id() for _ in range(100)}

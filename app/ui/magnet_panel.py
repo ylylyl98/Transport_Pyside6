@@ -231,6 +231,13 @@ class MagnetPanel(QtWidgets.QWidget):
                 cfg.lakeshore335.reservoir_recovery_temperature_k or "unset",
             )
         )
+        if cfg.lakeshore335.field_envelope_enabled:
+            self.lakeshore_thresholds.setText(
+                f"Magnet: Table 3 field-dependent limits; stop margin {cfg.lakeshore335.field_stop_margin_k:g} K. "
+                f"Sample warning/trip: {cfg.lakeshore335.sample_warning_temperature_k}/{cfg.lakeshore335.sample_trip_temperature_k} K. "
+                f"New-cycle recovery sample/magnet: {cfg.lakeshore335.sample_recovery_temperature_k}/{cfg.lakeshore335.reservoir_recovery_temperature_k} K.")
+        self.lakeshore_envelope = QtWidgets.QLabel("Awaiting temperature and magnet telemetry")
+        self.lakeshore_envelope.setWordWrap(True)
         for label, value in (
             ("Sample temperature", self.lakeshore_sample_temperature),
             ("Reservoir temperature", self.lakeshore_reservoir_temperature),
@@ -239,12 +246,13 @@ class MagnetPanel(QtWidgets.QWidget):
             ("Reading age", self.lakeshore_age),
             ("Sensor status", self.lakeshore_status),
             ("Thermal state", self.lakeshore_state),
-            ("Magnet permission", self.lakeshore_permission),
+            ("New-cycle permission", self.lakeshore_permission),
             ("VISA resource", self.lakeshore_resource),
             ("Connection", self.lakeshore_connection),
             ("Mapping verified", self.lakeshore_mapping),
             ("Interlock armed", self.lakeshore_armed),
             ("Configured thresholds", self.lakeshore_thresholds),
+            ("Last field-envelope comparison", self.lakeshore_envelope),
         ):
             ls_form.addRow(label, value)
         ls_buttons = QtWidgets.QHBoxLayout()
@@ -365,6 +373,13 @@ class MagnetPanel(QtWidgets.QWidget):
         self.lakeshore_connection.setText("Connected" if getattr(snapshot, "connected", False) else "Disconnected")
         if self.thermal_safety is not None:
             decision = self.thermal_safety.evaluate(snapshot)
+            report = getattr(self.thermal_safety, "latest_field_comparison", None)
+            if report is not None:
+                self.lakeshore_envelope.setText(report.display())
+            elif self.thermal_safety.field_envelope_enabled:
+                self.lakeshore_envelope.setText(
+                    "Live Table 3 protection; 0.1 K stop margin; no automatic temperature resume. "
+                    "First-stage temperature not monitored. " + decision.reason)
             self.lakeshore_state.setText(decision.state.value)
             self.lakeshore_permission.setText("Yes" if decision.magnet_permission else "No")
             self.lakeshore_armed.setText("Yes" if self.thermal_safety.is_armed else "No")

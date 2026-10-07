@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import csv
+import math
 import datetime
 import os
 import time
@@ -21,7 +22,7 @@ from app.keithley_modes import KEITHLEY_MODE_VOLTAGE_2W
 from app.models import CoParams, Connections, SaveRoot
 from app.plot_x_axis import record_x_value, resolve_map_x_axis
 from app.result_channels import KEITHLEY_CHANNEL
-from app.run_output import new_run_id, compose_output_stem, update_run_metadata_status, write_run_metadata
+from app.run_output import planned_output_at, unique_planned_output, new_run_id, compose_output_stem, update_run_metadata_status, write_run_metadata
 from app.utils import _frange_inc, safe_ramp
 from app.workers.base import RunStopped, RunWorker
 
@@ -59,6 +60,13 @@ def validate_cosweep_params(params: CoParams) -> None:
     if params.vg_ramp <= 0 or params.vds_ramp <= 0:
         raise ValueError("Gate and Vds ramp steps must be greater than zero.")
     normalize_ratio_target(params.ratio_target)
+    if params.regions:
+        _merged_region_rows(params)
+        if not math.isfinite(params.vds_start) or abs(params.vds_start) > V_LIMIT:
+            raise ValueError(f"Fixed Vds exceeds the {V_LIMIT:g} V limit.")
+        if params.vds_start != params.vds_stop:
+            raise ValueError("Merged gate maps require fixed Vds.")
+        return
     if mode == "Derived":
         if params.axis_slow == "None" or params.axis_fast not in {"Doping", "E-field", "Vds"} or params.axis_slow not in {"Doping", "E-field", "Vds"} or params.axis_fast == params.axis_slow:
             raise ValueError("Derived 2D maps require two distinct axes from Doping, E-field, and Vds.")
@@ -133,20 +141,124 @@ def _derived_pair(params: CoParams, fast_axis: str, fast_value: float, slow_axis
     return values.get("Doping", params.doping_start), values.get("E-field", params.efield_start)
 
 
+def _merged_region_rows(params: CoParams) -> list[tuple[float, list[float]]]:
+    """Union sampled rectangles by slow coordinate, preserving one raster scan."""
+    if params.coordinate_mode != "Raw" or {params.axis_fast, params.axis_slow} != {"Vtg", "Vbg"}:
+        raise ValueError("Additional regions require a raw Vtg/Vbg 2D map.")
+    fields = [f"{axis}_{part}" for axis in ("vtg", "vbg") for part in ("start", "stop", "step")]
+    regions = [{key: getattr(params, key) for key in fields}, *params.regions]
+    rows = {}
+    count = 0
+    for region in regions:
+        sequences = {}
+        for axis in ("vtg", "vbg"):
+            start, stop, step = (float(region[f"{axis}_{part}"]) for part in ("start", "stop", "step"))
+            if not all(math.isfinite(v) for v in (start, stop, step)) or step <= 0:
+                raise ValueError("Region bounds must be finite and steps greater than zero.")
+            if max(abs(start), abs(stop)) > V_LIMIT:
+                raise ValueError(f"Region {axis} exceeds the {V_LIMIT:g} V limit.")
+            intervals = abs(stop - start) / step
+            if intervals > 250000:
+                raise ValueError("Merged map exceeds the 250,000 point limit.")
+            direction = 1 if stop >= start else -1
+            values = [round(start + direction * i * step, 12) for i in range(math.floor(intervals) + 1)]
+            if abs(values[-1] - stop) > 1e-10:
+                values.append(round(stop, 12))
+            else:
+                values[-1] = round(stop, 12)
+            sequences[axis] = values
+        fast = sequences[params.axis_fast.lower()]
+        slow = sequences[params.axis_slow.lower()]
+        if len(fast) * len(slow) > 250000:
+            raise ValueError("Merged map exceeds the 250,000 point limit.")
+        for value in slow:
+            row = rows.setdefault(value, set())
+            before = len(row)
+            row.update(fast)
+            count += len(row) - before
+            if count > 250000:
+                raise ValueError("Merged map exceeds the 250,000 point limit.")
+    fast_start, fast_stop, _ = _raw_axis_values(params, params.axis_fast)
+    slow_start, slow_stop, _ = _raw_axis_values(params, params.axis_slow)
+    return [(value, sorted(rows[value], reverse=fast_stop < fast_start))
+            for value in sorted(rows, reverse=slow_stop < slow_start)]
+
+
+def _region_moves(params, points):
+    """Plan axis-aligned moves wholly inside the rectangle union before running.
+
+    Startup and final zeroing retain their existing independent ramp behavior.
+    """
+    regions = [dict(vtg_start=params.vtg_start, vtg_stop=params.vtg_stop,
+                    vbg_start=params.vbg_start, vbg_stop=params.vbg_stop), *params.regions]
+    fast, slow = params.axis_fast.lower(), params.axis_slow.lower()
+    rectangles = [(min(r[f"{fast}_start"], r[f"{fast}_stop"]),
+                   max(r[f"{fast}_start"], r[f"{fast}_stop"]),
+                   min(r[f"{slow}_start"], r[f"{slow}_stop"]),
+                   max(r[f"{slow}_start"], r[f"{slow}_stop"])) for r in regions]
+
+    def covered(a, b):
+        horizontal = a[1] == b[1]
+        lo, hi = sorted((a[0], b[0]) if horizontal else (a[1], b[1]))
+        intervals = []
+        for x0, x1, y0, y1 in rectangles:
+            if horizontal and y0 - 1e-10 <= a[1] <= y1 + 1e-10:
+                intervals.append((x0, x1))
+            elif not horizontal and x0 - 1e-10 <= a[0] <= x1 + 1e-10:
+                intervals.append((y0, y1))
+        for start, stop in sorted(intervals):
+            if start > lo + 1e-10:
+                break
+            if stop >= lo:
+                lo = stop
+                if lo >= hi - 1e-10:
+                    return True
+        return False
+
+    previous = None
+    for point in points:
+        target = (point["fast_value"], point["slow_value"])
+        point["moves"] = []
+        if previous is None:
+            point["moves"] = [(params.axis_slow, target[1]), (params.axis_fast, target[0])]
+        else:
+            # Prefer the existing slow-first order, then retract fast first.
+            candidates = [[(previous[0], target[1]), target], [(target[0], previous[1]), target]]
+            # A common column can bridge rows whose ends are both outside the overlap.
+            candidates.extend([(x, previous[1]), (x, target[1]), target]
+                               for rect in rectangles for x in rect[:2])
+            for path in candidates:
+                vertices = [previous, *path]
+                if all(covered(a, b) for a, b in zip(vertices, vertices[1:])):
+                    for a, b in zip(vertices, vertices[1:]):
+                        if a[0] != b[0]:
+                            point["moves"].append((params.axis_fast, b[0]))
+                        if a[1] != b[1]:
+                            point["moves"].append((params.axis_slow, b[1]))
+                    break
+            else:
+                raise ValueError("Cannot connect these region rows without leaving the selected regions. Adjust the regions to provide a shared transition corridor.")
+        previous = target
+
+
 def build_cosweep_points(params: CoParams) -> list[dict]:
     """Return the serpentine trajectory, including requested and physical values."""
     validate_cosweep_params(params)
     derived = str(getattr(params, "coordinate_mode", "Raw") or "Raw") == "Derived"
     fast_axis, slow_axis = params.axis_fast, params.axis_slow
-    if derived:
+    if params.regions:
+        fast_seq, slow_seq = [], []
+    elif derived:
         fast_seq = _sequence(*_derived_axis_values(params, fast_axis))
         slow_seq = _sequence(*_derived_axis_values(params, slow_axis))
     else:
         fast_seq = _sequence(*_raw_axis_values(params, fast_axis))
         slow_seq = _sequence(*_raw_axis_values(params, slow_axis)) if slow_axis != "None" else [0.0]
+    rows = _merged_region_rows(params) if params.regions else [(value, fast_seq) for value in slow_seq]
     points = []
-    for pass_idx, slow_value in enumerate(slow_seq):
-        row = list(reversed(fast_seq)) if slow_axis != "None" and pass_idx % 2 else fast_seq
+    for pass_idx, (slow_value, row_values) in enumerate(rows):
+        reverse = slow_axis != "None" and pass_idx % 2
+        row = list(reversed(row_values)) if reverse else row_values
         for fast_value in row:
             if derived:
                 doping, efield = _derived_pair(params, fast_axis, fast_value, slow_axis, slow_value)
@@ -157,7 +269,9 @@ def build_cosweep_points(params: CoParams) -> list[dict]:
                 vbg = fast_value if fast_axis == "Vbg" else (slow_value if slow_axis == "Vbg" else params.vbg_start)
                 vds = fast_value if fast_axis == "Vds" else (slow_value if slow_axis == "Vds" else params.vds_start)
                 doping, efield = gates_to_derived(vtg, vbg, params.ratio, params.ratio_target)
-            points.append({"vtg": float(vtg), "vbg": float(vbg), "vds": float(vds), "doping": float(doping), "efield": float(efield), "fast_value": float(fast_value), "slow_value": float(slow_value), "pass_index": pass_idx, "fast_direction": "reverse" if row is not fast_seq else "forward"})
+            points.append({"vtg": float(vtg), "vbg": float(vbg), "vds": float(vds), "doping": float(doping), "efield": float(efield), "fast_value": float(fast_value), "slow_value": float(slow_value), "pass_index": pass_idx, "fast_direction": "reverse" if reverse else "forward"})
+    if params.regions:
+        _region_moves(params, points)
     return points
 
 
@@ -246,7 +360,7 @@ class CoSweepWorker(RunWorker):
                     summary_parts,
                     ts,
                 )
-                csv_path = os.path.join(self.save.path(), stem + ".csv")
+                csv_path = unique_planned_output(planned_output_at(self.save.path(), stem, ts)).csv_path
             os.makedirs(os.path.dirname(csv_path), exist_ok=True)
             self.log.emit(f"Save -> {csv_path}")
             if self.p.output_metadata_path:
@@ -317,6 +431,10 @@ class CoSweepWorker(RunWorker):
                         if fast_axis == "Vds" or (slow_axis == "Vds" and pass_idx != current_pass):
                             self.set_volt("Vds", point["vds"])
                         current_pass = pass_idx
+                    elif self.p.regions:
+                        for axis, value in point["moves"]:
+                            self.check_abort_pause()
+                            self.set_volt(axis, value)
                     else:
                         if slow_axis != "None" and pass_idx != current_pass:
                             self.set_volt(slow_axis, point["slow_value"])

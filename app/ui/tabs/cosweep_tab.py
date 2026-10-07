@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from PySide6 import QtCore, QtWidgets
 
 from app.constants import GATE_BIAS_RAMP_STEP_T, GATE_BIAS_RAMP_STEP_V, SAFE_RAMP_STEP_T, SAFE_RAMP_STEP_V
@@ -29,6 +30,7 @@ from app.run_output import build_planned_output, planned_output_warning
 from app.signal_chain import SignalChainSnapshot, signal_chain_metadata
 from app.ui.helpers import apply_tooltip, configure_volt_spinbox, flash_button_success, set_standard_input_height, style_form_layout
 from app.ui.tabs.base_tab import BaseMeasurementTab, run_filename_snapshot
+from app.ui.widgets.plot_widget import PlotWidget
 from app.ui.widgets.collapsible_section import CollapsibleSection
 from app.ui.widgets.safe_combo import SafeComboBox
 from app.ui.widgets.safe_spinbox import SafeDoubleSpinBox, SafeSpinBox, TrimmedDoubleSpinBox
@@ -57,6 +59,7 @@ class CoSweepTab(BaseMeasurementTab):
         self.get_signal_chain = get_signal_chain_callable or SignalChainSnapshot
         self.get_ao_items = get_ao_items_callable or (lambda: ["ao0", "ao1"])
         self.p = CoParams()
+        self._regions = []
         self.s_g1 = self.s_g2 = self.s_g3 = self.s_daq = None
         self.worker_thread = None
         self.worker = None
@@ -71,6 +74,13 @@ class CoSweepTab(BaseMeasurementTab):
         self._output_run_id = None
         self._planned_output = None
         super().__init__("START SWEEP", "Fast Axis", "Ids (A)", ["g1", "g2", "g3", "daq"])
+        self.plot_tabs = QtWidgets.QTabWidget()
+        self.preview_plot = PlotWidget()
+        self.preview_plot.btn_plot_mode.hide()
+        self.preview_plot.setMinimumHeight(300)
+        self.plot_splitter.replaceWidget(0, self.plot_tabs)
+        self.plot_tabs.addTab(self.preview_plot, "Sweep Preview")
+        self.plot_tabs.addTab(self.plot, "Measurement")
         self.control_scroll.setMinimumWidth(COSWEEP_PANEL_MIN_WIDTH)
         self.control_scroll.setMaximumWidth(COSWEEP_PANEL_MAX_WIDTH)
         self.main_splitter.setSizes([430, 830])
@@ -251,6 +261,26 @@ class CoSweepTab(BaseMeasurementTab):
         lay_vars.addWidget(self.sp_efield_step, 5, 4)
         ctl_layout.addWidget(grp_vars)
 
+        self.grp_regions = QtWidgets.QGroupBox("Additional regions")
+        region_layout = QtWidgets.QVBoxLayout(self.grp_regions)
+        hint = QtWidgets.QLabel("Axis Values define region 1. Extensions merge into one serpentine scan. Shared points are measured once; exact stops are included (the last step may be smaller).")
+        hint.setWordWrap(True)
+        region_layout.addWidget(hint)
+        self.lst_regions = QtWidgets.QListWidget()
+        self.lst_regions.setMaximumHeight(110)
+        region_layout.addWidget(self.lst_regions)
+        buttons = QtWidgets.QHBoxLayout()
+        self.btn_add_region = QtWidgets.QPushButton("Add")
+        self.btn_edit_region = QtWidgets.QPushButton("Edit")
+        self.btn_remove_region = QtWidgets.QPushButton("Remove")
+        for button in (self.btn_add_region, self.btn_edit_region, self.btn_remove_region):
+            buttons.addWidget(button)
+        region_layout.addLayout(buttons)
+        self.btn_add_region.clicked.connect(lambda: self._edit_region())
+        self.btn_edit_region.clicked.connect(lambda: self._edit_region(self.lst_regions.currentRow()))
+        self.btn_remove_region.clicked.connect(self._remove_region)
+        ctl_layout.addWidget(self.grp_regions)
+
         row_tools = QtWidgets.QHBoxLayout()
         self.btn_preview = QtWidgets.QPushButton("Preview Sweep")
         row_tools.addWidget(self.btn_preview)
@@ -363,9 +393,13 @@ class CoSweepTab(BaseMeasurementTab):
         apply_tooltip("Select which current channel is drawn in the live plot.", lbl_y, self.cbo_y)
 
     def _wire(self):
+        self._preview_timer = QtCore.QTimer(self)
+        self._preview_timer.setSingleShot(True)
+        self._preview_timer.setInterval(300)
+        self._preview_timer.timeout.connect(self._refresh_automatic_preview)
         self.btn_start.clicked.connect(self.start_run)
         self.btn_stop.clicked.connect(self.stop_run)
-        self.btn_preview.clicked.connect(self.on_preview)
+        self.btn_preview.clicked.connect(self._show_preview)
         self.btn_set_vtg.clicked.connect(lambda: self.on_set_generic("Vtg", self.btn_set_vtg))
         self.btn_set_vbg.clicked.connect(lambda: self.on_set_generic("Vbg", self.btn_set_vbg))
         self.btn_set_vds.clicked.connect(lambda: self.on_set_generic("Vds", self.btn_set_vds))
@@ -400,6 +434,7 @@ class CoSweepTab(BaseMeasurementTab):
             self.sp_efield_start, self.sp_efield_stop, self.sp_efield_step,
         ):
             widget.valueChanged.connect(self._update_sweep_summary)
+            widget.valueChanged.connect(self._schedule_preview)
         for widget in (self.cbo_source, self.cbo_fast, self.cbo_slow, self.cbo_sweep_dim, self.cbo_coordinates):
             widget.currentIndexChanged.connect(self.refresh_output_preview)
         self.sp_delay.valueChanged.connect(self._update_sweep_summary)
@@ -408,6 +443,14 @@ class CoSweepTab(BaseMeasurementTab):
         self.cbo_ratio_target.currentIndexChanged.connect(self.refresh_output_preview)
         self.chk_link.toggled.connect(self.refresh_output_preview)
         self.refresh_output_preview()
+
+    def _schedule_preview(self, *_args):
+        if self.worker_thread is None:
+            self._preview_timer.start()
+
+    def _refresh_automatic_preview(self):
+        if self.worker_thread is None:
+            self.on_preview()
 
     def _is_2d_map(self) -> bool:
         return self.cbo_sweep_dim.currentText() == "2D map"
@@ -444,6 +487,8 @@ class CoSweepTab(BaseMeasurementTab):
         return [start] if abs(step) < 1e-9 else _frange_inc(start, stop, step)
 
     def _point_count(self) -> int:
+        if self._active_regions():
+            return len(build_cosweep_points(self._region_params()))
         fast_count = sequence_point_count(*self._axis_values(self.cbo_fast.currentText()))
         if not self._is_2d_map():
             return fast_count
@@ -451,7 +496,10 @@ class CoSweepTab(BaseMeasurementTab):
         return fast_count * slow_count
 
     def _output_summary_parts(self) -> list[str]:
-        return map_filename_parts(self._params_for_summary(), self.filename_signal_chain())
+        parts = map_filename_parts(self._params_for_summary(), self.filename_signal_chain())
+        if self._active_regions():
+            parts.append(f"merged_{1 + len(self._regions)}regions")
+        return parts
 
     def refresh_output_preview(self, *_args):
         measurement = "map_2d" if self._is_2d_map() else "sweep_1d"
@@ -503,6 +551,14 @@ class CoSweepTab(BaseMeasurementTab):
         # the coordinate mode.  Capture both orientations before restoring the
         # widgets so a derived E-field-fast map is not lost to raw defaults.
         settings = get_app_settings()
+        try:
+            saved_regions = json.loads(str(settings.value(f"{self.SETTINGS_PREFIX}/regions", "[]")))
+            self._regions = [{f"{axis}_{part}": float(region[f"{axis}_{part}"])
+                              for axis in ("vtg", "vbg") for part in ("start", "stop", "step")}
+                             for region in saved_regions]
+        except (ValueError, TypeError, KeyError):
+            self._regions = []
+        self._refresh_regions()
         for mode, fallback in self._axis_memory.items():
             if mode == "Raw":
                 fast_choices, slow_choices = {"Vtg", "Vbg", "Vds"}, {"Vtg", "Vbg", "Vds"}
@@ -539,6 +595,7 @@ class CoSweepTab(BaseMeasurementTab):
             self._axis_memory["Derived" if self._is_derived() else "Raw"] = (current_fast, current_slow)
         self._save_tab_widget_settings(self.SETTINGS_PREFIX, self._settings_widgets())
         settings = get_app_settings()
+        settings.setValue(f"{self.SETTINGS_PREFIX}/regions", json.dumps(self._regions))
         for mode, (fast, slow) in self._axis_memory.items():
             settings.setValue(f"{self.SETTINGS_PREFIX}/{'derived' if mode == 'Derived' else 'raw'}_fast_axis", fast)
             settings.setValue(f"{self.SETTINGS_PREFIX}/{'derived' if mode == 'Derived' else 'raw'}_slow_axis", slow)
@@ -854,6 +911,8 @@ class CoSweepTab(BaseMeasurementTab):
         return f"{axis}: fixed {start:g} V"
 
     def _update_sweep_summary(self):
+        self._schedule_preview()
+        self.grp_regions.setEnabled(self._regions_available() and self.worker_thread is None)
         mode = "2D map" if self._is_2d_map() else "1D sweep"
         fast = self.cbo_fast.currentText()
         slow = self.cbo_slow.currentText() if self._is_2d_map() else "None"
@@ -902,6 +961,8 @@ class CoSweepTab(BaseMeasurementTab):
         except Exception:
             points = 0
         order = f"Fast: {fast}; Slow: {slow}" if self._is_2d_map() else f"Sweep: {fast}; fixed axes use Start / Fixed"
+        if self._active_regions():
+            order += f"; {1 + len(self._regions)} regions merged into one scan"
         if self._is_2d_map():
             order += "; alternate slow passes run the fast axis in reverse."
         if self._live_eta is None:
@@ -950,6 +1011,79 @@ class CoSweepTab(BaseMeasurementTab):
         )
         return p
 
+    def _regions_available(self):
+        return not self._is_derived() and self._is_2d_map() and set(self._swept_axes()) == {"Vtg", "Vbg"}
+
+    def _active_regions(self):
+        return [dict(region) for region in self._regions] if self._regions_available() else []
+
+    def _region_params(self):
+        p = CoParams(axis_fast=self.cbo_fast.currentText(), axis_slow=self.cbo_slow.currentText(),
+                     vds_start=self.sp_vds_start.value(), vds_stop=self.sp_vds_start.value(),
+                     ratio=self.sp_ratio.value(), ratio_target=self._ratio_target(), regions=self._active_regions())
+        for axis in ("vtg", "vbg"):
+            for part in ("start", "stop", "step"):
+                setattr(p, f"{axis}_{part}", getattr(self, f"sp_{axis}_{part}").value())
+        return p
+
+    def _refresh_regions(self):
+        self.lst_regions.clear()
+        for index, region in enumerate(self._regions, 2):
+            self.lst_regions.addItem(f"{index}: " + "; ".join(
+                f"{axis}: {region[f'{axis.lower()}_start']:g} → {region[f'{axis.lower()}_stop']:g}, step {region[f'{axis.lower()}_step']:g}"
+                for axis in ("Vtg", "Vbg")))
+
+    def _edit_region(self, index=None):
+        if self.worker_thread is not None or not self._regions_available():
+            return
+        if index is not None and index < 0:
+            return
+        original = self._regions[index] if index is not None else {
+            f"{axis}_{part}": getattr(self, f"sp_{axis}_{part}").value()
+            for axis in ("vtg", "vbg") for part in ("start", "stop", "step")}
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("Edit region" if index is not None else "Add region")
+        form = QtWidgets.QFormLayout(dialog)
+        inputs = {}
+        for key, value in original.items():
+            spin = SafeDoubleSpinBox()
+            axis, part = key.split("_", 1)
+            source = getattr(self, f"sp_{axis}_{part}")
+            configure_volt_spinbox(spin, value, decimals=source.decimals())
+            if key.endswith("step"):
+                spin.setMinimum(10.0 ** -source.decimals())
+            inputs[key] = spin
+            form.addRow(key.replace("_", " ") + " (V)", spin)
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel)
+        form.addRow(buttons)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            return
+        region = {key: spin.value() for key, spin in inputs.items()}
+        p = self._region_params()
+        if index is None:
+            p.regions.append(region)
+        else:
+            p.regions[index] = region
+        try:
+            validate_cosweep_params(p)
+        except Exception as ex:
+            QtWidgets.QMessageBox.warning(self, "Invalid region", str(ex))
+            return
+        self._regions = p.regions
+        self._refresh_regions()
+        self.save_tab_settings()
+        self._update_sweep_summary()
+
+    def _remove_region(self):
+        index = self.lst_regions.currentRow()
+        if index >= 0 and self.worker_thread is None:
+            self._regions.pop(index)
+            self._refresh_regions()
+            self.save_tab_settings()
+            self._update_sweep_summary()
+
     def on_axis_change_label(self):
         if self._plot_records or self.plot.current_plot_mode() == "4-Channel Compare":
             self._redraw_plot()
@@ -967,30 +1101,62 @@ class CoSweepTab(BaseMeasurementTab):
     def _link_plot_available(self) -> bool:
         return bool({"Vtg", "Vbg"} & set(self._swept_axes()))
 
+    def _show_preview(self):
+        self.plot_tabs.setCurrentWidget(self.preview_plot)
+        self.on_preview()
+
     def on_preview(self):
-        self.plot.ax.clear()
+        if self.worker_thread is not None:
+            return
+        self._preview_timer.stop()
+        self.preview_plot.ax.clear()
+        if self._active_regions():
+            try:
+                points = build_cosweep_points(self._region_params())
+                linked = self.chk_link.isChecked()
+                path = [(points[0]["fast_value"], points[0]["slow_value"])]
+                for point in points[1:]:
+                    for axis, value in point["moves"]:
+                        f, s = path[-1]
+                        path.append((value, s) if axis == self.cbo_fast.currentText() else (f, value))
+                if linked:
+                    path = [gates_to_derived(f, s, self.sp_ratio.value(), self._ratio_target())
+                            if self.cbo_fast.currentText() == "Vtg" else
+                            gates_to_derived(s, f, self.sp_ratio.value(), self._ratio_target()) for f, s in path]
+                self.preview_plot.ax.plot([p["doping" if linked else "fast_value"] for p in points],
+                                  [p["efield" if linked else "slow_value"] for p in points], "o", markersize=3)
+                self.preview_plot.ax.plot([p[0] for p in path], [p[1] for p in path], "-", linewidth=0.7,
+                                  color=self.preview_plot.ax.lines[0].get_color())
+                self.preview_plot.ax.set_xlabel(doping_axis_label(self.sp_ratio.value(), self._ratio_target()) if linked else self.cbo_fast.currentText() + " (V)")
+                self.preview_plot.ax.set_ylabel(efield_axis_label(self.sp_ratio.value(), self._ratio_target()) if linked else self.cbo_slow.currentText() + " (V)")
+                self.preview_plot.ax.set_title(f"Merged 2D map: {len(points):,} points, one serpentine scan")
+            except Exception as ex:
+                self.preview_plot.ax.set_title(f"Preview unavailable: {ex}")
+            self.preview_plot.ax.grid(True)
+            self.preview_plot.canvas.draw_idle()
+            return
         if self._is_derived():
             try:
                 points = build_cosweep_points(self._params_for_preview())
             except Exception as ex:
-                self.plot.ax.set_title(f"Preview unavailable: {ex}")
-                self.plot.canvas.draw_idle()
+                self.preview_plot.ax.set_title(f"Preview unavailable: {ex}")
+                self.preview_plot.canvas.draw_idle()
                 return
             xs = [point["fast_value"] for point in points]
             ys = [point["slow_value"] for point in points]
-            self.plot.ax.plot(xs, ys, "o-", markersize=4, linewidth=1.0, color="blue", alpha=0.8)
-            self.plot.ax.set_xlabel(plot_x_axis_label(self.cbo_fast.currentText(), self.sp_ratio.value(), self._ratio_target()))
-            self.plot.ax.set_ylabel(plot_x_axis_label(self.cbo_slow.currentText(), self.sp_ratio.value(), self._ratio_target()))
-            self.plot.ax.set_title(f"Derived 2D Map Preview: {len(points)} pts (coordinated Vtg/Vbg)")
-            self.plot.ax.grid(True)
-            self.plot.canvas.draw_idle()
+            self.preview_plot.ax.plot(xs, ys, "o-", markersize=4, linewidth=1.0, color="blue", alpha=0.8)
+            self.preview_plot.ax.set_xlabel(plot_x_axis_label(self.cbo_fast.currentText(), self.sp_ratio.value(), self._ratio_target()))
+            self.preview_plot.ax.set_ylabel(plot_x_axis_label(self.cbo_slow.currentText(), self.sp_ratio.value(), self._ratio_target()))
+            self.preview_plot.ax.set_title(f"Derived 2D Map Preview: {len(points)} pts (coordinated Vtg/Vbg)")
+            self.preview_plot.ax.grid(True)
+            self.preview_plot.canvas.draw_idle()
             return
         try:
             if self._point_count() > 250000:
                 raise ValueError("The limit is 250,000 points.")
         except ValueError as ex:
-            self.plot.ax.set_title(f"Preview unavailable: {ex}")
-            self.plot.canvas.draw_idle()
+            self.preview_plot.ax.set_title(f"Preview unavailable: {ex}")
+            self.preview_plot.canvas.draw_idle()
             return
         use_ratio = self.chk_link.isChecked() and self._link_plot_available()
         fast_axis = self.cbo_fast.currentText()
@@ -1023,22 +1189,21 @@ class CoSweepTab(BaseMeasurementTab):
                     xs.append(f_val)
                     ys.append(s_val if slow_axis != "None" else 0.0)
 
-        self.plot.ax.plot(xs, ys, "o-", markersize=4, linewidth=1.0, color="blue", alpha=0.6 if use_ratio else 1.0)
+        self.preview_plot.ax.plot(xs, ys, "o-", markersize=4, linewidth=1.0, color="blue", alpha=0.6 if use_ratio else 1.0)
         if use_ratio:
             formula_lines = ratio_formula_text(self._ratio_target()).splitlines()
-            self.plot.ax.set_xlabel(formula_lines[0])
-            self.plot.ax.set_ylabel(formula_lines[1])
-            self.plot.ax.set_title(f"{self.cbo_sweep_dim.currentText()} Preview: {len(xs)} pts")
+            self.preview_plot.ax.set_xlabel(formula_lines[0])
+            self.preview_plot.ax.set_ylabel(formula_lines[1])
+            self.preview_plot.ax.set_title(f"{self.cbo_sweep_dim.currentText()} Preview: {len(xs)} pts")
         else:
-            self.plot.ax.set_xlabel(f"{fast_axis} (V)")
-            self.plot.ax.set_ylabel(f"{slow_axis if slow_axis != 'None' else 'Point order'} (V)")
-            self.plot.ax.set_title(f"{self.cbo_sweep_dim.currentText()} Preview: {len(xs)} pts")
-        self.plot.ax.grid(True)
-        self.plot.canvas.draw_idle()
+            self.preview_plot.ax.set_xlabel(f"{fast_axis} (V)")
+            self.preview_plot.ax.set_ylabel(f"{slow_axis if slow_axis != 'None' else 'Point order'} (V)")
+            self.preview_plot.ax.set_title(f"{self.cbo_sweep_dim.currentText()} Preview: {len(xs)} pts")
+        self.preview_plot.ax.grid(True)
+        self.preview_plot.canvas.draw_idle()
 
     def _params_for_preview(self) -> CoParams:
-        self.collect_params()
-        return self.p
+        return self._params_for_summary()
 
     def on_set_generic(self, name, button):
         if name == "Vtg":
@@ -1067,6 +1232,7 @@ class CoSweepTab(BaseMeasurementTab):
             self.log.appendPlainText(f"{name} not connected")
 
     def collect_params(self):
+        self.p.regions = self._active_regions()
         self.refresh_output_preview()
         self.p.base_name = self.ed_base.text()
         self.p.output_csv_path = self._planned_output.csv_path if self._planned_output else ""
@@ -1168,7 +1334,10 @@ class CoSweepTab(BaseMeasurementTab):
         if not claimed:
             QtWidgets.QMessageBox.warning(self, "Busy", f"Devices already in use: {', '.join(blocked).upper()}")
             return
+        self.on_preview()
         self._plot_records = []
+        self._preview_timer.stop()
+        self.plot_tabs.setCurrentWidget(self.plot)
         self.plot.clear()
         self.set_plot_axis_source(self.p.plot_choice)
         try:

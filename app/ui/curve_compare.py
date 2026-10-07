@@ -9,6 +9,8 @@ import textwrap
 from pathlib import Path
 
 from PySide6 import QtCore, QtWidgets
+
+from app.ui.widgets.safe_combo import SafeComboBox
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
 from matplotlib import colormaps
@@ -165,7 +167,7 @@ class CurveComparePage(QtWidgets.QWidget):
         heading.addWidget(self.expand_files_button)
         history_layout.addLayout(heading)
         filters = QtWidgets.QHBoxLayout()
-        self.date_combo = QtWidgets.QComboBox()
+        self.date_combo = SafeComboBox()
         self.date_combo.addItems(["All dates", "Today"])
         self.search_edit = QtWidgets.QLineEdit()
         self.search_edit.setPlaceholderText("Filename, condition or status")
@@ -212,15 +214,15 @@ class CurveComparePage(QtWidgets.QWidget):
         controls.setContentsMargins(0, 0, 0, 0)
         self._comparison_fields = {}
         self._control_placement = None
-        self.x_combo = QtWidgets.QComboBox()
+        self.x_combo = SafeComboBox()
         self.x_combo.addItems(X_COLUMNS)
-        self.signal_combo = QtWidgets.QComboBox()
+        self.signal_combo = SafeComboBox()
         self.signal_combo.addItems(SIGNAL_COLUMNS)
         for name, (numerator, denominator) in RATIO_SIGNALS.items():
             self.signal_combo.setItemData(self.signal_combo.findText(name),
                 f"{numerator} / {denominator}; dimensionless. Zero Drive or missing values stay blank.",
                 QtCore.Qt.ItemDataRole.ToolTipRole)
-        self.direction_combo = QtWidgets.QComboBox()
+        self.direction_combo = SafeComboBox()
         self.direction_combo.addItems(["All", "forward", "backward", "unknown"])
         for title, widget in (("X", self.x_combo), ("Signal", self.signal_combo), ("Direction", self.direction_combo)):
             field = QtWidgets.QWidget()
@@ -237,7 +239,7 @@ class CurveComparePage(QtWidgets.QWidget):
         self.display_controls = QtWidgets.QWidget()
         display_controls = QtWidgets.QHBoxLayout(self.display_controls)
         display_controls.setContentsMargins(0, 0, 0, 0)
-        self.normalization_combo = QtWidgets.QComboBox()
+        self.normalization_combo = SafeComboBox()
         self.normalization_combo.setAccessibleName("Comparison normalization")
         for mode, title in NORMALIZATION_MODES.items():
             self.normalization_combo.addItem(title, mode)
@@ -263,7 +265,7 @@ class CurveComparePage(QtWidgets.QWidget):
         self.auto_axes_check.setToolTip("Use the selected map's saved fast/slow axes; infer a grid for older CSVs. Choosing X or Map Y manually turns this off.")
         self.auto_axes_check.toggled.connect(self._selection_changed)
         self.colormap_label = QtWidgets.QLabel("Color")
-        self.colormap_combo = QtWidgets.QComboBox()
+        self.colormap_combo = SafeComboBox()
         preferred = ["RdBu_r", "RdBu", "viridis", "plasma", "inferno", "magma", "cividis", "coolwarm", "seismic", "gray"]
         self.colormap_combo.addItems(preferred + sorted(set(colormaps) - set(preferred)))
         self.colormap_combo.setAccessibleName("Map colormap")
@@ -280,12 +282,12 @@ class CurveComparePage(QtWidgets.QWidget):
         self.map_axes_row.setColumnStretch(1, 2)
         map_form = QtWidgets.QHBoxLayout()
         self.map_options_row = map_form
-        self.map_file_combo = QtWidgets.QComboBox()
+        self.map_file_combo = SafeComboBox()
         self.map_file_combo.setSizeAdjustPolicy(QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self.map_file_combo.setMinimumContentsLength(12)
-        self.map_y_combo = QtWidgets.QComboBox()
+        self.map_y_combo = SafeComboBox()
         self.map_y_combo.addItems(["Vbg", "Vtg", "Vds", "Doping", "E-field", "None (1D)"])
-        self.pass_combo = QtWidgets.QComboBox()
+        self.pass_combo = SafeComboBox()
         self.pass_combo.addItem("All rows")
         self.map_ranges = MapViewRanges(self)
         for row, key in enumerate(('map_xlim', 'map_ylim', 'clim')):
@@ -319,12 +321,12 @@ class CurveComparePage(QtWidgets.QWidget):
         self.cut_axis_row = QtWidgets.QWidget()
         cut_row = QtWidgets.QHBoxLayout(self.cut_axis_row)
         cut_row.setContentsMargins(0, 0, 0, 0)
-        self.fixed_axis_combo = QtWidgets.QComboBox()
+        self.fixed_axis_combo = SafeComboBox()
         self.fixed_axis_combo.setSizeAdjustPolicy(QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self.fixed_axis_combo.setMinimumContentsLength(11)
         self.fixed_axis_combo.setAccessibleName("Line cut direction: fix Y or fix X")
         self.fixed_axis_combo.currentIndexChanged.connect(self._map_fixed_axis_changed)
-        self.fixed_value_combo = QtWidgets.QComboBox()
+        self.fixed_value_combo = SafeComboBox()
         self.fixed_value_combo.setSizeAdjustPolicy(QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self.fixed_value_combo.setMinimumContentsLength(8)
         self.fixed_value_combo.setEditable(True)

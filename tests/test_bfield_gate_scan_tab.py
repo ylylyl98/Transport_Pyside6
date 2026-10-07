@@ -11,6 +11,23 @@ from app.ui.tabs.bfield_gate_scan_tab import BFieldGateScanTab
 
 
 class BFieldGateScanTabTests(unittest.TestCase):
+    def test_checkpoint_restore_is_in_more_menu_and_primary_button_continues(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        connections = Connections()
+        tab = BFieldGateScanTab(SaveRoot(base="."), connections, DeviceManager(connections))
+        self.assertFalse(hasattr(tab, "btn_continue_temperature"))
+        self.assertFalse(hasattr(tab, "btn_resume_series"))
+        self.assertIn(tab.resume_series_action, tab.btn_series_more.menu().actions())
+        controller = SimpleNamespace(active=True, continue_after_temperature_check=Mock(), start=Mock())
+        tab._bfield_orchestrator = controller
+        tab.run_panel.set_running(True)
+        tab.run_panel.set_continuation(True, True)
+        tab.btn_start.click()
+        controller.continue_after_temperature_check.assert_called_once()
+        controller.start.assert_not_called()
+        tab.deleteLater()
+
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
@@ -57,6 +74,33 @@ class BFieldGateScanTabTests(unittest.TestCase):
         self.assertIsNone(tab.exp_bfield_batch)
         tab.deleteLater()
 
+    def test_pinned_save_feedback_identifies_condition_and_updates_row(self):
+        tab = self._fresh_raw_tab()
+        tab.condition_name.setText("E-field 7")
+        tab.condition_add.click()
+        self.assertEqual(tab.condition_heading.text(), "Editing #2 · E-field 7")
+        self.assertEqual(tab.condition_update.text(), "Save #2")
+        tab.sp_raw_vtg_stop.setValue(3)
+        self.assertEqual(tab.condition_edit_status.text(), "Unsaved changes")
+        self.assertEqual(tab._conditions[1].params.raw_vtg_stop, 1)
+        tab.condition_update.click()
+        self.assertEqual(tab.condition_edit_status.text(), "✓ #2 saved")
+        self.assertEqual(tab._conditions[1].params.raw_vtg_stop, 3)
+        self.assertIn("✓ Saved", tab.condition_table.item(1, 1).text())
+        self.assertEqual(tab.condition_table.selectionModel().selectedRows()[0].row(), 1)
+        self.assertFalse(tab.control_widget.isAncestorOf(tab.condition_update))
+        self.assertTrue(tab.condition_header.isAncestorOf(tab.condition_update))
+        tab.sp_raw_vtg_stop.setValue(4)
+        self.assertEqual(tab.condition_edit_status.text(), "Unsaved changes")
+        self.assertNotIn("Saved", tab.condition_table.item(1, 1).text())
+        tab.set_batch_locked(True)
+        self.assertFalse(tab.condition_update.isEnabled())
+        tab._update_condition()
+        self.assertEqual(tab._conditions[1].params.raw_vtg_stop, 3)
+        tab.set_batch_locked(False)
+        self.assertTrue(tab.condition_update.isEnabled())
+        tab.deleteLater()
+
     def _fresh_raw_tab(self):
         get_app_settings().remove("tabs/bfield_gate_scan")
         connections = Connections()
@@ -93,7 +137,8 @@ class BFieldGateScanTabTests(unittest.TestCase):
 
         self.assertNotIn("Modified", tab.condition_table.item(0, 1).text())
         self.assertEqual(tab.condition_table.item(1, 1).text(), "Condition 2")
-        self.assertEqual(tab.condition_edit_status.text(), "Editing saved condition: Condition 2")
+        self.assertEqual(tab.condition_edit_status.text(), "No unsaved changes")
+        self.assertEqual(tab.condition_heading.text(), "Editing #2 · Condition 2")
         tab.deleteLater()
 
     def test_start_series_is_blocked_until_modified_condition_is_saved(self):
@@ -113,18 +158,38 @@ class BFieldGateScanTabTests(unittest.TestCase):
         tab.bfield_fields.setText("0")
         tab.sp_raw_vtg_stop.setValue(2.0)
 
-        tab.start_series()
+        with patch("app.ui.tabs.bfield_gate_scan_tab.QtWidgets.QMessageBox.open") as show_warning:
+            tab.start_series()
+        show_warning.assert_called_once()
+        self.assertIn("Save #1", tab._series_error_dialog.text())
+        self.assertIn("Save #1", tab.run_panel.lbl_status.text())
+        self.assertEqual(tab.run_panel.lbl_status.property("state"), "error")
+        self.assertTrue(tab.run_panel.lbl_status.wordWrap())
+        self.assertIn("[ERROR]", tab.log.toPlainText())
 
         self.assertEqual(orchestrator.starts, [])
         self.assertIn("Cannot start", tab.bfield_status.text())
-        self.assertIn("Update selected", tab.bfield_status.text())
+        self.assertIn("Save #1", tab.bfield_status.text())
         self.assertEqual(tab._conditions[0].params.raw_vtg_stop, 1.0)
 
         tab.condition_update.click()
+        self.assertNotIn("Cannot start", tab.run_panel.lbl_status.text())
+        self.assertEqual(tab.condition_edit_status.text(), "✓ #1 saved")
         tab.start_series()
 
         self.assertEqual(orchestrator.starts, ["0"])
         self.assertNotIn("Cannot start", tab.bfield_status.text())
+        self.assertNotIn("Cannot start", tab.run_panel.lbl_status.text())
+        tab.deleteLater()
+
+    def test_batch_errors_are_visible_without_blocking_cleanup(self):
+        tab = self._fresh_raw_tab()
+        with patch("app.ui.tabs.bfield_gate_scan_tab.QtWidgets.QMessageBox.open") as show_warning:
+            tab._on_batch_error("APS100 telemetry is stale; refresh telemetry and try again")
+        show_warning.assert_called_once()
+        self.assertIn("telemetry is stale", tab.run_panel.lbl_status.text())
+        self.assertIn("refresh telemetry", tab._series_error_dialog.text())
+        self.assertEqual(tab.run_panel.lbl_status.property("state"), "error")
         tab.deleteLater()
 
     def test_bfield_preview_updates_for_ranges_and_elides_long_series(self):

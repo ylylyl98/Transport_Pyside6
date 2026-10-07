@@ -634,6 +634,9 @@ class GateScanTab(BaseMeasurementTab):
     def _output_summary_parts(self) -> list[str]:
         params = LineSweepParams(
             mode="Raw" if self.rad_mode_raw.isChecked() else "Derived",
+            vds_source=self.cbo_source.currentText(),
+            ao_channel=(int(self.cbo_source.currentText().split()[-1].replace("ao", ""))
+                        if self.cbo_source.currentText().startswith("NI DAQ ") else 0),
             sweep_both_ways=self.chk_sweep_bidirectional.isChecked(),
             derived_axis="Doping" if self.rad_sweep_doping.isChecked() else "E-field",
             derived_start=self.sp_derived_start.value(), derived_stop=self.sp_derived_stop.value(),

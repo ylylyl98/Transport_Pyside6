@@ -56,20 +56,20 @@ class APS100HeaterTransitionTests(unittest.TestCase):
             parse_heater_state("9")
 
     def test_heater_on_waits_for_2_2_1_before_warm_dwell(self):
-        adapter = _HeaterAdapter([0, 2, 2, 1], warm=60.0)
+        adapter = _HeaterAdapter([0, 0, 0, 2, 2, 1], warm=60.0)
         adapter.enter_driven_mode(timeout_s=0.1)
         self.assertEqual(adapter.events[0], "pause")
         self.assertEqual(adapter.events[1], "PSHTR ON")
         self.assertEqual(adapter.events[2], ("heater warming", 60.0))
 
     def test_heater_off_waits_for_2_0_before_cool_then_zero(self):
-        adapter = _HeaterAdapter([1, 2, 0], cool=120.0)
+        adapter = _HeaterAdapter([1, 1, 1, 2, 0], cool=120.0)
         adapter.zero_output = lambda **_kwargs: adapter.events.append("zero")
         adapter.enter_persistent_mode(zero_leads=True, timeout_s=0.1)
         self.assertEqual(adapter.events, ["PSHTR OFF", ("heater cooling", 120.0), "zero"])
 
     def test_persistent_transition_timeout_never_cools_or_zeros(self):
-        adapter = _HeaterAdapter([1] + [2] * 100, cool=120.0, timeout=0.1)
+        adapter = _HeaterAdapter([1, 1, 1] + [2] * 100, cool=120.0, timeout=0.1)
         adapter.zero_output = lambda **_kwargs: adapter.events.append("zero")
         with self.assertRaises(APS100TimeoutError):
             adapter.enter_persistent_mode(zero_leads=True, timeout_s=0.1)

@@ -63,6 +63,8 @@ class DualGateParams:
 
 @dataclass
 class CoParams:
+    # Additional raw Vtg/Vbg rectangles, merged with the primary axis ranges.
+    regions: list[dict[str, float]] = field(default_factory=list)
     base_name: str = "dual_gate_cosweep"
     output_csv_path: str = ""
     output_metadata_path: str = ""

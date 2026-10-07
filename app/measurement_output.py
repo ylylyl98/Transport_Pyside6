@@ -35,5 +35,6 @@ def gate_scan_filename_parts(params: LineSweepParams, signal_chain) -> list[str]
             parts.append(f"Vds{params.derived_vds_fixed:g}V")
         parts.append(f"r{params.derived_ratio_target}{params.derived_ratio:g}")
     parts.append("RT" if params.sweep_both_ways else "Fwd")
-    parts.extend(signal_chain_filename_parts(signal_chain))
+    if signal_chain is not None:
+        parts.extend(signal_chain_filename_parts(signal_chain))
     return parts

@@ -235,6 +235,8 @@ class MagnetConfig:
     maximum_field_t: float = 9.0
     maximum_current_a: float = 44.27
     maximum_rate_a_per_s: float = 0.0343
+    # Point-to-point Gate Scan rate, commissioned for 0-40 A.
+    gate_scan_rate_a_per_s: float = 0.0343
     mcd_max_field_t: float = 8.0
     safe_control_max_field_t: float = 8.0
     heater_warm_s: float = 60.0
@@ -266,6 +268,17 @@ class LakeShore335Config:
     the operator before this becomes an active gate.
     """
     enabled: bool = True
+    field_envelope_enabled: bool = True
+    # Application margin, not a manufacturer-specified critical temperature.
+    field_stop_margin_k: float = 0.1
+    maximum_field_reading_age_s: float = 5.0
+    # Optional shadow diagnostics are separate from the live field envelope.
+    field_envelope_comparison_enabled: bool = False
+    field_warning_margin_k: Optional[float] = None
+    field_recovery_hysteresis_k: Optional[float] = None
+    field_recovery_dwell_s: Optional[float] = None
+    field_hold_timeout_s: Optional[float] = None
+    field_maximum_recoveries: Optional[int] = None
     verified_channel_mapping: bool = True
     visa_resource: str = "ASRL6::INSTR"
     sample_channel: str = "B"

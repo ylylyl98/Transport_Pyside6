@@ -101,7 +101,7 @@ class TransportResponsivenessTests(unittest.TestCase):
             status=NS(quench=False, power_module_failure=False, faulted=False, **status)))
         self.lake.publish(NS(monotonic_s=stamp, connected=True, communication_valid=True))
 
-    def test_recovery_requires_pause_and_three_fresh_pairs_then_resumes_backward(self):
+    def test_recovery_requires_pause_and_three_fresh_pairs_then_requires_manual_resume_backward(self):
         c = self.controller
         c._begin_monitor_hold("stale Lake Shore")
         self.publish()
@@ -113,6 +113,8 @@ class TransportResponsivenessTests(unittest.TestCase):
         for _ in range(3):
             self.publish()
             c._check_monitor_recovery()
+        self.assertEqual(self.magnet.events, ["pause"])
+        c.continue_after_temperature_check()
         self.assertEqual(self.magnet.events[-1], ("sweep", -0.1))
         self.assertEqual(c._leg_index, 1)
         self.assertIsNone(c._monitor_hold)
@@ -155,6 +157,8 @@ class TransportResponsivenessTests(unittest.TestCase):
         self.assertEqual(self.magnet.events, ["pause"])
         self.decision = NS(magnet_permission=True, state=NS(value="SAFE"), reason="safe")
         c._resume_after_thermal_recovery()
+        self.assertEqual(self.magnet.events, ["pause"])
+        c.continue_after_temperature_check()
         self.assertEqual(self.magnet.events[-1], ("sweep", -0.1))
 
     def test_stop_clears_hold_and_late_reads_cannot_resume(self):

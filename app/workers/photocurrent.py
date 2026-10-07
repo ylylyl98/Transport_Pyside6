@@ -17,7 +17,7 @@ from app.constants import (
 )
 from app.models import Connections, PhotocurrentBiasCondition, PhotocurrentParams, SaveRoot
 from app.result_channels import KEITHLEY_CHANNEL
-from app.run_output import new_run_id, compose_output_stem, update_run_metadata_status, write_run_metadata
+from app.run_output import planned_output_at, unique_planned_output, new_run_id, compose_output_stem, update_run_metadata_status, write_run_metadata
 from app.signal_chain import signal_chain_filename_parts
 from app.utils import safe_ramp
 from app.workers.base import RunStopped, RunWorker
@@ -126,7 +126,7 @@ class PhotocurrentWorker(RunWorker):
                     ts,
                     "PC",
                 )
-                csv_path = os.path.join(self.save.path(), stem + ".csv")
+                csv_path = unique_planned_output(planned_output_at(self.save.path(), stem, ts)).csv_path
             os.makedirs(os.path.dirname(csv_path), exist_ok=True)
             condition_paths = self.condition_csv_paths(csv_path, conditions, self.p.use_vds)
             self.log.emit(f"Save -> {len(condition_paths)} condition CSV file(s) in {os.path.dirname(csv_path)}")

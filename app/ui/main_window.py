@@ -63,6 +63,10 @@ class MainWindow(QtWidgets.QMainWindow):
         # B-field workflow; it is deliberately not shared with the 2100 path.
         self.lakeshore335 = LakeShore335Controller(parent=self)
         self.thermal_safety = ThermalSafetyEvaluator(cfg.lakeshore335)
+        self.magnet1000._worker.thermal_source = self.thermal_safety
+        self.magnet1000._worker.thermal_field_updated.connect(self.thermal_safety.note_magnet_snapshot)
+        self.magnet1000.snapshot_updated.connect(self.thermal_safety.note_magnet_snapshot)
+        self.magnet1000.disconnected.connect(lambda: self.thermal_safety.note_magnet_snapshot(None))
         self.magnet_panel = MagnetPanel(self.magnet1000, self.magnet2100, self, self.lakeshore335, self.thermal_safety)
         self.conn_dock = ConnDock()
         self.conn_dock.load_settings()
@@ -160,6 +164,7 @@ class MainWindow(QtWidgets.QMainWindow):
             thermal_safety=self.thermal_safety,
             lakeshore_controller=self.lakeshore335,
         )
+        self.gate_scan_field_batch.measurement_temperature_provider = self.sample_temperature_bar.measurement_settings
         self.lakeshore335.snapshot_updated.connect(self.gate_scan_field_batch.on_lakeshore_snapshot)
         self.lakeshore335.snapshot_updated.connect(self.bfield_transport_controller.on_lakeshore_snapshot)
         self.lakeshore335.snapshot_updated.connect(self.tab_bfield_transport.refresh_hardware_readiness)

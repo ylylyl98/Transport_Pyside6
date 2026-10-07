@@ -113,6 +113,11 @@ class BFieldTransportTab(BaseMeasurementTab):
         return spin
 
     def _build_control_panel(self, ctl_layout):
+        self.restoration_banner = QtWidgets.QLabel()
+        self.restoration_banner.setWordWrap(True)
+        self.restoration_banner.setStyleSheet("background:#fff0ed;color:#9c2016;padding:8px;font-weight:600;border:1px solid #c94936;")
+        self.restoration_banner.hide()
+        ctl_layout.addWidget(self.restoration_banner)
         ctl_layout.addWidget(SectionHeader("1. Sweep range"))
         group = QtWidgets.QGroupBox("Driven-mode sweep")
         form = QtWidgets.QFormLayout(group)
@@ -777,6 +782,7 @@ class BFieldTransportTab(BaseMeasurementTab):
             params.base_name,
             transport_output_summary_parts(params, signal_chain),
             run_id=self._output_run_id,
+            freeze=self._output_run_id is not None,
         )
         self._output_run_id = planned.run_id
         self._planned_output = planned
@@ -943,7 +949,7 @@ class BFieldTransportTab(BaseMeasurementTab):
             try:
                 decision = thermal.evaluate(thermal.latest_snapshot)
                 if decision is None or not bool(getattr(decision, "magnet_permission", False)):
-                    blockers.append("Lake Shore safety hold")
+                    blockers.append("Lake Shore safety hold: " + str(getattr(decision, "reason", "no decision")))
             except Exception:
                 blockers.append("Lake Shore safety evaluation failed")
         self.run_panel.set_start_available(not blockers)
@@ -955,6 +961,9 @@ class BFieldTransportTab(BaseMeasurementTab):
 
     def start_run(self):
         """Validate and freeze the recipe before a transport controller runs it."""
+        if self._execution_controller is not None and self._execution_controller.active:
+            self._execution_controller.continue_after_temperature_check()
+            return False
         if self._locked:
             return False
         try:
@@ -994,10 +1003,29 @@ class BFieldTransportTab(BaseMeasurementTab):
                     lambda message: self.set_device_status("aps100", "err", str(message))
                 )
         self._sync_aps100_status()
+        if hasattr(controller, "restoration_warning"):
+            controller.restoration_warning.connect(self._show_restoration_warning)
         controller.error.connect(lambda message: self.lbl_preview.setText(f"Transport error: {message}"))
         controller.state_changed.connect(self._on_transport_state_changed)
+        if hasattr(controller, "continuation_changed"):
+            controller.continuation_changed.connect(self.run_panel.set_continuation)
         controller.finished.connect(self._on_transport_finished)
         controller.stopped.connect(self._on_transport_stopped)
+
+    def _show_restoration_warning(self, message):
+        self.restoration_banner.setText("Instrument settings need attention: " + str(message))
+        self.restoration_banner.setVisible(bool(message))
+        if message:
+            self.set_status("APS100 settings restoration failed - see warning", "error")
+            dialog = getattr(self, "_restoration_dialog", None)
+            if dialog is None:
+                dialog = QtWidgets.QMessageBox(self)
+                dialog.setWindowTitle("APS100 settings need attention")
+                dialog.setIcon(QtWidgets.QMessageBox.Icon.Warning)
+                dialog.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+                self._restoration_dialog = dialog
+            dialog.setText(str(message))
+            dialog.open()  # Cleanup must continue while the notice is visible.
 
     def _on_transport_state_changed(self, phase, detail):
         """Render controller phases in the run panel as well as the preview."""

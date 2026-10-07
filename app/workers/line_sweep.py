@@ -19,7 +19,7 @@ from app.gate_transform import derived_to_gates, gates_to_derived
 from app.models import Connections, LineSweepParams, SaveRoot
 from app.plot_x_axis import record_x_value, resolve_gate_scan_x_axis
 from app.result_channels import KEITHLEY_CHANNEL
-from app.run_output import new_run_id, compose_output_stem, update_run_metadata_status, write_run_metadata
+from app.run_output import planned_output_at, unique_planned_output, new_run_id, compose_output_stem, update_run_metadata_status, write_run_metadata
 from app.measurement_output import gate_scan_filename_parts
 from app.utils import safe_ramp
 from app.workers.base import RunStopped, RunWorker
@@ -80,7 +80,7 @@ class LineSweepWorker(RunWorker):
                     gate_scan_filename_parts(self.p, self.signal_chain),
                     ts,
                 )
-                csv_path = os.path.join(self.save.path(), stem + ".csv")
+                csv_path = unique_planned_output(planned_output_at(self.save.path(), stem, ts)).csv_path
             os.makedirs(os.path.dirname(csv_path), exist_ok=True)
             self.log.emit(f"Save -> {csv_path}")
             if self.p.output_metadata_path:
@@ -165,15 +165,12 @@ class LineSweepWorker(RunWorker):
                     self._run_trajectory_pass(f, w, backward_traj, "backward", len(forward_traj), grand_total)
             run_status = "finished"
             run_detail = csv_path
-            self.finished.emit(csv_path)
         except RunStopped as ex:
             run_status = "stopped"
             run_detail = f"{ex}. Partial data saved to: {csv_path}" if csv_path else str(ex)
-            self.stopped.emit(run_detail)
         except Exception as ex:
             run_status = "error"
             run_detail = str(ex)
-            self.error.emit(run_detail)
         finally:
             failures = []
             try:
@@ -191,7 +188,20 @@ class LineSweepWorker(RunWorker):
             except Exception as ex:
                 failures.append(f"Vds zero failed: {ex}")
             self.emit_safe_state_report(failures)
-            update_run_metadata_status(self.p.output_metadata_path, run_status, run_detail, failures)
+            if failures:
+                run_status = "error"
+                run_detail = "Output cleanup failed: " + "; ".join(failures)
+            try:
+                update_run_metadata_status(self.p.output_metadata_path, run_status, run_detail, failures)
+            except Exception as ex:
+                run_status = "error"
+                run_detail = f"Run metadata save failed: {ex}"
+            if run_status == "finished":
+                self.finished.emit(csv_path)
+            elif run_status == "stopped":
+                self.stopped.emit(run_detail)
+            else:
+                self.error.emit(run_detail)
 
     def _safe_ramp_vds(self, target: float, allow_stop: bool = False) -> None:
         if self.p.vds_source == "Keithley 2400":

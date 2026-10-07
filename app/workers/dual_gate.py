@@ -16,7 +16,7 @@ from app.constants import (
 )
 from app.models import Connections, DualGateParams, SaveRoot
 from app.result_channels import KEITHLEY_CHANNEL
-from app.run_output import new_run_id, compose_output_stem, update_run_metadata_status, write_run_metadata
+from app.run_output import planned_output_at, unique_planned_output, new_run_id, compose_output_stem, update_run_metadata_status, write_run_metadata
 from app.measurement_output import dual_gate_filename_parts
 from app.utils import _frange_inc, safe_ramp
 from app.workers.base import RunStopped, RunWorker
@@ -68,7 +68,7 @@ class DualGateWorker(RunWorker):
                     dual_gate_filename_parts(self.p, self.signal_chain),
                     ts,
                 )
-                csv_path = os.path.join(self.save.path(), stem + ".csv")
+                csv_path = unique_planned_output(planned_output_at(self.save.path(), stem, ts)).csv_path
             os.makedirs(os.path.dirname(csv_path), exist_ok=True)
             self.log.emit(f"Save -> {csv_path}")
             if self.p.output_metadata_path:

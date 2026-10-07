@@ -24,7 +24,7 @@ class _Resource:
 
 
 def _config(**kwargs):
-    values = dict(enabled=True, verified_channel_mapping=True,
+    values = dict(field_envelope_enabled=False, enabled=True, verified_channel_mapping=True,
                   sample_warning_temperature_k=5.0, sample_trip_temperature_k=6.0,
                   sample_recovery_temperature_k=4.0, reservoir_warning_temperature_k=5.0,
                   reservoir_trip_temperature_k=6.0, reservoir_recovery_temperature_k=4.0,
@@ -86,6 +86,21 @@ class LakeShoreAdapterTests(unittest.TestCase):
 
 
 class ThermalEvaluatorTests(unittest.TestCase):
+    def test_logged_recovery_threshold_crossing_does_not_stop_ongoing_move(self):
+        evaluator = ThermalSafetyEvaluator(_config(
+            reservoir_recovery_temperature_k=3.9,
+            reservoir_warning_temperature_k=4.2,
+            reservoir_trip_temperature_k=4.8))
+        adapter = MockLakeShore335Adapter(sample_temperature_k=3.842, reservoir_temperature_k=3.903)
+        snapshot = adapter.read_snapshot()
+        self.assertFalse(evaluator.evaluate(snapshot).magnet_permission)
+        self.assertTrue(evaluator.evaluate_continuation(snapshot).magnet_permission)
+        # Continuation must not overwrite the permission for a new heater cycle.
+        self.assertFalse(evaluator.magnet_permission)
+        for temperature in (4.2, 4.8, float("nan")):
+            adapter = MockLakeShore335Adapter(sample_temperature_k=3.842, reservoir_temperature_k=temperature)
+            self.assertFalse(evaluator.evaluate_continuation(adapter.read_snapshot()).magnet_permission)
+
     def test_armed_commissioning_defaults_and_restart_does_not_restore_safe(self):
         config = LakeShore335Config()
         self.assertTrue(config.enabled)
@@ -115,6 +130,7 @@ class ThermalEvaluatorTests(unittest.TestCase):
             communication_valid=True, sample_slope_k_per_min=None,
             reservoir_slope_k_per_min=None,
         )
+        evaluator.note_magnet_snapshot(SimpleNamespace(field_t=0.0, monotonic_s=time.monotonic()))
         self.assertEqual(evaluator.evaluate(snapshot).state, ThermalState.COOLDOWN_HOLD)
         restarted = ThermalSafetyEvaluator(config)
         self.assertFalse(restarted.magnet_permission)

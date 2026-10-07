@@ -128,7 +128,7 @@ def main():
         threading.Thread(target=bridge.read_commands, daemon=True, name="history-notifications").start()
     window.show()
     forbidden = ("instruments", "pyvisa", "nidaqmx", "app.device_manager", "app.engine", "utils.config")
-    report("ready", pid=os.getpid(), folder=str(window.current_folder), hardware_modules=[name for name in sys.modules if any(name == prefix or name.startswith(prefix + ".") for prefix in forbidden)])
+    report("ready", pid=os.getpid(), folder=str(window.current_folder), hardware_modules=[name for name in tuple(sys.modules) if any(name == prefix or name.startswith(prefix + ".") for prefix in forbidden)])
     return application.exec()
 
 
