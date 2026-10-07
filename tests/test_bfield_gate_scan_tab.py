@@ -195,10 +195,10 @@ class BFieldGateScanTabTests(unittest.TestCase):
     def test_bfield_preview_updates_for_ranges_and_elides_long_series(self):
         tab = self._fresh_raw_tab()
         tab.bfield_fields.setText("1:-1:-1")
-        self.assertIn("Preview (2 fields): 1, 0", tab.bfield_preview.text())
-        self.assertIn("1, 0", tab.bfield_preview.toolTip())
+        self.assertIn("Preview (3 fields): 1, 0, -1", tab.bfield_preview.text())
+        self.assertIn("1, 0, -1", tab.bfield_preview.toolTip())
 
-        tab.bfield_fields.setText("0:8:0.0008")
+        tab.bfield_fields.setText("0:7.9992:0.0008")
         preview = tab.bfield_preview.text()
         self.assertIn("Preview (10000 fields):", preview)
         self.assertIn("…", preview)
@@ -222,7 +222,7 @@ class BFieldGateScanTabTests(unittest.TestCase):
             manager.is_connected = lambda _name: True
             tab = BFieldGateScanTab(SaveRoot(base="."), connections, manager)
             self.assertEqual(tab.bfield_fields.text(), "1:-1:-1")
-            self.assertIn("Preview (2 fields): 1, 0", tab.bfield_preview.text())
+            self.assertIn("Preview (3 fields): 1, 0, -1", tab.bfield_preview.text())
             tab.deleteLater()
         finally:
             settings.remove("tabs/bfield_gate_scan")
@@ -242,13 +242,13 @@ class BFieldGateScanTabTests(unittest.TestCase):
         orchestrator = FakeOrchestrator()
         tab._bfield_orchestrator = orchestrator
         tab.set_batch_magnet_context("1000")
-        expression = "1:-0.5:-0.5, 0.25"
+        expression = "(1,-0.5,4), 0.25"
         tab.bfield_fields.setText(expression)
         expected = GateScanFieldBatch.parse_fields(expression)
         tab.start_series()
         self.assertEqual(len(orchestrator.starts), 1)
         self.assertEqual(GateScanFieldBatch.parse_fields(orchestrator.starts[0]), expected)
-        self.assertIn("1, 0.5, 0, 0.25", tab.bfield_preview.text())
+        self.assertIn("1, 0.5, 0, -0.5, 0.25", tab.bfield_preview.text())
         tab.deleteLater()
 
 

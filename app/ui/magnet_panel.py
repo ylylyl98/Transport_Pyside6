@@ -23,20 +23,29 @@ class MagnetPanel(QtWidgets.QWidget):
 
     backend_changed = QtCore.Signal(str)
 
-    def __init__(self, magnet1000, magnet2100, parent=None, lakeshore335=None, thermal_safety=None):
+    def __init__(self, magnet1000, magnet2100, parent=None, lakeshore335=None, thermal_safety=None,
+                 *, sample_temperature_control=None):
         super().__init__(parent)
         self.magnet1000 = magnet1000
         self.magnet2100 = magnet2100
         self.lakeshore335 = lakeshore335
         self.thermal_safety = thermal_safety
+        self.sample_temperature_control = sample_temperature_control
         self._backend = "1000"
         self._connected = {"1000": False, "2100": False}
+        self.auto_selection_allowed = None
+        self._auto_selecting = False
+        self._deferred_auto_backend = None
+        self._detect_pending = set()
+        self._connection_errors = {}
+        self._sdk_connect_pending = False
         self._reviewed = False
         self._pending_2100_start = False
         self._busy_1000 = False
         self._busy_2100 = False
         self._review_fingerprint = None
         self._temp_request_pending = False
+        self._pending_temperature_operations = set()
         self._aps_heater_state: Optional[bool] = None
         self._aps_latest_snapshot = None
         self._aps_connect_pending = False
@@ -60,19 +69,34 @@ class MagnetPanel(QtWidgets.QWidget):
         self._build_ui()
         self._connect_signals()
         self._select_backend(0)
+        self._reconcile_auto_system()
+        self._auto_selection_timer = QtCore.QTimer(self)
+        self._auto_selection_timer.setInterval(500)
+        self._auto_selection_timer.timeout.connect(self._retry_auto_selection)
+        self._auto_selection_timer.start()
 
     def _build_ui(self):
         root = QtWidgets.QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
 
         selector_row = QtWidgets.QHBoxLayout()
-        selector_row.addWidget(QtWidgets.QLabel("Magnet"))
+        selector_row.addWidget(QtWidgets.QLabel("System"))
         self.backend_combo = SafeComboBox()
         self.backend_combo.addItem("attoDRY1000 (APS100)", "1000")
         self.backend_combo.addItem("attoDRY2100 (SDK)", "2100")
-        self.backend_combo.currentIndexChanged.connect(self._select_backend)
+        self.backend_combo.currentIndexChanged.connect(self._on_backend_selection_changed)
+        self.backend_combo.activated.connect(lambda *_: self.auto_system_check.setChecked(False))
         selector_row.addWidget(self.backend_combo, 1)
         root.addLayout(selector_row)
+        self.auto_system_check = QtWidgets.QCheckBox("Auto-select connected system")
+        self.auto_system_check.setChecked(True)
+        self.auto_system_check.setToolTip("Select the only connected system. Choosing a system manually turns Auto off.")
+        self.auto_system_check.toggled.connect(self._reconcile_auto_system)
+        root.addWidget(self.auto_system_check)
+        self.system_detection_label = QtWidgets.QLabel()
+        self.system_detection_label.setWordWrap(True)
+        self.system_detection_label.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+        root.addWidget(self.system_detection_label)
 
         self.review = QtWidgets.QCheckBox(
             "I reviewed the configured limits and connection settings"
@@ -117,6 +141,12 @@ class MagnetPanel(QtWidgets.QWidget):
         buttons.addWidget(self.connect_button)
         buttons.addWidget(self.disconnect_button)
         conn_form.addRow("", buttons)
+        self.detect_system_button = QtWidgets.QPushButton("Detect && connect system")
+        self.detect_system_button.setToolTip(
+            "Try the configured APS100 VISA resource and 2100 SDK endpoint. "
+            "Successful connections stay open; temperature/field setpoints are not applied.")
+        self.detect_system_button.clicked.connect(self._detect_system)
+        conn_form.addRow(self.detect_system_button)
         root.addWidget(connection)
 
         status = QtWidgets.QGroupBox("Status")
@@ -174,8 +204,16 @@ class MagnetPanel(QtWidgets.QWidget):
         ))
         root.addWidget(self.aps_group)
 
-        self.temp_group = QtWidgets.QGroupBox("attoDRY2100 temperature")
+        self.temp1000_group = QtWidgets.QGroupBox("attoDRY1000 temperature (LS335)")
+        temp1000_layout = QtWidgets.QVBoxLayout(self.temp1000_group)
+        if self.sample_temperature_control is not None:
+            temp1000_layout.addWidget(self.sample_temperature_control)
+        root.addWidget(self.temp1000_group)
+
+        self.temp_group = QtWidgets.QGroupBox("attoDRY2100 temperature (SDK)")
         temp_form = QtWidgets.QFormLayout(self.temp_group)
+        temp_form.setRowWrapPolicy(QtWidgets.QFormLayout.RowWrapPolicy.WrapLongRows)
+        temp_form.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         self.magnet_temperature = QtWidgets.QLabel("—")
         self.sample_temperature = QtWidgets.QLabel("Unavailable")
         self.vti_temperature = QtWidgets.QLabel("Unavailable")
@@ -197,8 +235,8 @@ class MagnetPanel(QtWidgets.QWidget):
         temp_form.addRow("VTI temperature", self.vti_temperature)
         temp_form.addRow("Sample target", self.sample_target)
         temp_form.addRow("Ramp rate", self.sample_rate)
-        temp_form.addRow("", self.temp_control_button)
-        temp_form.addRow("", self.temp_stop_button)
+        temp_form.addRow(self.temp_control_button)
+        temp_form.addRow(self.temp_stop_button)
         root.addWidget(self.temp_group)
 
         self.lakeshore_group = QtWidgets.QGroupBox("Lake Shore 335 Temperature Safety")
@@ -258,7 +296,10 @@ class MagnetPanel(QtWidgets.QWidget):
         ls_buttons = QtWidgets.QHBoxLayout()
         ls_buttons.addWidget(self.lakeshore_connect_button)
         ls_buttons.addWidget(self.lakeshore_disconnect_button)
-        ls_form.addRow("", ls_buttons)
+        if self.sample_temperature_control is not None:
+            temp1000_layout.insertLayout(0, ls_buttons)
+        else:
+            ls_form.addRow("", ls_buttons)
         root.addWidget(self.lakeshore_group)
 
         self.progress = QtWidgets.QProgressBar()
@@ -421,11 +462,13 @@ class MagnetPanel(QtWidgets.QWidget):
 
     def _select_backend(self, index: int):
         self._backend = str(self.backend_combo.itemData(index) or "1000")
-        self.backend_changed.emit(self._backend)
         aps = self._backend == "1000"
         self.aps_group.setVisible(aps)
+        self.temp1000_group.setVisible(aps and self.sample_temperature_control is not None)
         self.temp_group.setVisible(not aps)
         self.lakeshore_group.setVisible(aps)
+        if self.sample_temperature_control is not None:
+            self.sample_temperature_control.set_backend(self._backend)
         self.target_field.setRange(
             -float(cfg.magnet.safe_control_max_field_t if aps else (cfg.attodry2100.maximum_field_t or 6.0)),
             float(cfg.magnet.safe_control_max_field_t if aps else (cfg.attodry2100.maximum_field_t or 6.0)),
@@ -434,11 +477,102 @@ class MagnetPanel(QtWidgets.QWidget):
         updated = self._last_update_at.get(self._backend)
         self.last_update_label.setText(updated or "Never")
         self._update_buttons()
+        self.backend_changed.emit(self._backend)
+
+    def _on_backend_selection_changed(self, index):
+        if not self._auto_selecting:
+            self.auto_system_check.setChecked(False)
+        self._select_backend(index)
+        self._reconcile_auto_system()
+
+    def _auto_switch_allowed(self):
+        if (self._busy_1000 or self._busy_2100 or self._aps_exclusive
+                or self._temp_request_pending
+                or getattr(self.magnet2100, "has_pending_work", False)
+                or getattr(self.sample_temperature_control, "_pending_operation", None)):
+            return False
+        return self.auto_selection_allowed is None or bool(self.auto_selection_allowed())
+
+    def _reconcile_auto_system(self, *_):
+        """Use successful controller connections; never infer a cryostat from LS335."""
+        self._deferred_auto_backend = None
+        online = [key for key, connected in self._connected.items() if connected]
+        if self._detect_pending:
+            names = ", ".join("attoDRY" + key for key in sorted(self._detect_pending))
+            text = "Checking configured systems: " + names
+        elif not online:
+            text = "No system identified — use Detect & connect or Connect."
+        elif len(online) == 2:
+            text = ("Both systems connected — choose 1000 or 2100."
+                    if self.auto_system_check.isChecked() else "Both systems connected.")
+        else:
+            backend = online[0]
+            text = f"Identified: attoDRY{backend} ({'APS100' if backend == '1000' else 'SDK'})"
+            if self.auto_system_check.isChecked() and backend != self._backend:
+                if self._auto_switch_allowed():
+                    self._auto_selecting = True
+                    try:
+                        self.backend_combo.setCurrentIndex(self.backend_combo.findData(backend))
+                    finally:
+                        self._auto_selecting = False
+                else:
+                    self._deferred_auto_backend = backend
+                    text += " — selection held until the current operation is idle."
+        if not self.auto_system_check.isChecked():
+            text += f" Manual selection: {self._backend}."
+        self.system_detection_label.setText(text)
+        self.system_detection_label.setToolTip("\n".join(
+            f"{key}: {error}" for key, error in self._connection_errors.items()))
+        self._update_buttons()
+
+    def _retry_auto_selection(self):
+        if self._deferred_auto_backend is not None:
+            self._reconcile_auto_system()
+
+    def _detect_system(self):
+        if (self._detect_pending or self._aps_connect_pending or self._sdk_connect_pending
+                or getattr(self.magnet2100, "has_pending_work", False)):
+            return
+        if not self._auto_switch_allowed():
+            self.system_detection_label.setText("System detection is available when the current operation is idle.")
+            return
+        if not self._review_valid():
+            self._guard_message()
+            return
+        self._connection_errors.clear()
+        self._detect_pending = {key for key, connected in self._connected.items() if not connected}
+        # Register both requests before either controller can complete synchronously.
+        self._aps_connect_pending = "1000" in self._detect_pending
+        self._sdk_connect_pending = "2100" in self._detect_pending
+        self.auto_system_check.setChecked(True)
+        self._reconcile_auto_system()
+        self._append_activity("Identifying configured APS100 and attoDRY2100 connections", "DETECTION")
+        for backend in tuple(sorted(self._detect_pending)):
+            try:
+                if backend == "1000":
+                    self.magnet1000.connect_instrument(cfg.magnet.visa_resource, use_mock=False)
+                else:
+                    self.magnet2100.connect_async()
+            except Exception as exc:
+                self._finish_detection_connection(backend, str(exc))
+
+    def _finish_detection_connection(self, backend, error=None):
+        if error is not None:
+            self._connection_errors[backend] = str(error)
+            self._append_activity(f"attoDRY{backend} identification failed: {error}", "DETECTION")
+        self._detect_pending.discard(backend)
+        if backend == "1000":
+            self._aps_connect_pending = False
+        else:
+            self._sdk_connect_pending = False
+        self._reconcile_auto_system()
 
     def _controller(self):
         return self.magnet1000 if self._backend == "1000" else self.magnet2100
 
     def _connect_selected(self):
+        if self._detect_pending or (self._backend == "2100" and self._sdk_connect_pending):
+            return
         if self._connected[self._backend] or (
             self._busy_1000 if self._backend == "1000" else self._busy_2100
         ):
@@ -460,6 +594,8 @@ class MagnetPanel(QtWidgets.QWidget):
                 self._guard_message()
                 return
             self._append_activity("Connecting attoDRY2100", "CONNECTION")
+            self._sdk_connect_pending = True
+            self._update_buttons()
             self.magnet2100.connect_async()
 
     def _disconnect_selected(self):
@@ -609,6 +745,8 @@ class MagnetPanel(QtWidgets.QWidget):
         self.state_label.setText("Arming…")
 
     def _set_temperature(self):
+        if self._backend != "2100":
+            return
         if not self._connected["2100"]:
             self._on_2100_error("attoDRY2100 is not connected")
             return
@@ -621,14 +759,30 @@ class MagnetPanel(QtWidgets.QWidget):
         if self._last_capabilities is None or not getattr(self._last_capabilities, "sample_temperature_control", False):
             self._show_error("2100 sample temperature control is not available")
             return
-        self._temp_request_pending = True
-        self._update_buttons()
-        self.magnet2100.configure_sample_temperature_async(
+        self._submit_temperature_operation("configure_temperature",
+            self.magnet2100.configure_sample_temperature_async,
             self.sample_target.value(), self.sample_rate.value()
         )
 
     def _stop_temperature(self):
-        self.magnet2100.stop_sample_temperature_control_async()
+        if self._backend != "2100" or not self._connected["2100"]:
+            return
+        if "stop_temperature" in self._pending_temperature_operations:
+            return
+        self._submit_temperature_operation("stop_temperature",
+            self.magnet2100.stop_sample_temperature_control_async)
+
+    def _submit_temperature_operation(self, name, callback, *args):
+        self._pending_temperature_operations.add(name)
+        self._temp_request_pending = True
+        self._update_buttons()
+        try:
+            callback(*args)
+        except Exception as exc:
+            self._pending_temperature_operations.discard(name)
+            self._temp_request_pending = bool(self._pending_temperature_operations)
+            self._show_error(f"attoDRY2100 {name} failed: {exc}")
+            self._update_buttons()
 
     def _poll_temperature(self):
         if (
@@ -640,10 +794,11 @@ class MagnetPanel(QtWidgets.QWidget):
 
     def _on_connected(self, backend: str, identity: Any):
         self._connected[backend] = True
+        self._connection_errors.pop(backend, None)
         if backend == "1000":
             self._aps_connect_pending = False
-        self.connection_label.setText("Connected")
-        self.message_label.setText(str(getattr(identity, "display_name", identity)))
+        else:
+            self._sdk_connect_pending = False
         self._append_activity(
             f"{('APS100' if backend == '1000' else 'attoDRY2100')} connected: "
             f"{getattr(identity, 'display_name', identity)}", "CONNECTION"
@@ -651,7 +806,10 @@ class MagnetPanel(QtWidgets.QWidget):
         if backend == "2100":
             self.magnet2100.set_polling_enabled(True)
             self._temp_timer.start()
-        self._update_buttons()
+        self._finish_detection_connection(backend)
+        if backend == self._backend:
+            self.connection_label.setText("Connected")
+            self.message_label.setText(str(getattr(identity, "display_name", identity)))
 
     def _on_disconnected(self, backend: str):
         self._clear_refresh_pending(backend)
@@ -661,6 +819,11 @@ class MagnetPanel(QtWidgets.QWidget):
         if backend == "2100":
             self._temp_timer.stop()
             self._temp_request_pending = False
+            self._pending_temperature_operations.clear()
+            self._last_capabilities = None
+            self.sample_temperature.setText("Unavailable")
+            self.vti_temperature.setText("Unavailable")
+            self.magnet_temperature.setText("—")
         else:
             self._aps_connect_pending = False
             self._aps_heater_state = None
@@ -669,7 +832,7 @@ class MagnetPanel(QtWidgets.QWidget):
             f"{('APS100' if backend == '1000' else 'attoDRY2100')} disconnected",
             "CONNECTION",
         )
-        self._update_buttons()
+        self._reconcile_auto_system()
 
     def _on_snapshot(self, backend: str, snapshot: Any):
         updated = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %z")
@@ -686,13 +849,15 @@ class MagnetPanel(QtWidgets.QWidget):
             self._aps_latest_snapshot = snapshot
             heater_state = getattr(snapshot, "heater_on", None)
             self._aps_heater_state = heater_state if isinstance(heater_state, bool) else None
+        else:
+            self._last_capabilities = getattr(snapshot, "capabilities", None)
+            self.magnet_temperature.setText(
+                "—" if getattr(snapshot, "temperature_k", None) is None
+                else f"{float(snapshot.temperature_k):.3f} K"
+            )
         if backend != self._backend:
             return
         self.current_field_label.setText(f"{float(snapshot.field_t):+.6f} T")
-        self.magnet_temperature.setText(
-            "—" if getattr(snapshot, "temperature_k", None) is None
-            else f"{float(snapshot.temperature_k):.3f} K"
-        )
         if backend == "1000":
             self.output_field_label.setText(
                 f"{float(snapshot.output_field_t):+.6f} T"
@@ -776,7 +941,6 @@ class MagnetPanel(QtWidgets.QWidget):
                 self._last_telemetry_log_key = values
                 self._last_telemetry_phase_key = phase
                 self._last_telemetry_log_at = now
-        self._last_capabilities = getattr(snapshot, "capabilities", None)
         if self._backend == "2100":
             self._update_buttons()
 
@@ -873,6 +1037,7 @@ class MagnetPanel(QtWidgets.QWidget):
         self._update_buttons()
 
     def _on_2100_operation(self, name: str, success: bool, error: Any):
+        detection_result = name == "connect" and "2100" in self._detect_pending
         self._append_activity(
             f"attoDRY2100 operation {'complete' if success else 'failed'}: {name}"
             + (f" ({error})" if not success and error else ""),
@@ -894,7 +1059,13 @@ class MagnetPanel(QtWidgets.QWidget):
             self._busy_2100 = False
             self.state_label.setText("Complete" if success else "Faulted")
         if name in {"configure_temperature", "stop_temperature"}:
-            self._temp_request_pending = False
+            self._pending_temperature_operations.discard(name)
+            self._temp_request_pending = bool(self._pending_temperature_operations)
+        if name == "connect":
+            self._sdk_connect_pending = False
+            if detection_result:
+                self._finish_detection_connection("2100", None if success else str(error))
+                return
         if not success:
             self._show_error(f"attoDRY2100 {name} failed: {error}")
         self._update_buttons()
@@ -906,6 +1077,9 @@ class MagnetPanel(QtWidgets.QWidget):
         self._append_activity(str(message), "ERROR")
 
     def _on_1000_error(self, message: str):
+        if "1000" in self._detect_pending and str(message).startswith("APS100 connection failed:"):
+            self._finish_detection_connection("1000", message)
+            return
         self._clear_refresh_pending("1000")
         self._aps_connect_pending = False
         self._busy_1000 = False
@@ -922,14 +1096,19 @@ class MagnetPanel(QtWidgets.QWidget):
         self._update_buttons()
 
     def _on_2100_error(self, message: str):
+        if "2100" in self._detect_pending and str(message).startswith("attoDRY2100 connect failed:"):
+            self._connection_errors["2100"] = str(message)
+            return  # The connect terminal signal completes this identification attempt.
         # Telemetry/read errors must not release an active SETPOINT→START
         # guard.  Operation-terminal signals own mutation busy state.
         self._clear_refresh_pending("2100")
-        self._temp_request_pending = False
         self._show_error(message)
         self._update_buttons()
 
     def _on_fault(self, message: str):
+        if ("2100" in self._detect_pending
+                and str(message) in self._connection_errors.get("2100", "")):
+            return
         self.fault_label.setText(str(message))
         self._append_activity(str(message), "FAULT")
 
@@ -942,15 +1121,20 @@ class MagnetPanel(QtWidgets.QWidget):
         busy = self._busy_1000 if self._backend == "1000" else self._busy_2100
         if self._backend == "1000":
             busy = busy or self._aps_exclusive
-        self.move_button.setEnabled(connected and not busy)
+        detecting = bool(self._detect_pending)
+        self.detect_system_button.setEnabled(
+            not detecting and not self._aps_connect_pending and not self._sdk_connect_pending
+            and not getattr(self.magnet2100, "has_pending_work", False)
+            and self._auto_switch_allowed())
+        self.move_button.setEnabled(connected and not busy and not detecting)
         self.refresh_button.setEnabled(
             connected and self._refresh_pending_backend is None
         )
-        self.disconnect_button.setEnabled(connected)
-        self.connect_button.setEnabled(not connected and not busy)
+        self.disconnect_button.setEnabled(connected and not detecting)
+        self.connect_button.setEnabled(not connected and not busy and not detecting and not self._sdk_connect_pending)
         if self._backend == "1000":
             self.connect_button.setEnabled(
-                not connected and not busy and not self._aps_connect_pending
+                not connected and not busy and not self._aps_connect_pending and not detecting
             )
         self.stop_button.setEnabled(True)
         self.mode_combo.setEnabled(self._backend == "1000" and not busy)
@@ -959,8 +1143,8 @@ class MagnetPanel(QtWidgets.QWidget):
             and connected
             and getattr(self._last_capabilities, "sample_temperature_control", False)
         )
-        temp_mutation_allowed = capable and not self._temp_request_pending
+        temp_mutation_allowed = capable and not self._temp_request_pending and not detecting
         self.sample_target.setEnabled(temp_mutation_allowed)
         self.sample_rate.setEnabled(temp_mutation_allowed)
         self.temp_control_button.setEnabled(temp_mutation_allowed)
-        self.temp_stop_button.setEnabled(capable)
+        self.temp_stop_button.setEnabled(capable and "stop_temperature" not in self._pending_temperature_operations)

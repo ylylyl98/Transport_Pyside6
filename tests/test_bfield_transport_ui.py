@@ -167,16 +167,16 @@ class BFieldTransportUiTests(unittest.TestCase):
         self.tab.ed_condition_add_first.setText("0:4:1")
         self.tab.ed_condition_add_second.setText("0.5")
 
-        self.assertIn("Preview (4 conditions)", self.tab.lbl_condition_add_preview.text())
-        self.assertIn("Doping 3, E-field 0.5", self.tab.lbl_condition_add_preview.toolTip())
+        self.assertIn("Preview (5 conditions)", self.tab.lbl_condition_add_preview.text())
+        self.assertIn("Doping 4, E-field 0.5", self.tab.lbl_condition_add_preview.toolTip())
         self.tab.btn_condition_add_preview.click()
 
-        self.assertEqual(self.tab.condition_table.rowCount(), 5)
+        self.assertEqual(self.tab.condition_table.rowCount(), 6)
         self.assertEqual([condition.name for condition in self.tab.conditions], [
-            "Con1", "Con2", "Con3", "Con4", "Con5",
+            "Con1", "Con2", "Con3", "Con4", "Con5", "Con6",
         ])
-        self.assertEqual([condition.doping for condition in self.tab.conditions[1:]], [0, 1, 2, 3])
-        self.assertEqual([condition.efield for condition in self.tab.conditions[1:]], [0.5] * 4)
+        self.assertEqual([condition.doping for condition in self.tab.conditions[1:]], [0, 1, 2, 3, 4])
+        self.assertEqual([condition.efield for condition in self.tab.conditions[1:]], [0.5] * 5)
         self.assertEqual(self.tab.condition_table.currentRow(), 1)
 
     def test_builder_accepts_bracketed_gate_arrays_and_converts_preview(self):
@@ -191,6 +191,21 @@ class BFieldTransportUiTests(unittest.TestCase):
         self.assertEqual([(row.vtg, row.vbg) for row in pending], [(1.0, 0.5), (2.0, 1.0)])
         self.assertEqual([(row.doping, row.efield) for row in pending], [(1.5, 0.5), (3.0, 1.0)])
 
+    def test_parenthesized_count_and_named_aliases_preview_and_save_endpoint_rows(self):
+        self.tab.ed_condition_add_first.setText("(-1,1,5)")
+        self.tab.ed_condition_add_second.setText("0")
+        self.tab.ed_condition_add_vds.setText("np.linspace(0,0.4,5)")
+        self.assertIn("Preview (5 conditions)", self.tab.lbl_condition_add_preview.text())
+        rows = self.tab._previewed_add_conditions()
+        self.assertEqual([row.doping for row in rows], [-1, -.5, 0, .5, 1])
+        self.assertEqual((rows[0].vds, rows[-1].vds), (0, .4))
+        self.tab.btn_condition_add_preview.click()
+        saved = self.tab.collect_params().conditions[1:]
+        self.assertEqual(len(saved), len(rows))
+        for actual, expected in zip(saved, rows):
+            self.assertAlmostEqual(actual.doping, expected.doping, places=6)
+            self.assertAlmostEqual(actual.vds, expected.vds, places=6)
+
     def test_builder_rejects_unmatched_array_lengths_without_adding(self):
         self.tab.ed_condition_add_first.setText("0, 1")
         self.tab.ed_condition_add_second.setText("0, 1, 2")
@@ -200,7 +215,7 @@ class BFieldTransportUiTests(unittest.TestCase):
         self.assertEqual(self.tab.condition_table.rowCount(), 1)
 
     def test_quick_add_vds_and_range_preview_match_saved_conditions(self):
-        self.tab.ed_condition_add_first.setText("-1:1.5:0.5")
+        self.tab.ed_condition_add_first.setText("-1:1:0.5")
         self.tab.ed_condition_add_second.setText("0")
         self.tab.ed_condition_add_vds.setText("-1")
         preview = self.tab.condition_add_preview_table
@@ -226,7 +241,7 @@ class BFieldTransportUiTests(unittest.TestCase):
         self.assertEqual([(c.vtg, c.vbg, c.vds) for c in rows], [(1, 0.5, v) for v in [0.1, 0.2, 0.3]])
 
     def test_quick_add_invalid_series_clear_preview(self):
-        for invalid in ("0:1:0", "0:1:-1", "0:101:1", "nan", "np.linspace(-1,1,5)"):
+        for invalid in ("0:1:0", "0:1:-1", "0:101:1", "nan", "np.linspace(-1,1,1)"):
             self.tab.ed_condition_add_vds.setText(invalid)
             self.assertFalse(self.tab.btn_condition_add_preview.isEnabled(), invalid)
             self.assertEqual(self.tab.condition_add_preview_table.rowCount(), 0)
@@ -241,7 +256,7 @@ class BFieldTransportUiTests(unittest.TestCase):
             self.assertIn("Vds", self.tab.lbl_condition_add_preview.text())
 
     def test_quick_add_descending_vds_and_lock(self):
-        self.tab.ed_condition_add_vds.setText("1:-1.5:-0.5")
+        self.tab.ed_condition_add_vds.setText("1:-1:-0.5")
         self.assertEqual([c.vds for c in self.tab._previewed_add_conditions()], [1, 0.5, 0, -0.5, -1])
         self.tab.set_sweep_locked(True)
         self.assertFalse(self.tab.ed_condition_add_vds.isEnabled())

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import sys
+import math
+import time
 
 from PySide6 import QtWidgets
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 
 from app.app_identity import APP_NAME, configure_qapp, set_windows_app_id
 from app.device_manager import DeviceManager
@@ -59,15 +61,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self._experiment_2100_temperature = None
         self.magnet2100.snapshot_updated.connect(lambda value: setattr(self, "_experiment_2100_field", value))
         self.magnet2100.temperature_updated.connect(lambda value: setattr(self, "_experiment_2100_temperature", value))
-        # LS335 is a read-only external monitor dedicated to the APS100
-        # B-field workflow; it is deliberately not shared with the 2100 path.
+        self.magnet2100.disconnected.connect(lambda: setattr(self, "_experiment_2100_temperature", None))
+        # The 1000 uses LS335 for sample control and thermal monitoring.
+        # The 2100 uses its own SDK temperature controller.
         self.lakeshore335 = LakeShore335Controller(parent=self)
         self.thermal_safety = ThermalSafetyEvaluator(cfg.lakeshore335)
         self.magnet1000._worker.thermal_source = self.thermal_safety
         self.magnet1000._worker.thermal_field_updated.connect(self.thermal_safety.note_magnet_snapshot)
         self.magnet1000.snapshot_updated.connect(self.thermal_safety.note_magnet_snapshot)
         self.magnet1000.disconnected.connect(lambda: self.thermal_safety.note_magnet_snapshot(None))
-        self.magnet_panel = MagnetPanel(self.magnet1000, self.magnet2100, self, self.lakeshore335, self.thermal_safety)
+        self.sample_temperature_bar = SampleTemperatureBar(
+            self.lakeshore335, cfg.lakeshore335, self, save_config=cfg.save, compact=True)
+        self.magnet_panel = MagnetPanel(
+            self.magnet1000, self.magnet2100, self, self.lakeshore335, self.thermal_safety,
+            sample_temperature_control=self.sample_temperature_bar)
         self.conn_dock = ConnDock()
         self.conn_dock.load_settings()
         self.conn_dock.stop_requested.connect(self.on_emergency_stop)
@@ -132,12 +139,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self.conn_dock.btn_stop.setAccessibleName("Stop all measurements and ramp voltages to zero")
 
         self.tabs = QtWidgets.QTabWidget()
-        self.sample_temperature_bar = SampleTemperatureBar(self.lakeshore335, cfg.lakeshore335, self)
+        self.temperature_summary = QtWidgets.QWidget()
+        temperature_layout = QtWidgets.QHBoxLayout(self.temperature_summary)
+        temperature_layout.setContentsMargins(8, 4, 8, 4)
+        self.temperature_summary_label = QtWidgets.QLabel()
+        self.temperature_summary_label.setWordWrap(True)
+        self.temperature_summary_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.temperature_summary_label.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Preferred)
+        self.temperature_controls_button = QtWidgets.QPushButton("Temperature controls…")
+        self.temperature_controls_button.clicked.connect(self._show_temperature_controls)
+        temperature_layout.addWidget(self.temperature_summary_label, 1)
+        temperature_layout.addWidget(self.temperature_controls_button)
         central = QtWidgets.QWidget()
         central_layout = QtWidgets.QVBoxLayout(central)
         central_layout.setContentsMargins(0, 0, 0, 0)
         central_layout.setSpacing(0)
-        central_layout.addWidget(self.sample_temperature_bar)
+        central_layout.addWidget(self.temperature_summary)
         central_layout.addWidget(self.tabs, 1)
         self.setCentralWidget(central)
         self.tab_dual = DualGateTab(self.save_root, self.connections, self.device_manager, get_global_rates_callable=self.conn_dock.get_rates, get_signal_chain_callable=self.signal_chain_snapshot)
@@ -180,8 +198,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.magnet_panel.backend_changed.connect(
             self.tab_bfield_gate_scan.set_batch_magnet_context
         )
-        self.magnet_panel.backend_changed.connect(self.sample_temperature_bar.set_backend)
-        self.sample_temperature_bar.set_backend(self.magnet_panel._backend)
+        self.magnet_panel.backend_changed.connect(self._update_temperature_summary)
         self.sample_temperature_bar.readiness_changed.connect(self._sync_temperature_start_gate)
         self._sync_temperature_start_gate(self.sample_temperature_bar.is_ready())
         self.tab_bfield_gate_scan.set_batch_magnet_context(self.magnet_panel._backend)
@@ -221,7 +238,63 @@ class MainWindow(QtWidgets.QMainWindow):
         self.gate_scan_field_batch.stopped.connect(self._update_active_measurement)
         self.gate_scan_field_batch.error.connect(self._update_active_measurement)
         self.resizeDocks([self.instrument_dock], [370], Qt.Orientation.Horizontal)
+        self.magnet_panel.auto_selection_allowed = lambda: not self._active_measurement_tabs()
         self._update_active_measurement()
+        self._temperature_summary_timer = QTimer(self)
+        self._temperature_summary_timer.setInterval(500)
+        self._temperature_summary_timer.timeout.connect(self._update_temperature_summary)
+        self._temperature_summary_timer.start()
+        self._update_temperature_summary()
+
+    def _show_temperature_controls(self):
+        self.instrument_dock.show()
+        self.instrument_workspace.pages.setCurrentIndex(1)
+        group = (self.magnet_panel.temp1000_group if self.magnet_panel._backend == "1000"
+                 else self.magnet_panel.temp_group)
+        # Wait for the dock/tab layout before scrolling to the selected controls.
+        QTimer.singleShot(0, lambda: self.instrument_workspace.pages.widget(1).ensureWidgetVisible(group))
+
+    @staticmethod
+    def _temperature_value(value):
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return "Unavailable"
+        return f"{numeric:.3f} K" if math.isfinite(numeric) and numeric > 0 else "Unavailable"
+
+    def _update_temperature_summary(self, *_):
+        """Display only the selected system; refreshing this label performs no I/O."""
+        if self.magnet_panel._backend == "1000":
+            text = "attoDRY1000 / LS335 — " + self.sample_temperature_bar.summary_text()
+            details = "\n".join((self.sample_temperature_bar.control_status.text(),
+                                 self.sample_temperature_bar.message.text()))
+        else:
+            text = "attoDRY2100 / SDK — "
+            snapshot = self._experiment_2100_temperature
+            if not self.magnet_panel._connected["2100"]:
+                text += "Disconnected"
+            elif snapshot is None:
+                text += "Temperature readback unavailable"
+            else:
+                try:
+                    age = time.monotonic() - float(snapshot.monotonic_s)
+                    fresh = math.isfinite(age) and 0 <= age <= 10.0
+                except (AttributeError, TypeError, ValueError):
+                    fresh = False
+                if not fresh:
+                    text += "Temperature readback stale"
+                else:
+                    sample = self._temperature_value(getattr(snapshot, "sample_temperature_k", None))
+                    target = self._temperature_value(getattr(snapshot, "sample_setpoint_k", None))
+                    vti = self._temperature_value(getattr(snapshot, "vti_temperature_k", None))
+                    active = getattr(snapshot, "sample_control_active", None)
+                    state = "Control ON" if active is True else "Control OFF" if active is False else "Control state unknown"
+                    text += f"Sample: {sample} · target: {target} · VTI: {vti} · {state}"
+            if self.magnet_panel._temp_request_pending:
+                text += " · Applying settings"
+            details = "2100 sample/VTI readback comes from its SDK; targets shown here are instrument readbacks."
+        self.temperature_summary_label.setText(text)
+        self.temperature_summary_label.setToolTip(details)
 
     def _active_measurement_tabs(self):
         return [tab for tab in self._measurement_tabs()
@@ -253,6 +326,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.active_run_button.setText("Running: " + ", ".join(names) if names else "No active measurement")
         self.active_run_button.setToolTip(self.active_run_button.text())
         self.active_run_button.setEnabled(bool(active))
+        self.magnet_panel._update_buttons()
 
     def _show_active_measurement(self):
         active = self._active_measurement_tabs()

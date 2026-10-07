@@ -19,6 +19,7 @@ from typing import Iterable, Mapping
 
 from app.gate_transform import derived_to_gates
 from app.models import BFieldTransportCondition, BFieldTransportParams
+from app.numeric_series import parse_numeric_series
 from app.run_output import PlannedOutput, sanitize_segment, promote_experiment_metadata
 from app.signal_chain import signal_chain_filename_parts
 from utils.config import cfg
@@ -54,54 +55,8 @@ class BFieldTransportSafetyError(ValueError):
 
 
 def parse_condition_series(text: str, label: str, *, maximum: int = 100) -> tuple[float, ...]:
-    """Parse scalars, bracketed arrays, and exclusive ``start:stop:step`` ranges."""
-    source = str(text or "").strip()
-    if source.startswith("[") or source.endswith("]"):
-        if not (source.startswith("[") and source.endswith("]")):
-            raise ValueError(f"{label}: array brackets must be paired")
-        source = source[1:-1]
-    values: list[float] = []
-    for raw in source.replace(";", ",").replace("\n", ",").split(","):
-        token = raw.strip()
-        if not token:
-            continue
-        if ":" not in token:
-            try:
-                value = float(token)
-            except (TypeError, ValueError) as exc:
-                raise ValueError(f"{label}: {token!r} is not a number") from exc
-            if not math.isfinite(value):
-                raise ValueError(f"{label}: values must be finite")
-            values.append(value)
-        else:
-            parts = [part.strip() for part in token.split(":")]
-            if len(parts) != 3 or any(not part for part in parts):
-                raise ValueError(f"{label}: use start:stop:step for ranges")
-            try:
-                start, stop, step = (float(part) for part in parts)
-            except (TypeError, ValueError) as exc:
-                raise ValueError(f"{label}: range values must be numbers") from exc
-            if not all(math.isfinite(value) for value in (start, stop, step)):
-                raise ValueError(f"{label}: range values must be finite")
-            if step == 0:
-                raise ValueError(f"{label}: range step cannot be zero")
-            distance = (stop - start) / step
-            if not math.isfinite(distance):
-                raise ValueError(f"{label}: range is too large")
-            if distance < 0:
-                raise ValueError(f"{label}: range step direction does not reach its stop")
-            count = max(0, math.ceil(distance))
-            if len(values) + count > maximum:
-                raise ValueError(f"{label}: series cannot exceed {maximum} values")
-            for index in range(count):
-                value = start + index * step
-                if (step > 0 and value >= stop) or (step < 0 and value <= stop):
-                    break
-                values.append(0.0 if abs(value) < 0.5e-12 else value)
-        if len(values) > maximum:
-            raise ValueError(f"{label}: series cannot exceed {maximum} values")
-    if not values:
-        raise ValueError(f"Enter at least one {label} value")
+    """Parse bounded lists and inclusive step/point-count ranges."""
+    values = parse_numeric_series(text, label, maximum=maximum)
     return tuple(0.0 if abs(value) < 0.5e-12 else value for value in values)
 
 

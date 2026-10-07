@@ -516,7 +516,8 @@ class BFieldTransportSweepTests(unittest.TestCase):
                 self.events.append("release")
         released = []
         devices = SimpleNamespace(get_session=lambda _name: None, release=released.append)
-        controller = BFieldTransportController(Magnet(), SimpleNamespace(), devices)
+        locks = []
+        controller = BFieldTransportController(Magnet(), SimpleNamespace(set_sweep_locked=locks.append), devices)
         self.addCleanup(lambda: controller._cleanup_timer.stop())
         controller._active = controller._exclusive_acquired = True
         controller._claimed = ["daq"]
@@ -537,6 +538,8 @@ class BFieldTransportSweepTests(unittest.TestCase):
         self.assertEqual(controller.magnet.events, ["pause", "release"])
         self.assertFalse(controller._cleanup_in_progress)
         self.assertEqual(released, [["daq"]])
+        self.assertEqual(locks, [False])
+        self.assertEqual(states[-1][0], "failed")
 
     def test_thermal_cleanup_pause_exception_retains_ownership_without_restore(self):
         class Magnet(QtCore.QObject):

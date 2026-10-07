@@ -396,11 +396,11 @@ class GateScanFieldBatchTests(unittest.TestCase):
 
     def test_parse_and_format_targets(self):
         self.assertEqual(self.batch.parse_fields("-2\n-0.5\n0\n0.125"), (-2.0, -0.5, 0.0, 0.125))
-        self.assertEqual(self.batch.parse_fields("1:-1:-1"), (1.0, 0.0))
-        self.assertEqual(self.batch.parse_fields("0:1:0.25"), (0.0, 0.25, 0.5, 0.75))
+        self.assertEqual(self.batch.parse_fields("1:-1:-1"), (1.0, 0.0, -1.0))
+        self.assertEqual(self.batch.parse_fields("0:1:0.25"), (0.0, 0.25, 0.5, 0.75, 1.0))
         self.assertEqual(
             self.batch.parse_fields("1, 2:3:0.5\n4"),
-            (1.0, 2.0, 2.5, 4.0),
+            (1.0, 2.0, 2.5, 3.0, 4.0),
         )
         self.assertEqual(self.batch.format_field_tag(-2), "B_-2T")
         self.assertEqual(self.batch.format_field_tag(-0.5), "B_-0.5T")
@@ -458,7 +458,7 @@ class GateScanFieldBatchTests(unittest.TestCase):
     def test_parse_ranges_support_negative_fractional_steps_and_validation(self):
         self.assertEqual(
             self.batch.parse_fields("1:-0.5:-0.5"),
-            (1.0, 0.5, 0.0),
+            (1.0, 0.5, 0.0, -0.5),
         )
         with self.assertRaisesRegex(ValueError, "start:stop:step"):
             self.batch.parse_fields("0:1")
@@ -467,8 +467,8 @@ class GateScanFieldBatchTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "finite"):
             self.batch.parse_fields("0:1:inf")
 
-    def test_parse_ranges_keep_stop_exclusive_and_enforce_expansion_cap(self):
-        self.assertEqual(self.batch.parse_fields("0:0.3:0.1"), (0.0, 0.1, 0.2))
+    def test_parse_ranges_include_stop_and_enforce_expansion_cap(self):
+        self.assertEqual(self.batch.parse_fields("0:0.3:0.1"), (0.0, 0.1, 0.2, 0.3))
         with self.assertRaisesRegex(ValueError, "more than|cannot exceed"):
             self.batch.parse_fields("0:10001:1")
         with self.assertRaisesRegex(ValueError, "Duplicate"):
@@ -481,10 +481,10 @@ class GateScanFieldBatchTests(unittest.TestCase):
                     self.batch.parse_fields("0:1:0.25")
 
     def test_parse_ranges_allow_exact_cap_but_reject_combined_over_cap(self):
-        fields = self.batch.parse_fields("0:8:0.0008")
+        fields = self.batch.parse_fields("0:7.9992:0.0008")
         self.assertEqual(len(fields), self.batch.MAX_EXPANDED_FIELDS)
         with self.assertRaisesRegex(ValueError, "cannot exceed"):
-            self.batch.parse_fields("0:8:0.0008, 0")
+            self.batch.parse_fields("0:7.9992:0.0008, 8")
 
     def test_preflight_and_collision_happen_before_movement(self):
         with patch("app.engine.gate_scan_field_batch.QtWidgets.QMessageBox.question", return_value=QtWidgets.QMessageBox.StandardButton.Yes):

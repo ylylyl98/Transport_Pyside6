@@ -1,2 +1,2 @@
-"""Compatibility exports for the Model 335 read-only adapter."""
+"""Compatibility exports for Model 335 telemetry and sample controls."""
 from .lakeshore335_adapter import *

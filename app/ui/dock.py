@@ -16,6 +16,7 @@ from app.settings import get_app_settings
 from app.ui.drag_drive_settings import DragDriveSettings
 from app.ui.helpers import apply_tooltip, configure_volt_spinbox, flash_button_success, set_standard_input_height, style_form_layout
 from app.ui.widgets.collapsible_section import CollapsibleSection
+from app.ui.widgets.expandable_line_edit import ExpandableLineEdit
 from app.ui.widgets.status_panel import StatusPanel
 from app.ui.widgets.resource_combo import ResourceComboBox
 from app.ui.widgets.safe_combo import SafeComboBox
@@ -193,15 +194,18 @@ class ConnDock(QtWidgets.QWidget):
         grp_save = QtWidgets.QGroupBox("Save Settings")
         form_save = QtWidgets.QFormLayout(grp_save)
         style_form_layout(form_save)
-        self.ed_user = QtWidgets.QLineEdit(self.save_root.user)
-        self.ed_device_id = QtWidgets.QLineEdit(self.save_root.device_id)
-        self.ed_base = QtWidgets.QLineEdit(self.save_root.base)
+        self.ed_user = ExpandableLineEdit(self.save_root.user, title="Edit operator")
+        self.ed_device_id = ExpandableLineEdit(self.save_root.device_id, title="Edit device ID")
+        self.ed_base = ExpandableLineEdit(self.save_root.base, title="Edit data root", directory=True)
         lbl_user = QtWidgets.QLabel("Operator:")
         lbl_device_id = QtWidgets.QLabel("Device ID:")
         lbl_base = QtWidgets.QLabel("Data Root:")
-        form_save.addRow(lbl_user, self.ed_user)
-        form_save.addRow(lbl_device_id, self.ed_device_id)
-        form_save.addRow(lbl_base, self.ed_base)
+        form_save.addRow(lbl_user)
+        form_save.addRow(self.ed_user.field_widget())
+        form_save.addRow(lbl_device_id)
+        form_save.addRow(self.ed_device_id.field_widget())
+        form_save.addRow(lbl_base)
+        form_save.addRow(self.ed_base.field_widget())
         self.exp_save = CollapsibleSection("Save Settings", grp_save, expanded=False)
         layout.addWidget(self.exp_save)
 
@@ -262,11 +266,12 @@ class ConnDock(QtWidgets.QWidget):
         form_rate.addRow('', self.lbl_drive_lkn_source)
         for field in (self.ed_lkn_readback, self.ed_drive_lkn_readback):
             field.setToolTip('Last instrument voltage range readback. Change Sensitivity in the corresponding Lock-in panel; each run reads both ranges again.')
-        self.ed_ac_contact = QtWidgets.QLineEdit()
+        self.ed_ac_contact = ExpandableLineEdit(title="Edit AC contact label")
         self.ed_ac_contact.setMaxLength(40)
         self.ed_ac_contact.setPlaceholderText("e.g. MoTe2E2 (optional)")
         self.ed_ac_contact.setToolTip("AC excitation contact label. Does not change instrument connections. Output amplitude comes from Lock-in Sine Out.")
-        form_rate.addRow("AC contact:", self.ed_ac_contact)
+        form_rate.addRow(QtWidgets.QLabel("AC contact:"))
+        form_rate.addRow(self.ed_ac_contact.field_widget())
         self.ed_ac_contact.textEdited.connect(self._on_ac_contact_edited)
         self.sp_ac_ratio = TrimmedDoubleSpinBox()
         self.sp_ac_ratio.setDecimals(9)

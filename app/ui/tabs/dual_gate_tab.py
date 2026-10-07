@@ -15,6 +15,7 @@ from app.signal_chain import SignalChainSnapshot, signal_chain_metadata
 from app.ui.helpers import apply_tooltip, configure_volt_spinbox, set_standard_input_height, style_form_layout
 from app.ui.tabs.base_tab import BaseMeasurementTab, run_filename_snapshot
 from app.ui.widgets.collapsible_section import CollapsibleSection
+from app.ui.widgets.expandable_line_edit import ExpandableLineEdit
 from app.ui.widgets.safe_combo import SafeComboBox
 from app.ui.widgets.safe_spinbox import SafeDoubleSpinBox, SafeSpinBox
 from app.ui.widgets.status_panel import SectionHeader, StatusPanel
@@ -148,12 +149,13 @@ class DualGateTab(BaseMeasurementTab):
         grp_output = QtWidgets.QGroupBox("Output Settings")
         form_output = QtWidgets.QFormLayout(grp_output)
         style_form_layout(form_output)
-        self.ed_base = QtWidgets.QLineEdit(self.p.base_name)
+        self.ed_base = ExpandableLineEdit(self.p.base_name, title="Edit filename stem")
         self.cbo_y = SafeComboBox()
         self.cbo_y.addItems(["Ids_DC", "Ids_X", "Ids_Y"])
         lbl_base = QtWidgets.QLabel("Filename Stem:")
         lbl_y = QtWidgets.QLabel("Plot Axis:")
-        form_output.addRow(lbl_base, self.ed_base)
+        form_output.addRow(lbl_base)
+        form_output.addRow(self.ed_base.field_widget())
         form_output.addRow(lbl_y, self.cbo_y)
         output_content = QtWidgets.QWidget()
         output_layout = QtWidgets.QVBoxLayout(output_content)

@@ -12,6 +12,7 @@ from app.gate_scan_summary import format_gate_scan_condition
 from app.models import GateScanCondition
 from app.ui.tabs.gate_scan_tab import GateScanTab
 from app.ui.widgets.collapsible_section import CollapsibleSection
+from app.ui.widgets.expandable_line_edit import ExpandableLineEdit
 from app.ui.widgets.status_panel import SectionHeader
 
 
@@ -148,13 +149,14 @@ class BFieldGateScanTab(GateScanTab):
 
         field_row = QtWidgets.QHBoxLayout()
         field_row.addWidget(QtWidgets.QLabel("B fields (T):"))
-        self.bfield_fields = QtWidgets.QLineEdit()
-        self.bfield_fields.setPlaceholderText("-2, -0.5, 0, 0.125 or 1:-1:-1")
+        self.bfield_fields = ExpandableLineEdit(title="Edit B fields (T)", allow_newlines=True)
+        self.bfield_fields.setPlaceholderText("List: -2, 0, 2 | Points: (-2, 2, 9) | Step: -2:2:0.5")
         self.bfield_fields.setToolTip(
-            "Enter comma/newline-separated fields, or Python-style ranges "
-            "start:stop:step (stop is exclusive)."
+            "Enter comma/newline-separated fields, (start, stop, count), "
+            "linspace(start, stop, count), or start:stop:step. "
+            "Ranges include both endpoints; the final step may be shorter."
         )
-        field_row.addWidget(self.bfield_fields, 1)
+        field_row.addStretch(1)
         self.btn_series_more = QtWidgets.QToolButton()
         self.btn_series_more.setText("More")
         self.btn_series_more.setPopupMode(QtWidgets.QToolButton.ToolButtonPopupMode.InstantPopup)
@@ -164,9 +166,11 @@ class BFieldGateScanTab(GateScanTab):
         self.btn_series_more.setMenu(menu)
         field_row.addWidget(self.btn_series_more)
         layout.addLayout(field_row)
+        layout.addWidget(self.bfield_fields.field_widget())
 
         self.bfield_help = QtWidgets.QLabel(
-            "Values may be mixed. Range syntax: start:stop:step; stop is exclusive."
+            "Points: (-2, 2, 9). Step: -2:2:0.5. Both endpoints are included; "
+            "the final step may be shorter. Values may be mixed."
         )
         self.bfield_help.setWordWrap(True)
         self.bfield_help.setProperty("role", "hint")
@@ -197,7 +201,7 @@ class BFieldGateScanTab(GateScanTab):
         )
         layout.addWidget(self.bfield_preview)
 
-        self.condition_name = QtWidgets.QLineEdit("Condition 1")
+        self.condition_name = ExpandableLineEdit("Condition 1", title="Edit condition name")
         self.condition_name.setPlaceholderText("Condition name")
         self.condition_table = QtWidgets.QTableWidget(0, 3)
         self.condition_table.setHorizontalHeaderLabels(["#", "Condition", "Saved trajectory"])
@@ -231,10 +235,8 @@ class BFieldGateScanTab(GateScanTab):
         self.condition_details_section = CollapsibleSection("Selected condition details", details_group, expanded=False)
         layout.addWidget(self.condition_details_section)
 
-        name_row = QtWidgets.QHBoxLayout()
-        name_row.addWidget(QtWidgets.QLabel("Selected name:"))
-        name_row.addWidget(self.condition_name, 1)
-        layout.addLayout(name_row)
+        layout.addWidget(QtWidgets.QLabel("Selected name:"))
+        layout.addWidget(self.condition_name.field_widget())
 
         buttons = QtWidgets.QHBoxLayout()
         self.condition_add = QtWidgets.QPushButton("Add current")

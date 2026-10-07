@@ -261,7 +261,7 @@ class MagnetConfig:
 
 @dataclass
 class LakeShore335Config:
-    """Read-only Model 335 telemetry and explicitly commissioned gate limits.
+    """Model 335 sample controls and explicitly commissioned thermal limits.
 
     The temperature values are commissioning defaults for the attoDRY1000.
     Mapping verification and ``enabled`` must still both be set explicitly by
@@ -295,7 +295,14 @@ class LakeShore335Config:
     minimum_interval_between_heater_activations_s: float = 60.0
     maximum_cooldown_wait_timeout_s: float = 3600.0
     maximum_positive_slope_k_per_min: Optional[float] = None
-    # Application-level sample readiness; LS335's commissioned ramp/PID stay untouched.
+    # Explicit sample controls; commissioned PID, input and heater wiring stay untouched.
+    sample_minimum_temperature_k: float = 0.001
+    sample_maximum_temperature_k: float = 300.0
+    sample_maximum_heater_range: int = 3
+    # Empty uses the instrument's commissioned Zone table; no guessed thresholds.
+    sample_auto_heater_ranges: List[Dict[str, Any]] = field(default_factory=list)
+    control_polling_interval_s: float = 2.0
+    # Application-level sample readiness.
     sample_stability_tolerance_k: float = 0.05
     sample_stability_dwell_s: float = 5.0
 

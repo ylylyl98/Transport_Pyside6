@@ -15,6 +15,7 @@ from types import SimpleNamespace
 from PySide6 import QtCore, QtWidgets
 
 from app.models import LineSweepParams
+from app.numeric_series import parse_numeric_series
 from app.run_output import (PlannedOutput, field_output_tag, output_blocking_reason, to_jsonable,
                             new_run_id, compose_output_stem, planned_output_at,
                             unique_planned_output, gate_scan_filename_parts)
@@ -303,81 +304,8 @@ class GateScanFieldBatch(QtCore.QObject):
 
     @staticmethod
     def parse_fields(text: str) -> tuple[float, ...]:
-        """Parse scalar targets and Python-style ``start:stop:step`` ranges.
-
-        Ranges use an exclusive stop, matching Python's range progression;
-        commas and newlines may be mixed between entries.
-        """
-        values = []
-        for line_number, raw in enumerate(str(text or "").replace(",", "\n").splitlines(), start=1):
-            token = raw.strip()
-            if not token:
-                continue
-            if ":" not in token:
-                try:
-                    value = float(token)
-                except (TypeError, ValueError) as exc:
-                    raise ValueError(f"Line {line_number}: enter a finite field in tesla") from exc
-                if not math.isfinite(value):
-                    raise ValueError(f"Line {line_number}: field must be finite")
-                if len(values) >= GateScanFieldBatch.MAX_EXPANDED_FIELDS:
-                    raise ValueError(
-                        f"The B-field series cannot exceed "
-                        f"{GateScanFieldBatch.MAX_EXPANDED_FIELDS:,} fields"
-                    )
-                values.append(value)
-                continue
-
-            parts = [part.strip() for part in token.split(":")]
-            if len(parts) != 3 or any(not part for part in parts):
-                raise ValueError(
-                    f"Line {line_number}: use Python-style start:stop:step ranges"
-                )
-            try:
-                start, stop, step = (float(part) for part in parts)
-            except (TypeError, ValueError) as exc:
-                raise ValueError(
-                    f"Line {line_number}: range values must be finite numbers"
-                ) from exc
-            if not all(math.isfinite(value) for value in (start, stop, step)):
-                raise ValueError(f"Line {line_number}: range values must be finite")
-            if step == 0.0:
-                raise ValueError(f"Line {line_number}: range step cannot be zero")
-            if (step > 0.0 and stop < start) or (step < 0.0 and stop > start):
-                raise ValueError(
-                    f"Line {line_number}: range step direction does not reach its stop"
-                )
-
-            # Python range semantics: stop is exclusive.  Computing each
-            # value from its index avoids cumulative floating-point drift and
-            # therefore avoids accidentally including a nominally exclusive
-            # endpoint.  The strict comparison below intentionally has no
-            # tolerance; a stop that is genuinely just beyond a point should
-            # include that point, just as a Python numeric progression does.
-            distance = (stop - start) / step
-            if distance > GateScanFieldBatch.MAX_EXPANDED_FIELDS:
-                raise ValueError(
-                    f"Line {line_number}: range expands to more than "
-                    f"{GateScanFieldBatch.MAX_EXPANDED_FIELDS:,} fields"
-                )
-            count = max(0, math.ceil(distance))
-            if len(values) + count > GateScanFieldBatch.MAX_EXPANDED_FIELDS:
-                raise ValueError(
-                    f"The B-field series cannot exceed "
-                    f"{GateScanFieldBatch.MAX_EXPANDED_FIELDS:,} fields"
-                )
-            for index in range(count):
-                value = start + index * step
-                if (step > 0.0 and value >= stop) or (step < 0.0 and value <= stop):
-                    break
-                values.append(value)
-        if not values:
-            raise ValueError("Enter at least one B-field target")
-        if len(values) > GateScanFieldBatch.MAX_EXPANDED_FIELDS:
-            raise ValueError(
-                f"The B-field series cannot exceed "
-                f"{GateScanFieldBatch.MAX_EXPANDED_FIELDS:,} fields"
-            )
+        """Parse bounded field lists and ranges including both endpoints."""
+        values = parse_numeric_series(text, "B-field", maximum=GateScanFieldBatch.MAX_EXPANDED_FIELDS)
         normalized = [0.0 if abs(value) < 0.5e-12 else value for value in values]
         if len({round(value, 12) for value in normalized}) != len(normalized):
             raise ValueError("Duplicate normalized B-field targets are not allowed")

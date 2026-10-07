@@ -42,6 +42,7 @@ from app.settings import get_app_settings
 from app.ui.helpers import set_standard_input_height, style_form_layout
 from app.ui.tabs.base_tab import BaseMeasurementTab
 from app.ui.widgets.safe_combo import SafeComboBox
+from app.ui.widgets.expandable_line_edit import ExpandableLineEdit
 from app.ui.widgets.safe_spinbox import SafeDoubleSpinBox, SafeSpinBox
 from app.ui.widgets.status_panel import SectionHeader, StatusPanel
 from utils.config import cfg
@@ -236,28 +237,25 @@ class BFieldTransportTab(BaseMeasurementTab):
         self.cbo_condition_add_mode.addItem("Vtg / Vbg", "gates")
         mode_row.addWidget(self.cbo_condition_add_mode, 1)
         builder_layout.addLayout(mode_row)
-        values_row = QtWidgets.QHBoxLayout()
         self.lbl_condition_add_first = QtWidgets.QLabel("Doping:")
-        self.ed_condition_add_first = QtWidgets.QLineEdit("0")
+        self.ed_condition_add_first = ExpandableLineEdit("0", title="Edit first coordinate values", allow_newlines=True)
         self.lbl_condition_add_second = QtWidgets.QLabel("E-field:")
-        self.ed_condition_add_second = QtWidgets.QLineEdit("0")
+        self.ed_condition_add_second = ExpandableLineEdit("0", title="Edit second coordinate values", allow_newlines=True)
         set_standard_input_height(self.ed_condition_add_first)
         set_standard_input_height(self.ed_condition_add_second)
-        self.ed_condition_add_first.setPlaceholderText("0, 1, 2 or 0:3:1")
-        self.ed_condition_add_second.setPlaceholderText("single value or matching array")
-        values_row.addWidget(self.lbl_condition_add_first)
-        values_row.addWidget(self.ed_condition_add_first, 1)
-        values_row.addWidget(self.lbl_condition_add_second)
-        values_row.addWidget(self.ed_condition_add_second, 1)
-        builder_layout.addLayout(values_row)
-        vds_row = QtWidgets.QHBoxLayout()
-        vds_row.addWidget(QtWidgets.QLabel("Vds (V):"))
-        self.ed_condition_add_vds = QtWidgets.QLineEdit("0.1")
+        self.ed_condition_add_first.setPlaceholderText("0, 1, 2 | (0, 2, 3) | 0:2:1")
+        self.ed_condition_add_second.setPlaceholderText("single value or matching list/range")
+        builder_layout.addWidget(self.lbl_condition_add_first)
+        builder_layout.addWidget(self.ed_condition_add_first.field_widget())
+        builder_layout.addWidget(self.lbl_condition_add_second)
+        builder_layout.addWidget(self.ed_condition_add_second.field_widget())
+        builder_layout.addWidget(QtWidgets.QLabel("Vds (V):"))
+        self.ed_condition_add_vds = ExpandableLineEdit("0.1", title="Edit Vds values (V)", allow_newlines=True)
         set_standard_input_height(self.ed_condition_add_vds)
-        vds_row.addWidget(self.ed_condition_add_vds, 1)
-        builder_layout.addLayout(vds_row)
+        builder_layout.addWidget(self.ed_condition_add_vds.field_widget())
         syntax_hint = QtWidgets.QLabel(
-            "Single: 0 | List: -1,1,5 | Range: -1:1:0.5 (stop excluded). "
+            "Single: 0 | List: -1,1,5 | Points: (-1,1,5) | Step: -1:1:0.5. "
+            "Ranges include both endpoints; the final step may be shorter. "
             "Series pair row by row; single values repeat."
         )
         syntax_hint.setWordWrap(True)
@@ -311,7 +309,7 @@ class BFieldTransportTab(BaseMeasurementTab):
         self.sp_averages = SafeSpinBox()
         self.sp_averages.setRange(1, 10000)
         self.sp_averages.setValue(1)
-        self.ed_base = QtWidgets.QLineEdit(self.params.base_name)
+        self.ed_base = ExpandableLineEdit(self.params.base_name, title="Edit filename stem")
         acq_form.addRow("Delay (s):", self.sp_delay)
         acq_form.addRow("Averages:", self.sp_averages)
         ctl_layout.addWidget(acq)
@@ -320,7 +318,8 @@ class BFieldTransportTab(BaseMeasurementTab):
         output_layout = QtWidgets.QVBoxLayout(output_wrap)
         output_layout.setContentsMargins(0, 0, 0, 0)
         file_form = QtWidgets.QFormLayout()
-        file_form.addRow("Filename stem:", self.ed_base)
+        file_form.addRow(QtWidgets.QLabel("Filename stem:"))
+        file_form.addRow(self.ed_base.field_widget())
         output_layout.addLayout(file_form)
         self._add_output_preview_section(output_layout)
         ctl_layout.addWidget(output_wrap)

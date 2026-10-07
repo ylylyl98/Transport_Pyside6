@@ -32,6 +32,7 @@ from app.ui.helpers import apply_tooltip, configure_volt_spinbox, flash_button_s
 from app.ui.tabs.base_tab import BaseMeasurementTab, run_filename_snapshot
 from app.ui.widgets.plot_widget import PlotWidget
 from app.ui.widgets.collapsible_section import CollapsibleSection
+from app.ui.widgets.expandable_line_edit import ExpandableLineEdit
 from app.ui.widgets.safe_combo import SafeComboBox
 from app.ui.widgets.safe_spinbox import SafeDoubleSpinBox, SafeSpinBox, TrimmedDoubleSpinBox
 from app.ui.widgets.status_panel import SectionHeader, StatusPanel
@@ -308,7 +309,7 @@ class CoSweepTab(BaseMeasurementTab):
         grp_output = QtWidgets.QGroupBox("Output Settings")
         form_output = QtWidgets.QFormLayout(grp_output)
         style_form_layout(form_output)
-        self.ed_base = QtWidgets.QLineEdit(self.p.base_name)
+        self.ed_base = ExpandableLineEdit(self.p.base_name, title="Edit filename stem")
         self.cbo_x = SafeComboBox()
         for axis in PLOT_X_AXES:
             self.cbo_x.addItem(axis, axis)
@@ -320,7 +321,8 @@ class CoSweepTab(BaseMeasurementTab):
         lbl_base = QtWidgets.QLabel("Filename Stem:")
         lbl_x = QtWidgets.QLabel("Plot X Axis:")
         lbl_y = QtWidgets.QLabel("Plot Y Axis:")
-        form_output.addRow(lbl_base, self.ed_base)
+        form_output.addRow(lbl_base)
+        form_output.addRow(self.ed_base.field_widget())
         form_output.addRow(lbl_x, self.cbo_x)
         form_output.addRow("", self.lbl_x_resolved)
         form_output.addRow(lbl_y, self.cbo_y)
