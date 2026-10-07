@@ -9,6 +9,7 @@ from app.constants import GATE_BIAS_RAMP_STEP_T, GATE_BIAS_RAMP_STEP_V
 from app.measurement_output import dual_gate_filename_parts
 from app.device_manager import DeviceManager
 from app.models import Connections, DualGateParams, SaveRoot
+from app.plot_ranges import stepped_sweep_bounds
 from app.result_channels import compare_channel_options, plot_channel_options, plot_channel_value
 from app.run_output import build_planned_output, planned_output_warning
 from app.signal_chain import SignalChainSnapshot, signal_chain_metadata
@@ -16,6 +17,7 @@ from app.ui.helpers import apply_tooltip, configure_volt_spinbox, set_standard_i
 from app.ui.tabs.base_tab import BaseMeasurementTab, run_filename_snapshot
 from app.ui.widgets.collapsible_section import CollapsibleSection
 from app.ui.widgets.expandable_line_edit import ExpandableLineEdit
+from app.ui.widgets.plot_widget import preserve_plot_view
 from app.ui.widgets.safe_combo import SafeComboBox
 from app.ui.widgets.safe_spinbox import SafeDoubleSpinBox, SafeSpinBox
 from app.ui.widgets.status_panel import SectionHeader, StatusPanel
@@ -482,7 +484,7 @@ class DualGateTab(BaseMeasurementTab):
             QtWidgets.QMessageBox.warning(self, "Busy", f"Devices already in use: {', '.join(blocked).upper()}")
             return
         self._plot_records = []
-        self.plot.clear()
+        self.plot.clear(reset_plan=True)
         self.plot.ax.set_xlabel("Vds (V)")
         self.set_plot_axis_source(self.p.plot_choice)
         try:
@@ -500,6 +502,8 @@ class DualGateTab(BaseMeasurementTab):
                 lkn_rate=lkn_rate,
                 signal_chain=signal_chain_metadata(signal_chain),
             )
+            step = self.p.vds_step if self.p.vds_stop >= self.p.vds_start else -abs(self.p.vds_step)
+            self.plot.set_planned_ranges({"x": stepped_sweep_bounds(self.p.vds_start, self.p.vds_stop, step)})
             self.worker_thread = QtCore.QThread()
             self.worker.moveToThread(self.worker_thread)
             self.worker_thread.started.connect(self.worker.run)
@@ -554,6 +558,7 @@ class DualGateTab(BaseMeasurementTab):
         self.p.plot_choice = source
         self._redraw_plot()
 
+    @preserve_plot_view
     def _redraw_plot(self):
         fwd = [r for r in self._plot_records if r.get("direction", "forward") == "forward"]
         bwd = [r for r in self._plot_records if r.get("direction") == "backward"]
@@ -567,8 +572,6 @@ class DualGateTab(BaseMeasurementTab):
                 if bwd:
                     axis.plot([r["x"] for r in bwd], [plot_channel_value(r, channel) for r in bwd], "r-o", markersize=3, label="Backward")
                     axis.legend(loc="best", fontsize=7)
-                axis.relim()
-                axis.autoscale_view()
                 axis.set_ylabel(f"{channel} (A)")
                 axis.grid(True)
             for axis in self.plot.bottom_axes():
@@ -583,8 +586,6 @@ class DualGateTab(BaseMeasurementTab):
             if bwd:
                 ax.plot([r["x"] for r in bwd], [plot_channel_value(r, source) for r in bwd], "r-o", markersize=3, label="Backward")
                 ax.legend(loc="best", fontsize=7)
-            ax.relim()
-            ax.autoscale_view()
             ax.set_xlabel("Vds (V)")
             ax.set_ylabel(f"{source} (A)")
             ax.grid(True)

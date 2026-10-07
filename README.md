@@ -25,6 +25,8 @@ Gate Scan provides a prominent **Raw Voltages** / **Doping / E-field** trajector
 
 Live plots default to **Follow Sweep** for the x-axis: Gate Scan follows its selected Doping/E-field or single raw-voltage sweep, while 2D Map follows its fast axis. A manual x-axis override can display Step Index, `Vtg`, `Vbg`, `Vds`, Doping, or E-field; changing this display setting replots already collected points without changing the hardware trajectory.
 
+**X range: Full sweep** is the default live view: the complete execution range is shown before the first point, with a small margin. Gate Scan and 2D Map use the generated trajectory, including derived coordinates, additional regions and round-trip step indices. **Acquired data** fits the X range to recorded points; plots without a known plan also follow recorded points. Y limits follow measured values in either mode. Four-channel views share X limits and scale Y independently. The toolbar provides pan, rectangle zoom and figure saving; incoming points preserve manual X/Y limits. **Home** restores the selected range policy and automatic Y scaling. Changing the X coordinate resets X zoom, and changing the current channel resets Y zoom. Starting a new run clears the previous plan and zoom while retaining the selected range mode. Readback beyond the planned view is included automatically.
+
 ## Hardware and software requirements
 
 - Windows 10/11 (the supplied launcher is a Windows batch file)

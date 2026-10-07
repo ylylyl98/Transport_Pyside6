@@ -16,6 +16,7 @@ from app.gate_transform import (
     ratio_formula_text,
 )
 from app.models import CoParams, Connections, SaveRoot
+from app.plot_ranges import coordinate_ranges
 from app.settings import get_app_settings
 from app.plot_x_axis import (
     FOLLOW_SWEEP,
@@ -30,7 +31,7 @@ from app.run_output import build_planned_output, planned_output_warning
 from app.signal_chain import SignalChainSnapshot, signal_chain_metadata
 from app.ui.helpers import apply_tooltip, configure_volt_spinbox, flash_button_success, set_standard_input_height, style_form_layout
 from app.ui.tabs.base_tab import BaseMeasurementTab, run_filename_snapshot
-from app.ui.widgets.plot_widget import PlotWidget
+from app.ui.widgets.plot_widget import PlotWidget, preserve_plot_view
 from app.ui.widgets.collapsible_section import CollapsibleSection
 from app.ui.widgets.expandable_line_edit import ExpandableLineEdit
 from app.ui.widgets.safe_combo import SafeComboBox
@@ -78,6 +79,7 @@ class CoSweepTab(BaseMeasurementTab):
         self.plot_tabs = QtWidgets.QTabWidget()
         self.preview_plot = PlotWidget()
         self.preview_plot.btn_plot_mode.hide()
+        self.preview_plot.btn_x_range.hide()
         self.preview_plot.setMinimumHeight(300)
         self.plot_splitter.replaceWidget(0, self.plot_tabs)
         self.plot_tabs.addTab(self.preview_plot, "Sweep Preview")
@@ -1087,15 +1089,11 @@ class CoSweepTab(BaseMeasurementTab):
             self._update_sweep_summary()
 
     def on_axis_change_label(self):
-        if self._plot_records or self.plot.current_plot_mode() == "4-Channel Compare":
-            self._redraw_plot()
-            return
-        self._set_plot_x_label(self.plot.ax)
-        self.plot.ax.set_ylabel(f"{self.cbo_y.currentText()} (A)")
-        self.plot.canvas.draw_idle()
+        self._redraw_plot()
 
     def _set_plot_x_label(self, axis) -> None:
         resolved_axis = self._resolved_plot_x_axis()
+        self.plot.set_x_axis_key(resolved_axis)
         self._update_plot_x_resolution_hint(resolved_axis)
         ratio, ratio_target = self._plot_ratio_context()
         axis.set_xlabel(plot_x_axis_label(resolved_axis, ratio, ratio_target))
@@ -1340,12 +1338,14 @@ class CoSweepTab(BaseMeasurementTab):
         self._plot_records = []
         self._preview_timer.stop()
         self.plot_tabs.setCurrentWidget(self.plot)
-        self.plot.clear()
+        self.plot.clear(reset_plan=True)
         self.set_plot_axis_source(self.p.plot_choice)
         try:
             self.begin_run_logging(self._planned_output, "2D Map" if self._is_2d_map() else "1D Sweep")
             self.worker = CoSweepWorker(self.p, self.save, self.conns, g1=self.s_g1, g2=self.s_g2, g3=self.s_g3, daq=self.s_daq, plot_choice=self.p.plot_choice, amp_rate=amp, lkn_rate=lkn, signal_chain=signal_chain_metadata(signal_chain))
             trajectory = build_cosweep_points(self.p)
+            self.plot.set_planned_ranges(coordinate_ranges(trajectory),
+                                         axis=self._resolved_plot_x_axis())
             initial_seconds = estimate_cosweep_seconds(self.p, points=trajectory,
                                                        connections=self.conns, device_id=self.save.device_id)
             self._live_eta = LiveCoSweepTiming(len(trajectory), initial_seconds,
@@ -1433,6 +1433,7 @@ class CoSweepTab(BaseMeasurementTab):
         self.p.plot_choice = source
         self._redraw_plot()
 
+    @preserve_plot_view
     def _redraw_plot(self):
         xs = [self._record_plot_x(record) for record in self._plot_records]
         if self.plot.current_plot_mode() == "4-Channel Compare":
@@ -1443,8 +1444,6 @@ class CoSweepTab(BaseMeasurementTab):
                 ys = [plot_channel_value(record, channel) for record in self._plot_records]
                 if xs:
                     axis.plot(xs, ys, "o-")
-                    axis.relim()
-                    axis.autoscale_view()
                 axis.set_ylabel(f"{channel} (A)")
                 axis.grid(True)
             for axis in self.plot.bottom_axes():
@@ -1458,8 +1457,6 @@ class CoSweepTab(BaseMeasurementTab):
             ys = [plot_channel_value(record, source) for record in self._plot_records]
             if xs:
                 ax.plot(xs, ys, "o-")
-                ax.relim()
-                ax.autoscale_view()
             ax.grid(True)
             self._set_plot_x_label(ax)
             ax.set_ylabel(f"{self.cbo_y.currentText()} (A)")

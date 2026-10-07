@@ -1,8 +1,29 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
+from functools import wraps
+
 from PySide6 import QtCore, QtWidgets
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas, NavigationToolbar2QT
 from matplotlib.figure import Figure
+from app.plot_ranges import FULL_SWEEP, ACQUIRED_DATA, finite_bounds, padded_limits
+
+
+def preserve_plot_view(method):
+    """Keep user zoom and apply the selected X policy after artist updates."""
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        with self.plot.redraw():
+            return method(self, *args, **kwargs)
+    return wrapped
+
+
+class _PlotToolbar(NavigationToolbar2QT):
+    toolitems = tuple(item for item in NavigationToolbar2QT.toolitems
+                     if item[0] in {"Home", "Back", "Forward", "Pan", "Zoom", "Save"})
+
+    def home(self, *args):
+        self.parent().reset_view()
 
 
 class PlotWidget(QtWidgets.QWidget):
@@ -21,6 +42,13 @@ class PlotWidget(QtWidgets.QWidget):
         self._selected_plot_mode = "Single Plot"
         self._compare_channels: list[str] = []
         self._compare_grid = False
+        self._x_range_mode = FULL_SWEEP
+        self._planned_x_ranges = {}
+        self._x_axis_key = "x"
+        self._manual_xlim = None
+        self._manual_ylims = {}
+        self._view_update_depth = 0
+        self._view_callbacks = []
 
         lay = QtWidgets.QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -35,6 +63,18 @@ class PlotWidget(QtWidgets.QWidget):
         self.plot_mode_menu = QtWidgets.QMenu(self)
         self.btn_plot_mode.setMenu(self.plot_mode_menu)
         header.addWidget(self.btn_plot_mode, 0, QtCore.Qt.AlignmentFlag.AlignLeft)
+        self.btn_x_range = QtWidgets.QToolButton()
+        self.btn_x_range.setPopupMode(QtWidgets.QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.btn_x_range.setProperty("role", "status-detail")
+        self.x_range_menu = QtWidgets.QMenu(self)
+        self.btn_x_range.setMenu(self.x_range_menu)
+        for mode in (FULL_SWEEP, ACQUIRED_DATA):
+            action = self.x_range_menu.addAction(mode)
+            action.setCheckable(True)
+            action.triggered.connect(lambda checked=False, value=mode: self.set_x_range_mode(value))
+        self.btn_x_range.setToolTip("Full sweep shows the complete planned X range. Acquired data follows recorded points. Home resets zoom.")
+        header.addWidget(self.btn_x_range)
+        self._update_x_range_menu()
         header.addStretch(1)
         self.btn_y_axis = QtWidgets.QToolButton()
         self.btn_y_axis.setPopupMode(QtWidgets.QToolButton.ToolButtonPopupMode.InstantPopup)
@@ -44,6 +84,8 @@ class PlotWidget(QtWidgets.QWidget):
         self.btn_y_axis.setMenu(self.y_axis_menu)
         header.addWidget(self.btn_y_axis, 0, QtCore.Qt.AlignmentFlag.AlignRight)
         lay.addLayout(header)
+        self.toolbar = _PlotToolbar(self.canvas, self)
+        lay.addWidget(self.toolbar)
         lay.addWidget(self.canvas)
         self.set_plot_mode_options(self._plot_modes, self._selected_plot_mode)
         self.clear()
@@ -60,6 +102,8 @@ class PlotWidget(QtWidgets.QWidget):
         self.btn_y_axis.setVisible(bool(options) and self._selected_plot_mode == 'Single Plot')
 
     def set_selected_y_axis(self, selected: str):
+        if selected != self._selected_y_axis:
+            self._manual_ylims.clear()
         self._selected_y_axis = selected
         self.btn_y_axis.setText(f"Y: {selected}")
         for action in self.y_axis_menu.actions():
@@ -124,6 +168,14 @@ class PlotWidget(QtWidgets.QWidget):
             axis.tick_params(axis='x', labelbottom=axis.get_subplotspec().is_last_row())
 
     def _rebuild_axes(self):
+        with self.redraw():
+            self._create_axes()
+            self._manual_ylims.clear()
+        if hasattr(self, "toolbar"):
+            self.toolbar.update()
+        self.canvas.draw_idle()
+
+    def _create_axes(self):
         self.fig.clear()
         if self._selected_plot_mode == "4-Channel Compare" and self._compare_channels:
             if self._compare_grid and len(self._compare_channels) == 4:
@@ -143,11 +195,104 @@ class PlotWidget(QtWidgets.QWidget):
         for axis in self.axes:
             axis.grid(True)
         self.format_compare_axes()
+
+    def clear(self, *, reset_plan=False):
+        if reset_plan:
+            self._planned_x_ranges.clear()
+            self._manual_xlim = None
+            self._manual_ylims.clear()
+        self._rebuild_axes()
         self.canvas.draw_idle()
 
-    def clear(self):
-        self._rebuild_axes()
-        for axis in self.axes:
-            axis.clear()
-            axis.grid(True)
+    def _update_x_range_menu(self):
+        self.btn_x_range.setText("X range: " + self._x_range_mode)
+        for action in self.x_range_menu.actions():
+            action.setChecked(action.text() == self._x_range_mode)
+
+    def set_x_range_mode(self, mode):
+        if mode not in {FULL_SWEEP, ACQUIRED_DATA}:
+            raise ValueError("Unknown plot X range mode")
+        self._x_range_mode = mode
+        self._update_x_range_menu()
+        self.reset_view()
+
+    def set_planned_ranges(self, ranges, *, axis=None):
+        self._planned_x_ranges = {key: tuple(sorted(bounds)) for key, bounds in ranges.items()}
+        if axis is not None:
+            self._x_axis_key = axis
+        self.reset_view()
+
+    def set_x_axis_key(self, axis):
+        if axis != self._x_axis_key:
+            self._x_axis_key = axis
+            self._manual_xlim = None
+
+    def reset_view(self):
+        self._manual_xlim = None
+        self._manual_ylims.clear()
+        with self.redraw():
+            pass
+        self.toolbar.update()
+        self.toolbar.push_current()
         self.canvas.draw_idle()
+
+    @contextmanager
+    def redraw(self):
+        self._view_update_depth += 1
+        try:
+            yield
+        finally:
+            try:
+                if self._view_update_depth == 1:
+                    self._apply_view_limits()
+                    # Axes.clear replaces its callback registry.
+                    self._bind_view_callbacks()
+            finally:
+                self._view_update_depth -= 1
+
+    def _apply_view_limits(self):
+        bounds = []
+        for axis in self.axes:
+            for line in axis.lines:
+                extent = finite_bounds(line.get_xdata())
+                if extent is not None:
+                    bounds.extend(extent)
+        measured = finite_bounds(bounds)
+        planned = self._planned_x_ranges.get(self._x_axis_key) if self._x_range_mode == FULL_SWEEP else None
+        x_limits = self._manual_xlim
+        if x_limits is None:
+            if planned is not None:
+                x_limits = padded_limits(planned)
+                # Keep the planned view stable through small readback deviations.
+                if measured is not None and (measured[0] < x_limits[0] or measured[1] > x_limits[1]):
+                    x_limits = padded_limits(finite_bounds((*planned, *measured)))
+            elif measured is not None:
+                x_limits = padded_limits(measured)
+        for index, axis in enumerate(self.axes):
+            axis.relim()
+            axis.set_autoscalex_on(True)
+            axis.set_autoscaley_on(True)
+            axis.autoscale_view()
+            if x_limits is not None:
+                axis.set_xlim(x_limits)
+            if index in self._manual_ylims:
+                axis.set_ylim(self._manual_ylims[index])
+
+    def _bind_view_callbacks(self):
+        for registry, x_id, y_id in self._view_callbacks:
+            registry.disconnect(x_id)
+            registry.disconnect(y_id)
+        self._view_callbacks = []
+        for index, axis in enumerate(self.axes):
+            registry = axis.callbacks
+            x_id = registry.connect("xlim_changed", self._capture_xlim)
+            y_id = registry.connect("ylim_changed", lambda changed, i=index: self._capture_ylim(changed, i))
+            self._view_callbacks.append((registry, x_id, y_id))
+
+    def _capture_xlim(self, axis):
+        if not self._view_update_depth:
+            self._manual_xlim = axis.get_xlim()
+
+    def _capture_ylim(self, axis, index):
+        if not self._view_update_depth:
+            self._manual_ylims[index] = axis.get_ylim()

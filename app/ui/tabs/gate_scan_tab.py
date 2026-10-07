@@ -16,6 +16,7 @@ from app.gate_transform import (
     ratio_formula_text,
 )
 from app.models import Connections, LineSweepParams, SaveRoot
+from app.plot_ranges import coordinate_ranges
 from app.plot_x_axis import (
     FOLLOW_SWEEP,
     PLOT_X_AXES,
@@ -32,6 +33,7 @@ from app.ui.helpers import apply_tooltip, configure_volt_spinbox, set_standard_i
 from app.ui.tabs.base_tab import BaseMeasurementTab, run_filename_snapshot
 from app.ui.widgets.collapsible_section import CollapsibleSection
 from app.ui.widgets.expandable_line_edit import ExpandableLineEdit
+from app.ui.widgets.plot_widget import preserve_plot_view
 from app.ui.widgets.safe_combo import SafeComboBox
 from app.ui.widgets.safe_spinbox import SafeDoubleSpinBox, SafeSpinBox
 from app.ui.widgets.status_panel import SectionHeader, StatusPanel
@@ -989,15 +991,11 @@ class GateScanTab(BaseMeasurementTab):
         self.lbl_derived_range.style().polish(self.lbl_derived_range)
 
     def _update_plot_axis_label(self, *_args):
-        if self._plot_records or self.plot.current_plot_mode() == "4-Channel Compare":
-            self._redraw_plot()
-            return
-        self._set_plot_x_label(self.plot.ax)
-        self.plot.ax.set_ylabel(f"{self.cbo_y.currentText()} (A)")
-        self.plot.canvas.draw_idle()
+        self._redraw_plot()
 
     def _set_plot_x_label(self, axis) -> None:
         resolved_axis = self._resolved_plot_x_axis()
+        self.plot.set_x_axis_key(resolved_axis)
         self._update_plot_x_resolution_hint(resolved_axis)
         ratio, ratio_target = self._plot_ratio_context()
         axis.set_xlabel(plot_x_axis_label(resolved_axis, ratio, ratio_target))
@@ -1418,7 +1416,7 @@ class GateScanTab(BaseMeasurementTab):
                 QtWidgets.QMessageBox.warning(self, "Busy", f"Devices already in use: {', '.join(blocked).upper()}")
                 return
         self._plot_records = []
-        self.plot.clear()
+        self.plot.clear(reset_plan=True)
         self.set_plot_axis_source(self.p.plot_choice)
         try:
             self.begin_run_logging(self._planned_output, "Gate Scan")
@@ -1436,6 +1434,10 @@ class GateScanTab(BaseMeasurementTab):
                 signal_chain=signal_chain_metadata(signal_chain),
                 batch_metadata=self._batch_metadata,
             )
+            points = self.worker._build_trajectory()
+            count = len(points) * (2 if self.p.sweep_both_ways else 1)
+            self.plot.set_planned_ranges(coordinate_ranges(points, total_count=count),
+                                         axis=self._resolved_plot_x_axis())
             self.worker_thread = QtCore.QThread()
             self.worker.moveToThread(self.worker_thread)
             self.worker_thread.started.connect(self.worker.run)
@@ -1497,6 +1499,7 @@ class GateScanTab(BaseMeasurementTab):
         self.p.plot_choice = source
         self._redraw_plot()
 
+    @preserve_plot_view
     def _redraw_plot(self):
         fwd = [r for r in self._plot_records if r.get("direction", "forward") == "forward"]
         bwd = [r for r in self._plot_records if r.get("direction") == "backward"]
@@ -1510,8 +1513,6 @@ class GateScanTab(BaseMeasurementTab):
                 if bwd:
                     axis.plot([self._record_plot_x(r) for r in bwd], [plot_channel_value(r, channel) for r in bwd], "r-o", markersize=3, label="Backward")
                     axis.legend(loc="best", fontsize=7)
-                axis.relim()
-                axis.autoscale_view()
                 axis.set_ylabel(f"{channel} (A)")
                 axis.grid(True)
             for axis in self.plot.bottom_axes():
@@ -1527,8 +1528,6 @@ class GateScanTab(BaseMeasurementTab):
             if bwd:
                 ax.plot([self._record_plot_x(r) for r in bwd], [plot_channel_value(r, source) for r in bwd], "r-o", markersize=3, label="Backward")
                 ax.legend(loc="best", fontsize=7)
-            ax.relim()
-            ax.autoscale_view()
             self._set_plot_x_label(ax)
             ax.set_ylabel(f"{self.cbo_y.currentText()} (A)")
             ax.grid(True)

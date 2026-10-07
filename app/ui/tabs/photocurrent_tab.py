@@ -15,6 +15,7 @@ from app.ui.helpers import apply_tooltip, configure_volt_spinbox, flash_button_s
 from app.ui.tabs.base_tab import BaseMeasurementTab, run_filename_snapshot
 from app.ui.widgets.collapsible_section import CollapsibleSection
 from app.ui.widgets.expandable_line_edit import ExpandableLineEdit
+from app.ui.widgets.plot_widget import preserve_plot_view
 from app.ui.widgets.safe_combo import SafeComboBox
 from app.ui.widgets.safe_spinbox import SafeDoubleSpinBox, SafeSpinBox
 from app.ui.widgets.status_panel import SectionHeader, StatusPanel
@@ -830,12 +831,13 @@ class PhotocurrentTab(BaseMeasurementTab):
             QtWidgets.QMessageBox.warning(self, "Busy", f"Devices already in use: {', '.join(blocked).upper()}")
             return
         self._plot_records = []
-        self.plot.clear()
+        self.plot.clear(reset_plan=True)
         self.plot.ax.set_xlabel("Wavelength (nm)")
         self.set_plot_axis_source(self.p.plot_choice)
         try:
             self.begin_run_logging(self._planned_output, "Photocurrent")
             self.worker = PhotocurrentWorker(self.p, self.save, self.conns, g1=self.s_g1, g2=self.s_g2, g3=self.s_g3, daq=self.s_daq, mono=self.s_mono, plot_choice=self.p.plot_choice, amp_rate=amp, lkn_rate=lkn, signal_chain=signal_chain_metadata(signal_chain))
+            self.plot.set_planned_ranges({"x": (self.p.wl_start, self.p.wl_stop)})
             self.worker_thread = QtCore.QThread()
             self.worker.moveToThread(self.worker_thread)
             self.worker_thread.started.connect(self.worker.run)
@@ -887,6 +889,7 @@ class PhotocurrentTab(BaseMeasurementTab):
         self.p.plot_choice = source
         self._redraw_plot()
 
+    @preserve_plot_view
     def _redraw_plot(self):
         groups: dict[int, list[dict]] = {}
         for record in self._plot_records:
@@ -912,8 +915,6 @@ class PhotocurrentTab(BaseMeasurementTab):
                         label=label_for(records),
                     )
                 if groups:
-                    axis.relim()
-                    axis.autoscale_view()
                     if len(groups) > 1:
                         axis.legend(fontsize="x-small")
                 axis.set_ylabel(f"{channel} (A)")
@@ -933,8 +934,6 @@ class PhotocurrentTab(BaseMeasurementTab):
                     label=label_for(records),
                 )
             if groups:
-                ax.relim()
-                ax.autoscale_view()
                 if len(groups) > 1:
                     ax.legend(fontsize="small")
             ax.set_xlabel("Wavelength (nm)")

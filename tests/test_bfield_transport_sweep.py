@@ -1103,6 +1103,8 @@ class BFieldTransportSweepTests(unittest.TestCase):
         class Tab(QtCore.QObject):
             def __init__(self):
                 super().__init__()
+                from app.ui.widgets.plot_widget import PlotWidget
+                self.plot = PlotWidget()
                 self.temporary = tempfile.TemporaryDirectory()
                 self.save = SaveRoot(user="u", device_id="d", base=self.temporary.name)
                 self.locked = []
@@ -1119,6 +1121,7 @@ class BFieldTransportSweepTests(unittest.TestCase):
             def set_sweep_locked(self, value): self.locked.append(value)
             def window(self): return type("Window", (), {"magnet_panel": type("Panel", (), {"_review_valid": lambda self: True})()})()
         magnet, manager, tab = Magnet(), Manager(), Tab()
+        self.addCleanup(tab.plot.close)
         thermal = type("Thermal", (), {
             "is_armed": True,
             "latest_snapshot": None,
@@ -1126,6 +1129,9 @@ class BFieldTransportSweepTests(unittest.TestCase):
         })()
         controller = BFieldTransportController(magnet, tab, manager, thermal_safety=thermal)
         self.assertTrue(controller.start())
+        self.assertLess(tab.plot.ax.get_xlim()[0], 0)
+        self.assertGreater(tab.plot.ax.get_xlim()[1], 1)
+        self.assertEqual(list(tab.plot.ax.lines[0].get_xdata()), [])
         self.assertEqual(controller._manifest, tab.frozen_paths.manifest_path)
         self.assertEqual(magnet.events[1], ("polling", True))
         self.assertEqual(tuple(writer.path for writer in controller._writers.values()), tab.frozen_paths.condition_csv_paths)

@@ -12,6 +12,7 @@ import math
 import threading
 import json
 from collections import deque
+from contextlib import nullcontext
 from dataclasses import asdict, is_dataclass
 from copy import deepcopy
 
@@ -472,6 +473,11 @@ class BFieldTransportController(QtCore.QObject):
             self._started_monotonic = time.monotonic()
             self._last_acquisition = 0.0
             self._results = []
+            plot = getattr(self.tab, "plot", None)
+            if hasattr(plot, "set_planned_ranges"):
+                plot.clear(reset_plan=True)
+                plot.set_planned_ranges({"B-field": (params.start_field_t, params.stop_field_t)}, axis="B-field")
+                self.refresh_plot(force=True)
             self._condition_index = 0
             self._leg_index = 0
             self._measurement_phase = "configuring"
@@ -1497,21 +1503,23 @@ class BFieldTransportController(QtCore.QObject):
         plot = self.tab.plot
         channels = (plot.compare_channels() if plot.current_plot_mode() == '4-Channel Compare'
                     else [getattr(self.tab, 'plot_choice', 'Ids_DC')])
-        for axis, channel in zip(plot.get_axes(), channels):
-            axis.clear()
-            line, = axis.plot([row['B_measured_T'] for row in self._results],
-                             [row.get(channel, float('nan')) for row in self._results],
-                             linestyle='', marker='.', color='tab:blue')
-            if axis is plot.ax:
-                self._plot_line = line
-            axis.set_ylabel(f'{channel} (A)')
-            axis.relim()
-            axis.autoscale_view()
-            axis.grid(True)
-        for axis in plot.bottom_axes():
-            axis.set_xlabel('B-field (T)')
-        plot.format_compare_axes()
-        plot.canvas.draw_idle()
+        with plot.redraw() if hasattr(plot, "redraw") else nullcontext():
+            for axis, channel in zip(plot.get_axes(), channels):
+                axis.clear()
+                line, = axis.plot([row['B_measured_T'] for row in self._results],
+                                 [row.get(channel, float('nan')) for row in self._results],
+                                 linestyle='', marker='.', color='tab:blue')
+                if axis is plot.ax:
+                    self._plot_line = line
+                axis.set_ylabel(f'{channel} (A)')
+                if not hasattr(plot, "redraw"):
+                    axis.relim()
+                    axis.autoscale_view()
+                axis.grid(True)
+            for axis in plot.bottom_axes():
+                axis.set_xlabel('B-field (T)')
+            plot.format_compare_axes()
+            plot.canvas.draw_idle()
         self._last_plot = now
 
     def _next_condition(self):
