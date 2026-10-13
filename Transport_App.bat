@@ -35,16 +35,14 @@ if not exist requirements.txt (
     exit /b 1
 )
 
-:: Install only when a requirement is absent from the project environment.
-"%PYTHON_EXE%" -m pip show PySide6 matplotlib numpy pyvisa nidaqmx pythonnet >nul 2>nul
+:: Synchronize every requirement; pip reuses packages already satisfying it.
+:: pip show with multiple names can succeed even when one package is missing.
+echo [SETUP] Checking application dependencies in .venv...
+"%PYTHON_EXE%" -m pip install --disable-pip-version-check -r "%~dp0requirements.txt"
 if errorlevel 1 (
-    echo [SETUP] Installing application dependencies into .venv...
-    "%PYTHON_EXE%" -m pip install -r requirements.txt
-    if errorlevel 1 (
-        echo [ERROR] Dependency installation failed.
-        pause
-        exit /b 1
-    )
+    echo [ERROR] Dependency installation failed.
+    pause
+    exit /b 1
 )
 
 :: Validate imports in a visible console before starting the windowed app.

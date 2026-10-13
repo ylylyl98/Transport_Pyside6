@@ -63,9 +63,9 @@ With the environment activated:
 python transport_UI.py
 ```
 
-`main.py` is an equivalent direct entry point. On Windows, double-clicking [`Transport_App.bat`](Transport_App.bat) creates and reuses a project-local `.venv`, installs any missing requirements there, validates the application imports, and launches the UI. Python must be available on `PATH` for the first launch.
+`main.py` is an equivalent direct entry point. On Windows, double-clicking [`Transport_App.bat`](Transport_App.bat) creates and reuses a project-local `.venv`, synchronizes `requirements.txt` on every launch (reusing already satisfied dependencies), validates the application imports, and launches the UI. The project shortcut also runs this launcher so dependency setup is not skipped. Python must be available on `PATH` for the first launch.
 
-The launcher also creates/repairs `Transport_App - Shortcut.lnk` in the project folder. This shortcut starts the project Python directly, uses the bundled `assets/transport.ico`, and shares the application's Windows taskbar identity. Use it for subsequent launches and taskbar pinning. After moving the checkout, run `Transport_App.bat` again to refresh its paths. To repair only the shortcut without starting the app, run `powershell -NoProfile -File .\Update-TransportShortcut.ps1`. If an old taskbar pin still shows a generic icon, unpin it and pin the repaired shortcut again. Restart the app when convenient to apply window-icon changes; reloading analysis applies them to the history viewer only.
+The launcher also creates/repairs `Transport_App - Shortcut.lnk` in the project folder. This shortcut runs Transport_App.bat to check dependencies before starting the UI, uses the bundled `assets/transport.ico`, and shares the application's Windows taskbar identity. Use it for subsequent launches and taskbar pinning. After moving the checkout, run `Transport_App.bat` again to refresh its paths. To repair only the shortcut without starting the app, run `powershell -NoProfile -File .\Update-TransportShortcut.ps1`. If an old taskbar pin still shows a generic icon, unpin it and pin the repaired shortcut again. Restart the app when convenient to apply window-icon changes; reloading analysis applies them to the history viewer only.
 
 ## Typical measurement workflow
 

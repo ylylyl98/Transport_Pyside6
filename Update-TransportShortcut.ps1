@@ -8,14 +8,14 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$transportPython = Join-Path $PSScriptRoot '.venv\Scripts\pythonw.exe'
 $transportEntry = Join-Path $PSScriptRoot 'transport_UI.py'
+$transportLauncher = Join-Path $PSScriptRoot 'Transport_App.bat'
 $transportIcon = Join-Path $PSScriptRoot 'assets\transport.ico'
 # This identity must match app/app_identity.py for Windows taskbar grouping.
 $transportAppId = 'MyLab.TransportMeasurement'
 $ShortcutPath = [System.IO.Path]::GetFullPath($ShortcutPath)
 
-foreach ($requiredPath in @($transportPython, $transportEntry, $transportIcon)) {
+foreach ($requiredPath in @($transportLauncher, $transportEntry, $transportIcon)) {
     if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
         throw "Missing $requiredPath. Run Transport_App.bat to set up the project first."
     }
@@ -26,13 +26,13 @@ if ([System.IO.Path]::GetExtension($ShortcutPath) -ne '.lnk') {
 
 $transportShell = New-Object -ComObject WScript.Shell
 $transportLink = $transportShell.CreateShortcut($ShortcutPath)
-$transportArguments = '"' + $transportEntry + '"'
+$transportArguments = ''
 $transportIconLocation = $transportIcon + ',0'
 $transportExplorer = New-Object -ComObject Shell.Application
 if (Test-Path -LiteralPath $ShortcutPath -PathType Leaf) {
     $existingFolder = $transportExplorer.Namespace([System.IO.Path]::GetDirectoryName($ShortcutPath))
     $existingItem = $existingFolder.ParseName([System.IO.Path]::GetFileName($ShortcutPath))
-    if ($transportLink.TargetPath -eq $transportPython -and
+    if ($transportLink.TargetPath -eq $transportLauncher -and
         $transportLink.Arguments -eq $transportArguments -and
         $transportLink.WorkingDirectory -eq $PSScriptRoot -and
         $transportLink.IconLocation -eq $transportIconLocation -and
@@ -103,7 +103,7 @@ namespace TransportShortcutInterop {
 '@
 }
 
-$transportLink.TargetPath = $transportPython
+$transportLink.TargetPath = $transportLauncher
 $transportLink.Arguments = $transportArguments
 $transportLink.WorkingDirectory = $PSScriptRoot
 $transportLink.IconLocation = $transportIconLocation
