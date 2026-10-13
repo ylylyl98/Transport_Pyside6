@@ -41,6 +41,7 @@ class Keithley2400Base(PyvisaInstrument):
         self._operating_mode = KEITHLEY_MODE_VOLTAGE_2W
         self._identity = ""
         self.cached_source_voltage_range_v = None
+        self.cached_source_voltage_range_error = ""
         self._connection_start_voltage: float | None = None
         super().__init__(
             name=name,
@@ -53,6 +54,7 @@ class Keithley2400Base(PyvisaInstrument):
 
     def connect(self):
         self.cached_source_voltage_range_v = None
+        self.cached_source_voltage_range_error = ""
         try:
             super().connect()
             self._identity = self.get_identity().strip()
@@ -334,12 +336,21 @@ class Keithley2400Base(PyvisaInstrument):
 
     def read_protection_settings(self, include_trip: bool = True) -> dict[str, object]:
         with self.lock:
-            self.cached_source_voltage_range_v = None
-            current_compliance = float(self._query(":SENS:CURR:PROT?"))
-            current_autorange = bool(int(float(self._query(":SENS:CURR:RANG:AUTO?"))))
-            current_range = float(self._query(":SENS:CURR:RANG?"))
-            source_voltage_range = float(self._query(":SOUR:VOLT:RANG?"))
+            # Publish a completed read, not an empty cache between queries.
+            # Startup checks the manager's busy state before using this cache.
+            try:
+                current_compliance = float(self._query(":SENS:CURR:PROT?"))
+                current_autorange = bool(int(float(self._query(":SENS:CURR:RANG:AUTO?"))))
+                current_range = float(self._query(":SENS:CURR:RANG?"))
+                source_voltage_range = float(self._query(":SOUR:VOLT:RANG?"))
+                if not math.isfinite(source_voltage_range) or source_voltage_range <= 0:
+                    raise ValueError(f"Invalid source voltage range: {source_voltage_range!r}")
+            except Exception as ex:
+                self.cached_source_voltage_range_v = None
+                self.cached_source_voltage_range_error = str(ex)
+                raise
             self.cached_source_voltage_range_v = source_voltage_range
+            self.cached_source_voltage_range_error = ""
             tripped = None
             if include_trip:
                 try:

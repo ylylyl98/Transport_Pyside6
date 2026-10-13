@@ -22,9 +22,13 @@ copies, backups and generated verification artifacts are excluded from Git.
 
 ## Included behavior
 
-- CoSweep axis values support six decimal places. Cached MODEL 2400 source
-  ranges determine programming resolution; unknown required resolution blocks
-  Start, and invalid physical targets are reported without silent rounding.
+- CoSweep axis values support six decimal places. Cached MODEL 2400 and 2401
+  source ranges determine programming resolution; the 2401 supports the
+  0.2/2/20 V ranges only. Start checks connections, source mode and busy hardware
+  before resolution. Missing ranges on supported models are refreshed in the
+  background; review the result and press Start again to begin. Messages identify
+  the source, model, cached range and readback failure. Unknown resolution and
+  invalid physical targets still block acquisition without silent rounding.
 - ETA uses completed Ave=1 (1111 points / 1430 s) and Ave=3
   (20541 points / 47944 s) references for matching YZ324 hardware/trajectory.
   Ave=2 is interpolated; larger averages are extrapolated. This supersedes

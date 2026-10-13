@@ -80,6 +80,8 @@ The launcher also creates/repairs `Transport_App - Shortcut.lnk` in the project 
 
 The application uses dock-managed connections: address or Keithley-mode changes require reconnection before they apply to a measurement.
 
+For **2D Map**, the **Keithley 2400** source option supports both 2400 and 2401 instruments. The app checks the detected model and confirmed source range before starting, including fixed Vds values. If a supported source has no cached range, Start refreshes its readback in the background; review the result and press Start again. Resolution messages show which source, model, range or readback error needs attention. The 2401 uses the 0.2, 2 and 20 V source ranges; its resolution check does not accept a 200 V range.
+
 **Instruments → Magnet** contains separate temperature controls for **attoDRY1000 / LS335** and **attoDRY2100 / SDK**. **Detect & connect system** tries the configured connections and selects the only connected system; if both are online, choose one manually. The main page shows the selected system's read-only summary and a **Temperature controls…** shortcut. The 1000 supports verified sample targets, heater ranges, ramps, optional stability waiting and automatic ranges from commissioned temperature bands. See [sample-temperature instructions](SAMPLE_TEMPERATURE_1000.md).
 
 Long names, paths and numeric lists have a wrapped full-value preview. Use the expand icon or **Alt+Enter** to edit the full text, then Save or **Ctrl+Enter** to apply. Data root also has a folder chooser; visual wrapping preserves the stored value.

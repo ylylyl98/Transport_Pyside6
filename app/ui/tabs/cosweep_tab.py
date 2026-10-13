@@ -39,7 +39,7 @@ from app.ui.widgets.safe_spinbox import SafeDoubleSpinBox, SafeSpinBox, TrimmedD
 from app.ui.widgets.status_panel import SectionHeader, StatusPanel
 from app.utils import _frange_inc, safe_ramp
 from app.workers.cosweep import CoSweepWorker, build_cosweep_points, validate_cosweep_params, sequence_point_count
-from app.voltage_resolution import source_resolution, validate_voltage_points
+from app.voltage_resolution import source_resolution_status, validate_voltage_points
 from app.workers.cosweep_timing import (
     estimate_cosweep_seconds, format_cosweep_duration, historical_cosweep_match,
     estimate_cosweep_cleanup_seconds, LiveCoSweepTiming, cosweep_calibration_description,
@@ -65,6 +65,7 @@ class CoSweepTab(BaseMeasurementTab):
         self.s_g1 = self.s_g2 = self.s_g3 = self.s_daq = None
         self.worker_thread = None
         self.worker = None
+        self._precision_refresh_sessions = {}
         self._updating_combos = False
         self._last_coordinate_mode = "Raw"
         self._axis_memory = {
@@ -373,7 +374,7 @@ class CoSweepTab(BaseMeasurementTab):
         apply_tooltip("Raw voltages preserves the original Vtg/Vbg/Vds grid. Doping/E-field drives both gates together; select Vds as an axis to sweep bias while holding the unused gate coordinate fixed.", lbl_coordinates, self.cbo_coordinates)
         apply_tooltip("Axis that moves for every point in the inner loop.", lbl_fast, self.cbo_fast)
         apply_tooltip("Axis that steps between fast-axis passes. Choose 1D sweep to hold all other axes fixed.", lbl_slow, self.cbo_slow)
-        apply_tooltip("Choose Keithley G3 or an NI AO channel as the Vds source.", lbl_source, self.cbo_source)
+        apply_tooltip("Choose Keithley G3 (2400 or 2401) or an NI AO channel as the Vds source.", lbl_source, self.cbo_source)
         apply_tooltip("First value used for a swept axis, or the fixed value when the axis is not swept.", self.sp_vtg_start, self.sp_vbg_start, self.sp_vds_start)
         apply_tooltip("Last value included when this axis is part of the sweep.", self.sp_vtg_stop, self.sp_vbg_stop, self.sp_vds_stop)
         apply_tooltip("Point spacing for the selected sweep axis.", self.sp_vtg_step, self.sp_vbg_step, self.sp_vds_step)
@@ -757,9 +758,9 @@ class CoSweepTab(BaseMeasurementTab):
         if self.cbo_source.currentText() == "Keithley 2400" and self.device_manager.is_connected("g3") and not self.device_manager.is_voltage_source_mode("g3"):
             missing_required.append("G3 mode")
         if self.device_manager.is_busy():
-            text = "Hardware is busy with another connection or disconnect operation from Devices."
+            text = "Hardware is busy with a readback, connection, or control operation."
             self.lbl_connection_hint.setProperty("role", "warning-hint")
-            self.btn_start.setToolTip("Wait for the dock connection operation to finish")
+            self.btn_start.setToolTip("Wait for the hardware operation to finish")
         elif missing_required:
             text = f"Required before start: {', '.join(missing_required)}. Connect from Devices."
             if missing_optional:
@@ -1276,53 +1277,109 @@ class CoSweepTab(BaseMeasurementTab):
         self.p.derived_slow_axis = self.p.axis_slow if self._is_derived() else "E-field"
 
     def _precision_signature(self):
-        return tuple(source_resolution(self.device_manager.sessions.get(name)) for name in ("g1", "g2", "g3"))
+        return tuple(source_resolution_status(self.device_manager.sessions.get(name)) for name in ("g1", "g2", "g3"))
 
-    def _on_precision_readback(self, *_args):
+    def _on_precision_readback(self, readbacks, _message):
         # Most quiet reads change only current; avoid rebuilding the trajectory.
         if self._precision_signature() != getattr(self, "_last_precision_signature", None):
             self._update_sweep_summary()
+        pending = self._precision_refresh_sessions
+        if not pending:
+            return
+        self._precision_refresh_sessions = {}
+        self.run_panel.set_start_blocked("precision-refresh", False)
+        # A Stop/Zero request can interrupt this read. Never queue a measurement
+        # from a readback callback; the operator starts after reviewing the result.
+        if self.device_manager.is_busy():
+            self.set_status("Source range refresh interrupted. Retry Start when hardware is idle.", "idle")
+            return
+        failures = []
+        for name, session in pending.items():
+            result = readbacks.get(name, {})
+            if self.device_manager.sessions.get(name) is not session or not result:
+                failures.append(f"{name.upper()}: source changed or readback was interrupted.")
+            elif result.get("error"):
+                failures.append(f"{name.upper()}: {result['error']}")
+        try:
+            if failures:
+                raise ValueError("Source range refresh failed. " + " ".join(failures))
+            self._precision_check(build_cosweep_points(self._params_for_summary()), require_known=True)
+        except ValueError as ex:
+            self.set_status("Source resolution could not be verified.", "error", str(ex))
+            QtWidgets.QMessageBox.warning(self, "Voltage Resolution", str(ex))
+            return
+        self.set_status("Source ranges verified. Press Start to begin.", "idle")
+
+    def _refresh_missing_precision(self):
+        """Refresh only missing ranges of supported models, using the dock worker."""
+        unknown = {}
+        for name in self._required_devices():
+            if name not in {"g1", "g2", "g3"}:
+                continue
+            session = self.device_manager.sessions.get(name)
+            status = source_resolution_status(session)
+            if status.quantum is None:
+                if not status.refreshable:
+                    return False
+                unknown[name] = session
+        if not unknown:
+            return False
+        self._precision_refresh_sessions = unknown
+        self.run_panel.set_start_blocked("precision-refresh", True)
+        if not self.device_manager.read_gate_currents(names=tuple(unknown)):
+            self._precision_refresh_sessions = {}
+            self.run_panel.set_start_blocked("precision-refresh", False)
+            return False
+        self.set_status("Refreshing source ranges. Press Start again after verification.", "preparing")
+        return True
 
     def _precision_check(self, points, require_known=False):
         resolutions, messages = {}, []
+        labels = {"vtg": "Vtg", "vbg": "Vbg", "vds": "Vds"}
         for device, axis in (("g1", "vtg"), ("g2", "vbg"), ("g3", "vds")):
             if device not in self._required_devices():
                 continue
             session = self.device_manager.sessions.get(device)
-            quantum = source_resolution(session)
-            if quantum is None:
-                message = f"{axis.upper()}: source resolution unconfirmed; connect/read back a supported Keithley 2400 range."
-                if require_known:
-                    raise ValueError(message)
-                messages.append(message)
-            else:
-                resolutions[axis] = quantum
-                messages.append(f"{axis.upper()}: {quantum:g} V source resolution (cached range).")
+            status = source_resolution_status(session)
+            message = f"{device.upper()} / {labels[axis]}: {status.message}"
+            if status.quantum is None and require_known:
+                raise ValueError(message)
+            if status.quantum is not None:
+                resolutions[axis] = status.quantum
+            messages.append(message)
         validate_voltage_points(points, resolutions)
         return " ".join(messages) or "Keithley source resolution: not applicable."
 
     @run_filename_snapshot
     def start_run(self):
-        if self.worker_thread:
-            return
-        try:
-            self._precision_check(build_cosweep_points(self._params_for_summary()), require_known=True)
-        except ValueError as ex:
-            QtWidgets.QMessageBox.warning(self, "Voltage Resolution", str(ex))
+        if self.worker_thread or self._precision_refresh_sessions:
             return
         mw = self.window()
         if hasattr(mw, "refresh_models_from_ui"):
             mw.refresh_models_from_ui()
+        if self.device_manager.is_busy():
+            QtWidgets.QMessageBox.warning(self, "Busy", "Wait for the current hardware readback or control operation to finish, then press Start again.")
+            return
+        if not self._validate_sweep_setup() or not self._validate_required_sessions():
+            return
+        try:
+            points = build_cosweep_points(self._params_for_summary())
+        except ValueError as ex:
+            QtWidgets.QMessageBox.warning(self, "Invalid Parameters", str(ex))
+            return
+        try:
+            self._precision_check(points, require_known=True)
+        except ValueError as ex:
+            if self._refresh_missing_precision():
+                return
+            QtWidgets.QMessageBox.warning(self, "Voltage Resolution", str(ex))
+            return
         calibration = self.verified_run_calibration()
         if calibration is None:
             return
         amp, lkn, signal_chain = calibration
         self.refresh_output_preview()
         if not self.validate_output_ready(self.save):
-            return
-        if not self._validate_sweep_setup():
-            return
-        if not self._validate_required_sessions():
             return
         try:
             self.collect_params()
@@ -1333,6 +1390,14 @@ class CoSweepTab(BaseMeasurementTab):
         claimed, blocked = self.claim_run_devices(self._required_devices())
         if not claimed:
             QtWidgets.QMessageBox.warning(self, "Busy", f"Devices already in use: {', '.join(blocked).upper()}")
+            return
+        try:
+            # Recheck the collected execution parameters after ownership is
+            # secured, including any additional regions and intervening reads.
+            self._precision_check(build_cosweep_points(self.p), require_known=True)
+        except ValueError as ex:
+            self.release_run_devices()
+            QtWidgets.QMessageBox.warning(self, "Voltage Resolution", str(ex))
             return
         self.on_preview()
         self._plot_records = []
