@@ -1,8 +1,12 @@
 # Transport Measurement
 
-The project root is the official PySide6 version. Launch `Transport_App.bat`
-from this directory; the retained `tmp/pyside6_migration` copy is no longer the
-release location. See [release and rollback notes](docs/pyside6-release.md).
+**日常启动：双击根目录的 `Transport_App.bat` 或 `Transport_App - Shortcut.lnk`。**
+其他入口和文件分类见 [00_启动说明.txt](00_启动说明.txt)；文档见 [docs 索引](docs/README.md)。
+
+The project root is the official PySide6 version. `Transport_App.bat` is the only
+BAT in this directory and the normal measurement launcher. Development utilities
+live in `tools/`; do not launch copies inside `tmp/` or backups. See
+[release and rollback notes](docs/pyside6-release.md).
 
 Desktop application for automated electrical transport and photocurrent measurements. The PySide6 interface coordinates Keithley 2400 source meters, an NI DAQ device, and an SP-2300 monochromator; it provides live plots while saving each measurement to CSV.
 
@@ -65,7 +69,7 @@ python transport_UI.py
 
 `main.py` is an equivalent direct entry point. On Windows, double-clicking [`Transport_App.bat`](Transport_App.bat) creates and reuses a project-local `.venv`, synchronizes `requirements.txt` on every launch (reusing already satisfied dependencies), validates the application imports, and launches the UI. The project shortcut also runs this launcher so dependency setup is not skipped. Python must be available on `PATH` for the first launch.
 
-The launcher also creates/repairs `Transport_App - Shortcut.lnk` in the project folder. This shortcut runs Transport_App.bat to check dependencies before starting the UI, uses the bundled `assets/transport.ico`, and shares the application's Windows taskbar identity. Use it for subsequent launches and taskbar pinning. After moving the checkout, run `Transport_App.bat` again to refresh its paths. To repair only the shortcut without starting the app, run `powershell -NoProfile -File .\Update-TransportShortcut.ps1`. If an old taskbar pin still shows a generic icon, unpin it and pin the repaired shortcut again. Restart the app when convenient to apply window-icon changes; reloading analysis applies them to the history viewer only.
+The launcher also creates/repairs `Transport_App - Shortcut.lnk` in the project folder. This shortcut runs Transport_App.bat to check dependencies before starting the UI, uses the bundled `assets/transport.ico`, and shares the application's Windows taskbar identity. Use it for subsequent launches and taskbar pinning. After moving the checkout, run `Transport_App.bat` again to refresh its paths. To repair only the shortcut without starting the app, run `powershell -NoProfile -ExecutionPolicy RemoteSigned -File .\tools\Update-TransportShortcut.ps1`. This execution-policy setting applies only to that PowerShell process. If an old taskbar pin still shows a generic icon, unpin it and pin the repaired shortcut again. Restart the app when convenient to apply window-icon changes; reloading analysis applies them to the history viewer only.
 
 ## Typical measurement workflow
 
@@ -82,7 +86,7 @@ The application uses dock-managed connections: address or Keithley-mode changes 
 
 For **2D Map**, the **Keithley 2400** source option supports both 2400 and 2401 instruments. The app checks the detected model and confirmed source range before starting, including fixed Vds values. If a supported source has no cached range, Start refreshes its readback in the background; review the result and press Start again. Resolution messages show which source, model, range or readback error needs attention. The 2401 uses the 0.2, 2 and 20 V source ranges; its resolution check does not accept a 200 V range.
 
-**Instruments → Magnet** contains separate temperature controls for **attoDRY1000 / LS335** and **attoDRY2100 / SDK**. **Detect & connect system** tries the configured connections and selects the only connected system; if both are online, choose one manually. The main page shows the selected system's read-only summary and a **Temperature controls…** shortcut. The 1000 supports verified sample targets, heater ranges, ramps, optional stability waiting and automatic ranges from commissioned temperature bands. See [sample-temperature instructions](SAMPLE_TEMPERATURE_1000.md).
+**Instruments → Magnet** contains separate temperature controls for **attoDRY1000 / LS335** and **attoDRY2100 / SDK**. **Detect & connect system** tries the configured connections and selects the only connected system; if both are online, choose one manually. The main page shows the selected system's read-only summary and a **Temperature controls…** shortcut. The 1000 supports verified sample targets, heater ranges, ramps, optional stability waiting and automatic ranges from commissioned temperature bands. See [sample-temperature instructions](docs/guides/SAMPLE_TEMPERATURE_1000.md).
 
 Long names, paths and numeric lists have a wrapped full-value preview. Use the expand icon or **Alt+Enter** to edit the full text, then Save or **Ctrl+Enter** to apply. Data root also has a folder chooser; visual wrapping preserves the stored value.
 
@@ -152,16 +156,55 @@ Always confirm actual instrument state independently after an error, interrupted
 ## Project layout
 
 ```text
+00_启动说明.txt          Quick Chinese guide to the correct launcher and folders
+Transport_App.bat       Normal Windows measurement launcher
+Transport_App - Shortcut.lnk  Local shortcut to the same launcher
 app/                    PySide6 UI, application models, workers, and device manager
 app/ui/tabs/            Measurement tabs: Vds Sweep, Gate Scan, 2D Map, Photocurrent
 app/workers/            Background acquisition and CSV-writing workers
 instruments/            Keithley, NI-DAQ, monochromator, and other instrument drivers
 transport_UI.py         Primary GUI entry point
-Transport_App.bat       Windows launcher
 requirements.txt        Python dependencies
+tools/                  Developer preview and shortcut-maintenance utilities
+docs/README.md          Documentation index
+docs/guides/            Sample-temperature and thermal-protection guides
+docs/reviews/           Audit notes and past failure investigations
+docs/manuals/           Instrument manuals
+tmp/verification/reports/   Local offline verification JSON reports
+tmp/verification/previews/  Local preview PNGs and their companion JSON files
 ```
 
+Source code and the root `.venv` remain in their existing locations. `tmp/` also
+contains local backups and historical validation runs; its contents are not app
+entry points. Newly generated files under `tmp/` are excluded from Git.
+Measurement data continues to use the configured data directory, independently
+of these verification folders.
+
 ## Development notes
+
+Use **View → Reload UI style** (**Ctrl+Alt+R**) after editing
+`app/ui/app.qss`. It validates and applies the style to the existing main window;
+invalid or incomplete style files leave the previous appearance in place.
+**Tools → Runtime settings…** applies the main-window font immediately, and
+exposes B-field endpoint/recovery settings for application while measurements
+and instrument operations are idle. Changes are saved to the existing per-user
+configuration. Device addresses and Keithley modes continue to use **Devices**
+and individual reconnection; driver/SDK and other startup configuration changes
+still need a normal restart while idle.
+
+Use **Tools → Offline UI preview…** or `tools/Transport_Preview.bat` to develop layouts
+in a separate, hardware-blocked window with synthetic plots and isolated user
+settings. **Preview → Rebuild preview from disk** (**Ctrl+Shift+R**) replaces only
+the preview process, preserving its selected page and window position. The main
+measurement application remains open. This fast entry uses the existing `.venv`
+without dependency installation and reuses a separate preview font cache.
+Normal launch and dependency repair still use `Transport_App.bat`.
+
+The main window remembers geometry, dock layout, command visibility and the last
+measurement page. **View → Reset window layout** restores the default layout.
+No instrument connection, output state or running measurement is restored.
+See [the development feedback workflow](docs/development-feedback.md) for the
+reload boundaries, preview commands and isolated validation procedure.
 
 B-field Transport runs voltage ramps and sample acquisition on one serialized worker, and CSV/checkpoint writes on another. STOP cancels ramps between steps, pauses APS100, then waits for in-flight instrument work, bias zeroing, and output flushing before releasing devices. An unresponsive driver can still delay cleanup, but it no longer blocks Qt telemetry processing.
 
@@ -179,7 +222,7 @@ Doping/E-field (or Vtg/Vbg) and Vds share this syntax; scalar values repeat and 
 
 Quick-added Vds uses Keithley 2400; the source remains editable in the conditions table. Connected voltage protections are checked during preview, and full instrument validation still runs before starting a sweep.
 
-Optional endpoint settling is controlled in the saved configuration's `mcd` section: `transport_endpoint_settling_enabled` defaults to `false`, and `transport_endpoint_settling_timeout_s` defaults to `120.0`. When enabled, `endpoint_stable_reads` (default 3) consecutive in-window readings are required. The sweep advances immediately once they pass; excursions reset the count without restarting the timeout. Restart the app after changing these settings. Existing instrument protections remain active.
+Optional endpoint settling is controlled through **Tools → Runtime settings…**, or in the saved configuration's `mcd` section: `transport_endpoint_settling_enabled` defaults to `false`, and `transport_endpoint_settling_timeout_s` defaults to `120.0`. When enabled, `endpoint_stable_reads` (default 3) consecutive in-window readings are required. The sweep advances immediately once they pass; excursions reset the count without restarting the timeout. The settings dialog applies supported changes while idle without restarting. Manual JSON edits are read at the next application startup. Existing instrument protections remain active.
 
 The app saves user configuration and plot-mode preferences through Qt settings. Before modifying an instrument driver or measurement worker, test against a controlled setup or suitable hardware simulation—never a device whose limits have not been confirmed.
 

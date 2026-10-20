@@ -178,7 +178,9 @@ class WorkspaceLayoutTests(unittest.TestCase):
         self.assertGreater(w.tab_dual.plot.width(), 400)
         scale = w.devicePixelRatioF()
         filename = "workspace_preview.png" if scale == 1 else f"workspace_preview_{scale:g}x.png"
-        w.grab().save(str(Path(__file__).resolve().parents[1] / filename))
+        preview_dir = Path(__file__).resolve().parents[1] / "tmp" / "verification" / "previews"
+        preview_dir.mkdir(parents=True, exist_ok=True)
+        self.assertTrue(w.grab().save(str(preview_dir / filename)))
         w.resize(1100, 760)
         self.app.processEvents()
         self.assertTrue(stop.isVisible())

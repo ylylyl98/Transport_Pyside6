@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import os
 import math
 import time
 
@@ -22,7 +23,8 @@ from app.ui.instrument_workspace import InstrumentWorkspace
 from app.ui.measurement_workflow import MeasurementWorkflow
 from app.ui.lockin_panel import LockinPanel
 from app.ui.magnet_panel import MagnetPanel
-from app.ui.style import APP_STYLE
+from app.ui.style_manager import apply_app_style, install_style_reload
+from app.ui.workspace_state import save_workspace, restore_workspace, reset_workspace
 from utils.config import cfg
 from app.ui.tabs.cosweep_tab import CoSweepTab
 from app.ui.tabs.dual_gate_tab import DualGateTab
@@ -42,7 +44,7 @@ class MainWindow(QtWidgets.QMainWindow):
         super().__init__()
         app = QtWidgets.QApplication.instance()
         if app is not None:
-            app.setStyleSheet(APP_STYLE)
+            apply_app_style(app, font_size_pt=cfg.font_size_pt)
 
         self.setWindowTitle(APP_NAME)
         app = QtWidgets.QApplication.instance()
@@ -51,6 +53,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.resize(1400, 860)
         self.workspace_menu = QtWidgets.QMenuBar()
         self.view_menu = self.workspace_menu.addMenu("View")
+        self.reload_style_action = install_style_reload(
+            self, self.view_menu, font_size_provider=lambda: cfg.font_size_pt)
+        self.view_menu.addAction("Reset window layout", lambda: reset_workspace(self))
+        self.tools_menu = self.workspace_menu.addMenu("Tools")
+        self.runtime_settings_action = self.tools_menu.addAction("Runtime settings…", self._show_runtime_settings)
+        self.preview_action = self.tools_menu.addAction("Offline UI preview…", self._open_ui_preview)
+        self.preview_action.setEnabled(os.environ.get("TRANSPORT_UI_PREVIEW") != "1")
+        self._runtime_settings_dialog = None
+        self._last_measurement_page = "Vds Sweep"
 
         # One owner per physical magnet system for the lifetime of the window.
         # Controllers start worker threads but do not open hardware until the
@@ -102,6 +113,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.instrument_dock)
         self.view_menu.addAction(self.instrument_dock.toggleViewAction())
         self.command_bar = QtWidgets.QToolBar("Workspace", self)
+        self.command_bar.setObjectName("workspaceCommands")
         self.command_bar.setMovable(False)
         self.command_bar.addAction(self.instrument_dock.toggleViewAction())
         self.command_bar.addAction("Devices...", self.instrument_workspace.show_devices)
@@ -245,6 +257,39 @@ class MainWindow(QtWidgets.QMainWindow):
         self._temperature_summary_timer.timeout.connect(self._update_temperature_summary)
         self._temperature_summary_timer.start()
         self._update_temperature_summary()
+        restore_workspace(self)
+
+    def _save_workspace_state(self):
+        save_workspace(self)
+
+    def _runtime_settings_idle(self):
+        return not (
+            self._png_close_pending or self._active_measurement_tabs()
+            or self.bfield_transport_controller.active or self.gate_scan_field_batch.active
+            or self.device_manager.is_busy() or self.device_manager.current_in_use()
+            or self.magnet1000.exclusive_owner or self.magnet2100.has_pending_work
+            or self.magnet_panel._busy_1000 or self.magnet_panel._busy_2100
+            or self.magnet_panel._aps_connect_pending or self.magnet_panel._detect_pending
+            or self.magnet_panel._temp_request_pending
+            or self.sample_temperature_bar._pending_operation
+            or self.lockin_panel._worker is not None or self.drive_lockin_panel._worker is not None
+        )
+
+    def _show_runtime_settings(self):
+        from app.ui.runtime_settings_dialog import RuntimeSettingsDialog
+        if self._runtime_settings_dialog is None:
+            self._runtime_settings_dialog = RuntimeSettingsDialog(self, cfg, self._runtime_settings_idle)
+        self._runtime_settings_dialog.show()
+        self._runtime_settings_dialog.raise_()
+        self._runtime_settings_dialog.activateWindow()
+
+    def _open_ui_preview(self):
+        from pathlib import Path
+        from PySide6.QtCore import QProcess
+        root = Path(__file__).resolve().parents[2]
+        started, _pid = QProcess.startDetached(sys.executable, [str(root / "transport_ui_preview.py")], str(root))
+        self.statusBar().showMessage("Opened an isolated UI preview." if started else
+                                     "Could not start the UI preview. Check the project environment.", 8000)
 
     def _show_temperature_controls(self):
         self.instrument_dock.show()
@@ -304,6 +349,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_workspace_page_changed(self, _index):
         if self.tabs.currentWidget() is self.tab_curve_compare:
             self.tab_curve_compare.open_viewer()
+        elif self.tabs.currentWidget() in self._measurement_tabs():
+            self._last_measurement_page = self.tabs.tabText(self.tabs.currentIndex())
 
     def _refresh_history_after_run(self, *_):
         if not any(tab.run_panel.operation_active() for tab in self._measurement_tabs()):
@@ -484,12 +531,17 @@ class MainWindow(QtWidgets.QMainWindow):
                 return
 
     def closeEvent(self, event):
+        controller = getattr(self, "bfield_transport_controller", None)
         prepare_lockin = getattr(getattr(self, "lockin_panel", None), "prepare_shutdown", None)
         if callable(prepare_lockin) and not prepare_lockin():
+            if controller is not None:
+                controller.cancel_shutdown_preparation()
             event.ignore()
             return
         prepare_drive = getattr(getattr(self, "drive_lockin_panel", None), "prepare_shutdown", None)
         if callable(prepare_drive) and not prepare_drive():
+            if controller is not None:
+                controller.cancel_shutdown_preparation()
             event.ignore()
             return
         if self._png_close_pending:
@@ -499,6 +551,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 event.ignore()
             return
         self._save_plot_mode_settings()
+        self._save_workspace_state()
         for tab in self._measurement_tabs():
             if hasattr(tab, "save_tab_settings"):
                 tab.save_tab_settings()
@@ -508,8 +561,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # reports whether its owner confirmed Stop/close; never claim a safe
         # shutdown when that acknowledgement is unavailable.
         self.gate_scan_field_batch.stop()
-        if getattr(self, "bfield_transport_controller", None) is not None:
-            controller = self.bfield_transport_controller
+        if controller is not None:
             if not controller.prepare_shutdown():
                 # Keep the window and APS/device ownership in place until the
                 # asynchronous pause, persistent-mode, and RATE/limit restore
@@ -519,21 +571,28 @@ class MainWindow(QtWidgets.QMainWindow):
                 return
         if getattr(self, "tab_bfield_transport", None) is not None:
             self.tab_bfield_transport.stop_run()
-        self.magnet1000.shutdown()
-        self.lakeshore335.shutdown()
-        safe_2100 = self.magnet2100.shutdown()
-        if safe_2100 is False:
+        # Stop field control before a Keithley cleanup can fail. This owner
+        # acknowledgement does not disconnect the SDK or destroy its thread.
+        if not self.magnet2100.prepare_shutdown():
+            if controller is not None:
+                controller.cancel_shutdown_preparation()
             QtWidgets.QMessageBox.critical(
                 self,
-                "Magnet shutdown not confirmed",
-                "The attoDRY2100 controller could not confirm a safe shutdown. "
-                "Keep the application open and use STOP / PAUSE or retry shutdown.",
+                "Magnet Stop not confirmed",
+                "The attoDRY2100 controller could not confirm that field control stopped. "
+                "The application and instrument owners remain available. Use STOP / PAUSE or retry shutdown.",
             )
             event.ignore()
             return
+        # Finish fallible hardware cleanup before permanently stopping the
+        # shared controller threads. DeviceManager can reconnect its sessions
+        # after a completed shutdown, unlike the magnet/temperature owners.
+        # A rejected close must leave those owners available for recovery.
         try:
             self.device_manager.shutdown()
         except Exception as ex:
+            if controller is not None:
+                controller.cancel_shutdown_preparation()
             QtWidgets.QMessageBox.critical(
                 self,
                 "Keithley shutdown not confirmed",
@@ -543,9 +602,26 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             event.ignore()
             return
+        safe_2100 = self.magnet2100.shutdown()
+        if safe_2100 is False:
+            if controller is not None:
+                controller.cancel_shutdown_preparation()
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Magnet shutdown not confirmed",
+                "The attoDRY2100 controller could not confirm a safe shutdown. "
+                "Keep the application open and use STOP / PAUSE or retry shutdown.",
+            )
+            event.ignore()
+            return
+        self.magnet1000.shutdown()
+        self.lakeshore335.shutdown()
         self.png_coordinator.shutdown()
         self.png_exporter.shutdown()
         self._png_close_pending = True
+        # All hardware owners are now stopped. Keep the remaining export
+        # drain from allowing another measurement or connection request.
+        self.setEnabled(False)
         if self.tab_curve_compare.prepare_shutdown():
             event.accept()
         else:

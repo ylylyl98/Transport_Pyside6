@@ -19,9 +19,10 @@
 # Rules:
 #   - No Qt imports here.  This module must be importable in a
 #     headless context (unit tests, mock runs, CLI helpers).
-#   - importlib.reload(utils.config) is safe: the module-level `cfg` singleton
-#     is re-created on each reload, which is fine because controllers hold
-#     their own reference and are not reloaded alongside UI modules.
+#   - Keep the cfg singleton and sub-config identities stable. Reloading this
+#     module creates a different object while existing controllers keep the old
+#     references. Use the explicit runtime settings UI for supported changes;
+#     driver and startup-only settings require a safe reconnect or restart.
 # ──────────────────────────────────────────────────────────────────────────────
 
 from __future__ import annotations

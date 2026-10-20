@@ -522,6 +522,7 @@ class MainWindowMagnetLifecycleTests(unittest.TestCase):
         self.assertTrue(event.ignored)
         window.magnet1000.shutdown = real_shutdown_1000
         real_shutdown_1000()
+        window.lakeshore335.shutdown()
         window.magnet2100.shutdown = real_shutdown
         real_shutdown(0.5)
         window.deleteLater()

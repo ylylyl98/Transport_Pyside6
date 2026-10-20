@@ -82,6 +82,12 @@ class HistoryViewerLauncher(QtWidgets.QWidget):
         if self.process.state() != QtCore.QProcess.ProcessState.NotRunning:
             self._send("focus")
             return
+        if self._reload_reopen or self._reload_session is not None:
+            # A normal close cancels automatic reopening, but an explicit
+            # Open still restores a handoff retained after a failed reload.
+            self._reload_reopen = True
+            self.reload_analysis()
+            return
         self._start_viewer()
 
     def _start_viewer(self):
@@ -110,18 +116,20 @@ class HistoryViewerLauncher(QtWidgets.QWidget):
     def reload_analysis(self):
         if self._closing or self._reloading:
             return
+        viewer_running = self.process.state() != QtCore.QProcess.ProcessState.NotRunning
         self._reloading = True
         self._reload_opening = False
-        self._reload_session = None
         self._reload_error = ""
-        self._reload_reopen = self.process.state() != QtCore.QProcess.ProcessState.NotRunning
+        # Keep the original handoff across failed replacement attempts. The
+        # retry may have no live viewer, or a viewer with only default state.
+        self._reload_reopen = self._reload_reopen or viewer_running
         self._png_reload_done = self._png_exporter is None
         self.reload_button.setEnabled(False)
         self.open_button.setEnabled(False)
         self.status_label.setText("Reloading analysis… finishing accepted exports first. Measurements keep running.")
         if self._png_exporter is not None:
             self._png_exporter.request_reload()
-        if self._reload_reopen:
+        if viewer_running:
             self._send("reload")
         self._continue_reload()
 
@@ -148,6 +156,13 @@ class HistoryViewerLauncher(QtWidgets.QWidget):
         self.reload_button.setEnabled(not self._closing)
         self.open_button.setEnabled(not self._closing)
         self.status_label.setText("Analysis reload failed: " + error if error else "Analysis modules reloaded. Measurements continue in Transport.")
+
+    def _viewer_restored(self):
+        # PNG reload may fail independently; a restored viewer must still
+        # release its handoff so a later reload captures the current view.
+        self._reload_session = None
+        self._reload_reopen = False
+        self._finish_reload()
 
     def _send(self, command, **values):
         if self.process.state() == QtCore.QProcess.ProcessState.Running:
@@ -179,13 +194,14 @@ class HistoryViewerLauncher(QtWidgets.QWidget):
                     if self._reload_session is not None:
                         self._send("restore_session", session=self._reload_session)
                     else:
-                        self._finish_reload()
+                        self._viewer_restored()
             elif message.get("event") == "reload_requested":
                 self.reload_analysis()
             elif message.get("event") == "reload_session" and self._reloading:
-                self._reload_session = message.get("session")
+                if self._reload_session is None:
+                    self._reload_session = message.get("session")
             elif message.get("event") == "session_loaded" and self._reloading:
-                self._finish_reload()
+                self._viewer_restored()
             elif message.get("event") == "session_error" and self._reloading:
                 self._finish_reload(message.get("error", "Cannot restore analysis session"))
             self.message_received.emit(message)
@@ -202,7 +218,7 @@ class HistoryViewerLauncher(QtWidgets.QWidget):
                 return
             self.status_label.setText("History viewer could not start: " + self.process.errorString())
 
-    def _finished(self, code, *_):
+    def _finished(self, code, exit_status=QtCore.QProcess.ExitStatus.NormalExit):
         if self._deferred_shutdown:
             self.shutdown_ready.emit()
         if not self._closing:
@@ -212,7 +228,13 @@ class HistoryViewerLauncher(QtWidgets.QWidget):
                 else:
                     self._continue_reload()
                 return
-            self.status_label.setText("History viewer closed. Open it again to continue." if code == 0 else "History viewer stopped. Open it again to retry.")
+            normal_exit = code == 0 and exit_status == QtCore.QProcess.ExitStatus.NormalExit
+            if normal_exit:
+                # A later user close supersedes the original reload request.
+                # Preserve the session for Open, without reviving a closed
+                # viewer when only analysis modules are reloaded next time.
+                self._reload_reopen = False
+            self.status_label.setText("History viewer closed. Open it again to continue." if normal_exit else "History viewer stopped. Open it again to retry.")
             self.status_label.setToolTip(self._stderr)
 
     def prepare_shutdown(self):

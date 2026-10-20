@@ -54,7 +54,8 @@ if errorlevel 1 (
 )
 
 :: Keep the local shortcut's icon and taskbar identity in sync with this checkout.
-powershell.exe -NoProfile -File "%~dp0Update-TransportShortcut.ps1"
+:: Allow this local helper in its own process without changing system policy.
+powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File "%~dp0tools\Update-TransportShortcut.ps1"
 if errorlevel 1 (
     echo [WARN] Could not update the Transport shortcut. Application startup will continue.
 )

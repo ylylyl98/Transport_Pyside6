@@ -341,6 +341,7 @@ class BFieldTransportController(QtCore.QObject):
         if self._active:
             self.error.emit("A B-field Transport sweep is already running")
             return False
+        self.cancel_shutdown_preparation()
         self._stored_rates = self._stored_limits = None
         self._active_ao_channels.clear()
         try:
@@ -517,6 +518,14 @@ class BFieldTransportController(QtCore.QObject):
         self._stop_requested = True
         self._log("Stop requested by user")
         self._cleanup("stopped", "B-field Transport stopped; partial data and checkpoint preserved")
+
+    def cancel_shutdown_preparation(self) -> None:
+        """Discard clearance from an abandoned close without undoing safety work.
+
+        An acknowledgement is reusable only for the immediate close retry.
+        Pending Persistent operations and their reservation remain untouched.
+        """
+        self._shutdown_complete = False
 
     def prepare_shutdown(self) -> bool:
         """Ensure APS100 is Persistent before MainWindow disconnects it.

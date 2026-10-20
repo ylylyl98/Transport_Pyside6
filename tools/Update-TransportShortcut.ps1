@@ -4,13 +4,17 @@ Run Transport_App.bat first to install the project environment.
 #>
 [CmdletBinding()]
 param(
-    [string]$ShortcutPath = (Join-Path $PSScriptRoot 'Transport_App - Shortcut.lnk')
+    [string]$ShortcutPath
 )
 
 $ErrorActionPreference = 'Stop'
-$transportEntry = Join-Path $PSScriptRoot 'transport_UI.py'
-$transportLauncher = Join-Path $PSScriptRoot 'Transport_App.bat'
-$transportIcon = Join-Path $PSScriptRoot 'assets\transport.ico'
+$transportRoot = Split-Path -Parent $PSScriptRoot
+if (-not $ShortcutPath) {
+    $ShortcutPath = Join-Path $transportRoot 'Transport_App - Shortcut.lnk'
+}
+$transportEntry = Join-Path $transportRoot 'transport_UI.py'
+$transportLauncher = Join-Path $transportRoot 'Transport_App.bat'
+$transportIcon = Join-Path $transportRoot 'assets\transport.ico'
 # This identity must match app/app_identity.py for Windows taskbar grouping.
 $transportAppId = 'MyLab.TransportMeasurement'
 $ShortcutPath = [System.IO.Path]::GetFullPath($ShortcutPath)
@@ -34,7 +38,7 @@ if (Test-Path -LiteralPath $ShortcutPath -PathType Leaf) {
     $existingItem = $existingFolder.ParseName([System.IO.Path]::GetFileName($ShortcutPath))
     if ($transportLink.TargetPath -eq $transportLauncher -and
         $transportLink.Arguments -eq $transportArguments -and
-        $transportLink.WorkingDirectory -eq $PSScriptRoot -and
+        $transportLink.WorkingDirectory -eq $transportRoot -and
         $transportLink.IconLocation -eq $transportIconLocation -and
         $existingItem.ExtendedProperty('System.AppUserModel.ID') -eq $transportAppId) {
         Write-Output "Transport shortcut is already configured: $ShortcutPath"
@@ -105,7 +109,7 @@ namespace TransportShortcutInterop {
 
 $transportLink.TargetPath = $transportLauncher
 $transportLink.Arguments = $transportArguments
-$transportLink.WorkingDirectory = $PSScriptRoot
+$transportLink.WorkingDirectory = $transportRoot
 $transportLink.IconLocation = $transportIconLocation
 $transportLink.Description = 'Transport Measurement'
 $transportLink.Save()

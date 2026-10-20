@@ -15,6 +15,15 @@ from PySide6 import QtCore
 from app.background_process import is_process_running
 
 
+def _read_message(path):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, PermissionError):
+        # Atomic publication can still race a Windows sharing lock. Leave the
+        # queue unchanged and let the next timer tick read the message.
+        return None
+
+
 class _SnapshotTask(QtCore.QRunnable):
     def __init__(self, snapshot, path):
         super().__init__()
@@ -46,6 +55,7 @@ class PngExportProcess(QtCore.QObject):
         self._closed = False
         self._reloading = False
         self._reload_starting = False
+        self._reload_paused = False
         self._sequence = 0
         self._last_activity = time.monotonic()
         self.timer = QtCore.QTimer(self)
@@ -65,7 +75,7 @@ class PngExportProcess(QtCore.QObject):
         """Drain this generation; durably stage new work for the next one."""
         if self._closed or self._reloading:
             return
-        if self._pid is None and not self._pending:
+        if self._pid is None and not self._pending and not self._reload_paused:
             self.reload_finished.emit({"ok": True})
             return
         self._reloading = True
@@ -88,6 +98,8 @@ class PngExportProcess(QtCore.QObject):
 
     def _finish_reload(self, error=""):
         self._reloading = self._reload_starting = False
+        if not error:
+            self._reload_paused = False
         self.reload_finished.emit({"ok": not bool(error), "error": error})
 
     def submit_snapshot(self, snapshot, output=None, cut_only=False, *, heatmap_only=False):
@@ -105,13 +117,15 @@ class PngExportProcess(QtCore.QObject):
         path = self.spool / f"{number}.job.json"
         temporary = path.with_suffix(".tmp")
         temporary.write_text(json.dumps({**job, "id": number}, ensure_ascii=False), encoding="utf-8")
-        waiting = self._reloading and not self._reload_starting
+        waiting = ((self._reload_paused and not self._reloading)
+                   or (self._reloading and not self._reload_starting))
         os.replace(temporary, path.with_suffix(".waiting") if waiting else path)
         self._pending[number] = path
         self._last_activity = time.monotonic()
         if not waiting and (self._pid is None or (self.spool / "exited.json").exists()):
             self._launch_worker()
-        self.timer.start()
+        if not self._reload_paused or self._reloading:
+            self.timer.start()
         return number
 
     def _launch_worker(self, after_pid=None):
@@ -143,7 +157,7 @@ class PngExportProcess(QtCore.QObject):
         except OSError as exc:
             self._pid = None
             error = "PNG background process could not start: " + str(exc)
-            if self._reloading:
+            if self._reloading or self._reload_paused:
                 self._reload_failed(error)
             else:
                 self._fail_all(error)
@@ -156,8 +170,10 @@ class PngExportProcess(QtCore.QObject):
         # Updated code may be temporarily broken. Preserve accepted work on
         # disk so Reload can retry it once the code has been repaired.
         self._pid = None
+        self._reload_paused = True
         self.timer.stop()
-        self._finish_reload(error)
+        self._finish_reload(f"{error}\nExports are paused; accepted jobs remain queued. "
+                            f"Repair the code and use Reload analysis to resume. Queue folder: {self.spool}")
 
     def _fail_all(self, error):
         for number, path in list(self._pending.items()):
@@ -170,33 +186,40 @@ class PngExportProcess(QtCore.QObject):
             self._finish_reload(error)
 
     def _poll(self):
-        if (self.spool / "fatal.json").exists():
-            error = "PNG worker could not initialize: " + json.loads((self.spool / "fatal.json").read_text(encoding="utf-8"))["error"]
+        if self._reload_paused and not self._reloading:
+            # New measurements may finish while updated code is still broken.
+            # Keep their durable jobs until an explicit reload succeeds.
+            self.timer.stop()
+            return
+        fatal = _read_message(self.spool / "fatal.json")
+        if fatal is not None:
+            error = "PNG worker could not initialize: " + fatal["error"]
             if self._reloading:
                 self._reload_failed(error)
             else:
                 self._fail_all(error)
             self._pid = None
             return
-        if (self.spool / "boot.json").exists():
-            self._pid = json.loads((self.spool / "boot.json").read_text(encoding="utf-8"))["pid"]
-        if not self._announced and (self.spool / "ready.json").exists():
+        boot = _read_message(self.spool / "boot.json")
+        if boot is not None:
+            self._pid = boot["pid"]
+        ready = _read_message(self.spool / "ready.json") if not self._announced else None
+        if ready is not None:
             self._announced = True
-            ready = json.loads((self.spool / "ready.json").read_text(encoding="utf-8"))
             self._pid = ready["pid"]
             self.ready.emit(ready)
             if self._reload_starting:
                 self._finish_reload()
         for number, path in list(self._pending.items()):
             result = path.with_name(path.name.replace(".job.json", ".result.json"))
-            if result.exists():
-                message = json.loads(result.read_text(encoding="utf-8"))
+            message = _read_message(result)
+            if message is not None:
                 self._pending.pop(number)
                 self.completed.emit(message)
                 result.unlink(missing_ok=True)
                 self._last_activity = time.monotonic()
         if self._reload_starting and not self._announced and self._worker_exited():
-            self._reload_failed("PNG replacement process exited before it was ready; accepted jobs remain queued. Repair the code and reload again.")
+            self._reload_failed("PNG replacement process exited before it was ready.")
         elif self._reloading and not self._reload_starting and self._worker_exited():
             self._promote_waiting()
             self._reload_starting = True
@@ -214,6 +237,11 @@ class PngExportProcess(QtCore.QObject):
             return
         self._closed = True
         self.timer.stop()
+        if self._reload_paused and not self._reloading:
+            # Closing Transport must not turn a recoverable reload failure
+            # into _fail_all(), or retry code the user has not repaired yet.
+            (self.spool / "stop").touch()
+            return
         if self._reloading and not self._reload_starting and self._pending and type(self._pid) is int:
             # A stopping worker may already have observed an empty queue but
             # not yet written its exit marker. A detached successor waits for

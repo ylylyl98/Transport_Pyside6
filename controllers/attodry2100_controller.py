@@ -35,6 +35,7 @@ class Command(Enum):
     SETPOINT = auto()
     START = auto()
     STOP = auto()
+    PREPARE_SHUTDOWN = auto()
     SHUTDOWN = auto()
     VERIFY_COMPLETION = auto()
     DETACH_COMPLETED = auto()
@@ -138,6 +139,7 @@ class _CommandMailbox:
         self.lock = threading.RLock()
         self.ordinary: deque[_Request] = deque()
         self.stop: Optional[_Request] = None
+        self.shutdown_prepare: Optional[_Request] = None
         self.shutdown: Optional[_Request] = None
 
     def enqueue(self, request: _Request) -> None:
@@ -158,10 +160,20 @@ class _CommandMailbox:
                 return request
             return self.shutdown
 
+    def enqueue_shutdown_prepare(self, request: _Request) -> _Request:
+        with self.lock:
+            if self.shutdown_prepare is None:
+                self.shutdown_prepare = request
+                return request
+            return self.shutdown_prepare
+
     def pop(self) -> Optional[_Request]:
         with self.lock:
             if self.stop is not None:
                 request, self.stop = self.stop, None
+                return request
+            if self.shutdown_prepare is not None:
+                request, self.shutdown_prepare = self.shutdown_prepare, None
                 return request
             if self.shutdown is not None:
                 request, self.shutdown = self.shutdown, None
@@ -173,7 +185,8 @@ class _CommandMailbox:
                 return request
             return None
 
-    def cancel_queued(self, *, mutations_only: bool, exc: BaseException) -> None:
+    def cancel_queued(self, *, mutations_only: bool, exc: BaseException) -> list[_Request]:
+        cancelled = []
         with self.lock:
             kept: deque[_Request] = deque()
             while self.ordinary:
@@ -191,9 +204,11 @@ class _CommandMailbox:
                         request.client_future.set_exception(exc)
                     if not request.drained_future.done():
                         request.drained_future.set_result(False)
+                    cancelled.append(request)
                 else:
                     kept.append(request)
             self.ordinary = kept
+        return cancelled
 
     def cancel_request(self, target: _Request, exc: BaseException) -> bool:
         with self.lock:
@@ -303,7 +318,7 @@ class _AttoDRY2100Owner(QObject):
         if request.get_state() is RequestState.CANCELLED:
             return
         if (
-            request.command not in {Command.CONNECT, Command.DISCONNECT, Command.SHUTDOWN}
+            request.command not in {Command.CONNECT, Command.DISCONNECT, Command.PREPARE_SHUTDOWN, Command.SHUTDOWN}
             and request.generation != self.generation
         ):
             self._finish(
@@ -329,6 +344,21 @@ class _AttoDRY2100Owner(QObject):
                 self._set_state(ControllerState.IDLE)
                 self.connected.emit(identity)
                 self._finish(request, identity)
+                return
+            if command is Command.PREPARE_SHUTDOWN:
+                # Close preflight must be decided by the SDK owner, not its
+                # queued GUI state cache. Keep the adapter/thread recoverable
+                # if another instrument subsequently prevents app shutdown.
+                # A CONNECT that was already running may have cleared this.
+                self.stop_event.set()
+                if self.adapter is not None:
+                    if self.field_may_be_active:
+                        self._set_state(ControllerState.STOPPING)
+                        self.adapter.stop_field_control()
+                        self.field_may_be_active = False
+                    self.armed_target = None
+                    self._set_state(ControllerState.IDLE)
+                self._finish(request, True)
                 return
             if command is Command.SHUTDOWN and self.adapter is None:
                 self.generation += 1
@@ -483,7 +513,7 @@ class _AttoDRY2100Owner(QObject):
                     if not self.lifecycle.get("committed"):
                         self.lifecycle["reserved"] = False
                         self._set_state(ControllerState.ACTIVE if self.adapter is not None else ControllerState.FAULTED)
-            if request.command is Command.STOP:
+            if request.command in {Command.STOP, Command.PREPARE_SHUTDOWN}:
                 self._set_state(ControllerState.STOPPING)
             elif request.command is Command.SHUTDOWN:
                 self._set_state(ControllerState.FAULTED)
@@ -575,6 +605,7 @@ class AttoDRY2100Controller(QObject):
         self._generation = 1
         self._requests: dict[str, _Request] = {}
         self._stop_handle: Optional[OperationHandle] = None
+        self._shutdown_prepare_handle: Optional[OperationHandle] = None
         self._shutdown_handle: Optional[OperationHandle] = None
         self._lifecycle = {"reserved": False, "committed": False}
         self._state = ControllerState.DISCONNECTED
@@ -643,13 +674,16 @@ class AttoDRY2100Controller(QObject):
                 error = exc
         with self._lock:
             self._requests.pop(request.request_id, None)
+        # Close preflight is a Stop acknowledgement for existing UI clients;
+        # it must release their busy state when another device refuses close.
+        operation = "stop" if request.command is Command.PREPARE_SHUTDOWN else request.command.name.lower()
         if error is None:
-            self.operation_finished.emit(request.command.name.lower(), True, None)
+            self.operation_finished.emit(operation, True, None)
         else:
             message = str(error) or error.__class__.__name__
             self.error.emit(f"attoDRY2100 {request.command.name.lower()} failed: {message}")
             self.fault.emit(message)
-            self.operation_finished.emit(request.command.name.lower(), False, error)
+            self.operation_finished.emit(operation, False, error)
 
     @Slot(str, object)
     def _publish_immediate_failure(self, command: str, error: BaseException) -> None:
@@ -741,18 +775,26 @@ class AttoDRY2100Controller(QObject):
             return not any(
                 request.get_state() is RequestState.TIMED_OUT_DRAINING
                 for request in self._requests.values()
+            ) and not (
+                self._shutdown_prepare_handle is not None
+                and self._shutdown_prepare_handle.state in {
+                    RequestState.QUEUED, RequestState.RUNNING, RequestState.TIMED_OUT_DRAINING,
+                }
             ) and self._shutdown_handle is None and self._state not in {
                 ControllerState.DETACHING, ControllerState.DETACHED,
             }
 
     def _submit_ordinary(self, command: Command, *args) -> OperationHandle:
-        if not self._ordinary_allowed():
-            return self._immediate_failure(
-                command,
-                AttoDRY2100StateError("controller is waiting for owner work to drain"),
-            )
-        request, handle = self._new_request(command, tuple(args))
-        self._mailbox.enqueue(request)
+        # Serialize admission and insertion with close preflight: a caller
+        # must not pass the gate, then enqueue CONNECT/START after cancellation.
+        with self._lock:
+            if not self._ordinary_allowed():
+                return self._immediate_failure(
+                    command,
+                    AttoDRY2100StateError("controller is waiting for owner work to drain"),
+                )
+            request, handle = self._new_request(command, tuple(args))
+            self._mailbox.enqueue(request)
         self._wake.emit()
         return handle
 
@@ -832,6 +874,14 @@ class AttoDRY2100Controller(QObject):
             self._mailbox.cancel_queued(
                 mutations_only=True, exc=AttoDRY2100StoppedError("stop requested")
             )
+            if (self._stop_handle is not None
+                    and self._stop_handle.kind == "prepare_shutdown"
+                    and self._stop_handle.state in {
+                        RequestState.SUCCEEDED, RequestState.FAILED, RequestState.CANCELLED,
+                    }):
+                # A manual STOP after a rejected close is a fresh recovery
+                # attempt, with its own SDK call and completion notification.
+                self._stop_handle = None
             if self._stop_handle is not None:
                 return self._stop_handle
             request, handle = self._new_request(Command.STOP)
@@ -974,6 +1024,45 @@ class AttoDRY2100Controller(QObject):
             self._thread.quit()
             self._thread.wait(max(1, int((timeout or self.shutdown_wait_s) * 1000)))
         return result
+
+    def prepare_shutdown(self, wait_s: Optional[float] = None) -> bool:
+        """Confirm field Stop while keeping this owner available after a failed close."""
+        if not self._thread.isRunning():
+            # Successful detach/termination no longer owns an SDK connection.
+            return True
+        with self._lock:
+            self.stop_event.set()
+            cancelled = self._mailbox.cancel_queued(
+                mutations_only=False,
+                exc=AttoDRY2100StoppedError("application close is preparing field Stop"),
+            )
+            if any(request.command is Command.DETACH_COMPLETED for request in cancelled):
+                self._lifecycle["reserved"] = False
+            handle = self._shutdown_prepare_handle
+            if handle is None or handle.state not in {
+                RequestState.QUEUED, RequestState.RUNNING, RequestState.TIMED_OUT_DRAINING,
+            }:
+                request, handle = self._new_request(Command.PREPARE_SHUTDOWN)
+                actual = self._mailbox.enqueue_shutdown_prepare(request)
+                if actual is not request:
+                    self._requests.pop(request.request_id, None)
+                    handle = OperationHandle(actual, self._caller_timeout)
+                self._shutdown_prepare_handle = handle
+                # Existing manual setpoint/temperature paths clear a completed
+                # Stop before new work. A rejected close must remain recoverable.
+                self._stop_handle = handle
+        # Unlike final shutdown, a refused preflight leaves panels alive. End
+        # their cancelled connect/setpoint/start operations as well as futures.
+        for request in cancelled:
+            if request.timer is not None:
+                request.timer.cancel()
+            self._request_terminal(request)
+        self._wake.emit()
+        try:
+            handle.result(wait_s if wait_s is not None else self.shutdown_wait_s)
+        except Exception:
+            return False
+        return True
 
     def shutdown(self, wait_s: Optional[float] = None) -> bool:
         if not self._thread.isRunning():

@@ -3,6 +3,7 @@ import threading
 import time
 import unittest
 from dataclasses import asdict
+from unittest.mock import patch
 
 from PySide6.QtWidgets import QApplication
 
@@ -13,6 +14,7 @@ from app.devices.attodry2100_adapter import (
 )
 from controllers.attodry2100_controller import (
     AttoDRY2100Controller,
+    Command,
     ControllerState,
     RequestState,
 )
@@ -195,6 +197,245 @@ class ControllerTests(unittest.TestCase):
             return handle.wait_drained(timeout)
         finally:
             self.pump()
+
+    def test_close_preflight_offline_or_idle_keeps_owner_available_without_stop(self):
+        controller, adapter, recorder = self.make(connect=False)
+        self.assertTrue(controller.prepare_shutdown(.5))
+        self.assertTrue(controller._thread.isRunning())
+        self.assertEqual(recorder.calls, [])
+        self.assertEqual(controller.connect_async().result(.5), adapter.identity)
+        controller.set_h_setpoint_async(.01).result(.5)
+        self.assertTrue(controller.prepare_shutdown(.5))
+        self.assertIsNone(controller._owner.armed_target)
+        self.assertTrue(adapter.connected)
+        self.assertNotIn("stop", [name for name, _, _ in adapter.calls])
+        self.assertNotIn("close", [name for name, _, _ in adapter.calls])
+
+    def test_close_preflight_stops_owner_active_field_despite_stale_gui_state(self):
+        controller, adapter, _ = self.make()
+        results = []
+        controller.operation_finished.connect(lambda *args: results.append(args))
+        controller.set_h_setpoint_async(.01).result(.5)
+        controller.start_field_control_async().result(.5)
+        # No GUI event processing: ACTIVE has not reached the controller cache.
+        self.assertIs(controller.state, ControllerState.IDLE)
+        self.assertTrue(controller.prepare_shutdown(.5))
+        self.assertFalse(adapter.field_control)
+        self.assertTrue(adapter.connected)
+        self.assertTrue(controller._thread.isRunning())
+        self.assertNotIn("close", [name for name, _, _ in adapter.calls])
+        self.pump()
+        self.assertIn(("stop", True, None), results)
+        # A later manual STOP must make a fresh call and publish a new result.
+        results.clear()
+        self.assertTrue(controller.request_stop().result(.5))
+        self.pump()
+        self.assertEqual(results, [("stop", True, None)])
+        self.assertEqual([name for name, _, _ in adapter.calls].count("stop"), 2)
+        # Rejected application close must not strand the owner in STOP state.
+        controller.set_h_setpoint_async(.02).result(.5)
+        controller.start_field_control_async().result(.5)
+        self.assertTrue(adapter.field_control)
+        self.assertTrue(controller.prepare_shutdown(.5))
+        self.assertEqual([name for name, _, _ in adapter.calls].count("stop"), 3)
+
+    def test_close_preflight_failed_stop_retains_connection_and_manual_stop_retries(self):
+        controller, adapter, _ = self.make()
+        controller.set_h_setpoint_async(.01).result(.5)
+        controller.start_field_control_async().result(.5)
+        adapter.fail_stop = True
+        self.assertFalse(controller.prepare_shutdown(.5))
+        self.assertTrue(adapter.field_control)
+        self.assertTrue(adapter.connected)
+        self.assertTrue(controller._thread.isRunning())
+        self.assertNotIn("close", [name for name, _, _ in adapter.calls])
+        with self.assertRaises(AttoDRY2100StoppedError):
+            controller.set_h_setpoint_async(.02).result(.5)
+        self.pump()
+        results = []
+        controller.operation_finished.connect(lambda *args: results.append(args))
+        adapter.fail_stop = False
+        self.assertTrue(controller.request_stop().result(.5))
+        self.pump()
+        self.assertEqual(results, [("stop", True, None)])
+        self.assertEqual([name for name, _, _ in adapter.calls].count("stop"), 2)
+        self.assertFalse(adapter.field_control)
+        controller.set_h_setpoint_async(.02).result(.5)
+        controller.start_field_control_async().result(.5)
+        self.assertTrue(adapter.field_control)
+
+    def test_close_preflight_failed_stop_can_retry_close(self):
+        controller, adapter, _ = self.make()
+        controller.set_h_setpoint_async(.01).result(.5)
+        controller.start_field_control_async().result(.5)
+        adapter.fail_stop = True
+        self.assertFalse(controller.prepare_shutdown(.5))
+        adapter.fail_stop = False
+        self.assertTrue(controller.prepare_shutdown(.5))
+        self.assertEqual([name for name, _, _ in adapter.calls].count("stop"), 2)
+        self.assertFalse(adapter.field_control)
+        self.assertTrue(adapter.connected)
+
+    def test_close_preflight_cancels_queued_connect_and_reports_completion(self):
+        controller, adapter, recorder = self.make(connect=False)
+        results = []
+        controller.operation_finished.connect(lambda *args: results.append(args))
+        with patch.object(controller, "_wake"):
+            connecting = controller.connect_async()
+        self.assertTrue(controller.prepare_shutdown(.5))
+        with self.assertRaises(AttoDRY2100StoppedError):
+            connecting.result(.5)
+        self.pump()
+        self.assertIn(("connect", False), [(name, success) for name, success, _ in results])
+        self.assertEqual(recorder.calls, [])
+        self.assertFalse(controller.has_pending_work)
+        self.assertEqual(controller.connect_async().result(.5), adapter.identity)
+
+    def test_close_preflight_cannot_be_overtaken_by_concurrent_connect_admission(self):
+        controller, _adapter, recorder = self.make(connect=False)
+        admitted = threading.Event()
+        release = threading.Event()
+        handles = []
+        create_request = controller._new_request
+        wake_owner = controller._wake.emit
+
+        def delayed_creation(command, *args, **kwargs):
+            if command is Command.CONNECT:
+                admitted.set()
+                if not release.wait(1.0):
+                    raise AssertionError("connect admission gate was not released")
+            return create_request(command, *args, **kwargs)
+
+        connecting = threading.Thread(target=lambda: handles.append(controller.connect_async()))
+
+        def wake_after_preflight_queued():
+            # Keep this connect queued so the close preflight owns cancellation.
+            if threading.current_thread() is not connecting:
+                wake_owner()
+
+        with (
+            patch.object(controller, "_new_request", side_effect=delayed_creation),
+            patch.object(controller, "_wake") as wake,
+        ):
+            wake.emit.side_effect = wake_after_preflight_queued
+            connecting.start()
+            self.assertTrue(admitted.wait(.5))
+            timer = threading.Timer(.02, release.set)
+            timer.start()
+            try:
+                self.assertTrue(controller.prepare_shutdown(.5))
+            finally:
+                release.set()
+                timer.join()
+                connecting.join(1.0)
+        self.assertFalse(connecting.is_alive())
+        self.assertEqual(len(handles), 1)
+        with self.assertRaises(AttoDRY2100StoppedError):
+            handles[0].result(.5)
+        self.assertEqual(recorder.calls, [])
+        self.assertFalse(controller.has_pending_work)
+
+    def test_close_preflight_drains_connect_and_cancels_queued_mutations(self):
+        controller, adapter, _ = self.make(connect=False)
+        adapter.arm_gate("connect")
+        connecting = controller.connect_async()
+        self.assertTrue(adapter.entered.wait(.5))
+        setpoint = controller.set_h_setpoint_async(.01)
+        starting = controller.start_field_control_async()
+        release = threading.Timer(.02, adapter.unblock)
+        release.start()
+        try:
+            self.assertTrue(controller.prepare_shutdown(.5))
+        finally:
+            release.join()
+        self.assertEqual(connecting.result(.5), adapter.identity)
+        for handle in (setpoint, starting):
+            with self.assertRaises(AttoDRY2100StoppedError):
+                handle.result(.5)
+        names = [name for name, _, _ in adapter.calls]
+        self.assertNotIn("start_mutation", names)
+        self.assertNotIn("set_mutation", names)
+        self.assertNotIn("stop", names)
+        self.assertTrue(adapter.connected)
+
+    def test_close_preflight_cancels_queued_start_and_disarms_old_setpoint(self):
+        controller, adapter, _ = self.make()
+        controller.set_h_setpoint_async(.01).result(.5)
+        adapter.arm_gate("read")
+        reading = controller.read_snapshot_async()
+        self.assertTrue(adapter.entered.wait(.5))
+        starting = controller.start_field_control_async()
+        release = threading.Timer(.02, adapter.unblock)
+        release.start()
+        try:
+            self.assertTrue(controller.prepare_shutdown(.5))
+        finally:
+            release.join()
+        reading.result(.5)
+        with self.assertRaises(AttoDRY2100StoppedError):
+            starting.result(.5)
+        self.assertNotIn("start_mutation", [name for name, _, _ in adapter.calls])
+        self.assertIsNone(controller._owner.armed_target)
+        self.assertFalse(adapter.field_control)
+        with self.assertRaises(AttoDRY2100StoppedError):
+            controller.start_field_control_async().result(.5)
+
+    def test_close_preflight_stops_running_start_before_allowing_cleanup(self):
+        controller, adapter, _ = self.make()
+        controller.set_h_setpoint_async(.01).result(.5)
+        adapter.arm_gate("start_preflight")
+        starting = controller.start_field_control_async()
+        self.assertTrue(adapter.entered.wait(.5))
+        release = threading.Timer(.02, adapter.unblock)
+        release.start()
+        try:
+            self.assertTrue(controller.prepare_shutdown(.5))
+        finally:
+            release.join()
+        with self.assertRaises(AttoDRY2100StoppedError):
+            starting.result(.5)
+        self.assertFalse(adapter.field_control)
+        names = [name for name, _, _ in adapter.calls]
+        self.assertNotIn("start_mutation", names)
+        self.assertEqual(names.count("stop"), 1)
+        self.assertNotIn("close", names)
+
+    def test_close_preflight_after_completed_detach_does_not_reopen_or_stop(self):
+        controller, adapter, recorder = self.make()
+        controller.set_h_setpoint_async(.01).result(.5)
+        controller.start_field_control_async().result(.5)
+        self.pump()
+        detach = controller.detach_completed_run_async(.01, .001)
+        detach.result(.5)
+        deadline = time.monotonic() + 1.0
+        while not detach._request.drained_future.done() and time.monotonic() < deadline:
+            self.pump(.01)
+        detach.wait_drained(.1)
+        self.assertTrue(controller.prepare_shutdown(.5))
+        self.assertFalse(controller._thread.isRunning())
+        self.assertEqual(len(recorder.calls), 1)
+        self.assertNotIn("stop", [name for name, _, _ in adapter.calls])
+
+    def test_close_preflight_timeout_keeps_owner_and_blocks_new_work_until_drain(self):
+        controller, adapter, _ = self.make(request_timeout=1.0)
+        controller.set_h_setpoint_async(.01).result(.5)
+        controller.start_field_control_async().result(.5)
+        adapter.arm_gate("stop")
+        self.assertFalse(controller.prepare_shutdown(.02))
+        self.assertTrue(adapter.entered.is_set())
+        self.assertTrue(controller._thread.isRunning())
+        self.assertTrue(adapter.connected)
+        self.assertTrue(adapter.field_control)
+        with self.assertRaises(AttoDRY2100StoppedError):
+            controller.set_h_setpoint_async(.02).result(.5)
+        adapter.unblock()
+        self.assertTrue(controller._shutdown_prepare_handle.wait_drained(.5))
+        self.assertTrue(controller.prepare_shutdown(.5))
+        self.assertFalse(adapter.field_control)
+        self.assertNotIn("close", [name for name, _, _ in adapter.calls])
+        controller.set_h_setpoint_async(.02).result(.5)
+        controller.start_field_control_async().result(.5)
+        self.assertTrue(adapter.field_control)
 
     def test_factory_once_on_owner_thread_with_complete_config(self):
         controller, adapter, recorder = self.make()
