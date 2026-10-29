@@ -104,11 +104,11 @@ class HistoryViewerWindow(QtWidgets.QMainWindow):
         super().closeEvent(event)
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description="Read-only Transport measurement history")
     parser.add_argument("--folder", required=True)
     parser.add_argument("--connected", action="store_true", help="Follow directory/refresh notifications from Transport over stdin")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     # Lower only this read-only process's scheduling priority. Instrument
     # ownership stays entirely in Transport; both still share disk resources.
     if sys.platform == "win32":

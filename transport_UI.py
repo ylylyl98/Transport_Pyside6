@@ -5,6 +5,18 @@ import sys
 
 def main(argv=None):
     arguments = list(sys.argv[1:] if argv is None else argv)
+    if "--verify-package" in arguments:
+        arguments.remove("--verify-package")
+        from app.package_smoke import main as run
+        return run(arguments)
+    if "--png-worker" in arguments:
+        arguments.remove("--png-worker")
+        from transport_png_exporter import main as run
+        return run(arguments)
+    if "--history-widgets" in arguments:
+        arguments.remove("--history-widgets")
+        from transport_history_viewer import main as run
+        return run(arguments)
     if "--widgets" in arguments:
         arguments.remove("--widgets")
         from PySide6.QtWidgets import QApplication

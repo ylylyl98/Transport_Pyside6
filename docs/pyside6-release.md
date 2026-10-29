@@ -1,5 +1,12 @@
 # PySide6 official local version
 
+## GitHub automation
+
+Software tests, portable Windows EXE builds and tag-based GitHub Releases are
+configured in [GitHub release instructions](github-release.md). The source
+launcher remains available. Cloud software verification does not replace
+physical instrument acceptance.
+
 ## Qt Quick update
 
 The current root launcher opens the Qt Quick/QML frontend. Its migration,

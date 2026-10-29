@@ -59,7 +59,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tools_menu = self.workspace_menu.addMenu("Tools")
         self.runtime_settings_action = self.tools_menu.addAction("Runtime settings…", self._show_runtime_settings)
         self.preview_action = self.tools_menu.addAction("Offline UI preview…", self._open_ui_preview)
-        self.preview_action.setEnabled(os.environ.get("TRANSPORT_UI_PREVIEW") != "1")
+        frozen = bool(getattr(sys, "frozen", False))
+        self.preview_action.setEnabled(not frozen and os.environ.get("TRANSPORT_UI_PREVIEW") != "1")
+        if frozen:
+            self.preview_action.setText("Offline UI preview (source checkout only)")
+            self.preview_action.setToolTip("Run the Python source checkout to use the development preview.")
         self._runtime_settings_dialog = None
         self._last_measurement_page = "Vds Sweep"
 
@@ -284,6 +288,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._runtime_settings_dialog.activateWindow()
 
     def _open_ui_preview(self):
+        if getattr(sys, "frozen", False):
+            self.statusBar().showMessage("Offline UI preview is available in the Python source checkout.", 8000)
+            return
         from pathlib import Path
         from PySide6.QtCore import QProcess
         root = Path(__file__).resolve().parents[2]

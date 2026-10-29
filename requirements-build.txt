@@ -1,0 +1,3 @@
+# Build-only tools; keep the measurement environment's requirements separate.
+PyInstaller==6.22.3
+pyinstaller-hooks-contrib==2026.9

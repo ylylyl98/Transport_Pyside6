@@ -2,10 +2,10 @@
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 
 from PySide6 import QtCore
+from app.process_command import worker_command
 
 
 class HistoryLauncher(QtCore.QObject):
@@ -55,13 +55,11 @@ class HistoryLauncher(QtCore.QObject):
             self._start_viewer()
 
     def _start_viewer(self):
-        executable = Path(sys.executable)
-        if executable.name.lower() == "pythonw.exe" and executable.with_name("python.exe").exists():
-            executable = executable.with_name("python.exe")
+        command = worker_command("history", "--folder", str(self.folder_callable()), "--connected")
         self._stdout.clear()
         self._stderr = ""
-        self.process.setProgram(str(executable))
-        self.process.setArguments(["-u", "-B", "-m", "app.quick.history_app", "--folder", str(self.folder_callable()), "--connected"])
+        self.process.setProgram(command[0])
+        self.process.setArguments(command[1:])
         self.process.setWorkingDirectory(str(Path(__file__).resolve().parents[2]))
         self._set_message("Opening independent Qt Quick history viewer…")
         self.process.start()

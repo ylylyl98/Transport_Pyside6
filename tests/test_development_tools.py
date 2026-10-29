@@ -114,6 +114,31 @@ class StyleReloadTests(unittest.TestCase):
 
 
 class OfflinePolicyTests(unittest.TestCase):
+    def test_frozen_preview_is_unavailable_while_source_launch_is_preserved(self):
+        from app.ui.main_window import MainWindow
+        root = Path(__file__).resolve().parents[1]
+        for frozen in (True, False):
+            with self.subTest(frozen=frozen), patch.object(sys, "frozen", frozen, create=True), \
+                    patch.dict(os.environ, {"TRANSPORT_UI_PREVIEW": "0"}), \
+                    patch("app.ui.dock.ConnDock._start_scan"), \
+                    patch.object(QtCore.QProcess, "startDetached", return_value=(True, 123)) as start:
+                window = MainWindow()
+                try:
+                    self.assertEqual(window.preview_action.isEnabled(), not frozen)
+                    window._open_ui_preview()
+                    if frozen:
+                        self.assertIn("source checkout", window.preview_action.text())
+                        self.assertIn("source checkout", window.statusBar().currentMessage())
+                        start.assert_not_called()
+                    else:
+                        self.assertEqual(window.preview_action.text(), "Offline UI preview…")
+                        start.assert_called_once_with(sys.executable, [str(root / "transport_ui_preview.py")], str(root))
+                finally:
+                    window.close()
+                    window.deleteLater()
+                    QtWidgets.QApplication.instance().sendPostedEvents(None, QtCore.QEvent.Type.DeferredDelete)
+                    QtWidgets.QApplication.instance().processEvents()
+
     def test_preview_isolates_settings_and_blocks_native_children_and_sdk(self):
         from contextlib import ExitStack
         from utils.config import cfg

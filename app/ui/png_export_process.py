@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-import sys
 import tempfile
 import threading
 import time
@@ -13,6 +12,7 @@ from uuid import uuid4
 
 from PySide6 import QtCore
 from app.background_process import is_process_running
+from app.process_command import worker_command
 
 
 def _read_message(path):
@@ -133,13 +133,10 @@ class PngExportProcess(QtCore.QObject):
         if after_pid is None:
             for name in ("exited.json", "ready.json", "boot.json", "fatal.json", "stop"):
                 (self.spool / name).unlink(missing_ok=True)
-        executable = Path(sys.executable)
-        if os.name == "nt" and executable.with_name("pythonw.exe").exists():
-            executable = executable.with_name("pythonw.exe")
         root = Path(__file__).resolve().parents[2]
-        arguments = [str(root / "transport_png_exporter.py"), "--spool", str(self.spool), "--owner-pid", str(os.getpid())]
+        command = worker_command("png-worker", "--spool", str(self.spool), "--owner-pid", str(os.getpid()))
         if after_pid is not None:
-            arguments += ["--after-pid", str(after_pid)]
+            command += ["--after-pid", str(after_pid)]
         # The viewer receives parent commands on stdin. On Windows, inheriting
         # that pipe in the detached pythonw worker makes its reader see EOF and
         # closes the viewer. The worker communicates exclusively through spool
@@ -151,7 +148,7 @@ class PngExportProcess(QtCore.QObject):
         try:
             with (self.spool / "worker-stderr.log").open("ab") as stderr:
                 process = subprocess.Popen(
-                    [str(executable), *arguments], executable=str(executable), cwd=str(root),
+                    command, executable=command[0], cwd=str(root),
                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=stderr,
                     close_fds=True, **detached)
         except OSError as exc:

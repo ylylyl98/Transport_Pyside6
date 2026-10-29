@@ -23,13 +23,21 @@ def audit_policy(root: Path, *, preview=False):
     def audit(event, args):
         if event == "subprocess.Popen" and not preview:
             executable, command, cwd, _ = args
-            # Preserve the existing test runner's exact renderer-only allowance.
+            # Permit only the renderer, with the same spool/owner constraints
+            # in a source checkout and a frozen release smoke test.
             argv = ([part.strip('"') for part in shlex.split(command, posix=False)]
                     if isinstance(command, str) else command)
             interpreters = (Path(sys.executable), Path(sys.executable).with_name("pythonw.exe"))
-            if (executable and Path(executable) in interpreters and cwd and Path(cwd) == root
+            renderer = False
+            if executable and len(argv) >= 2:
+                if getattr(sys, "frozen", False):
+                    renderer = (Path(executable) == Path(sys.executable).with_name("TransportWorker.exe")
+                                and argv[1] == "--png-worker")
+                else:
+                    renderer = (Path(executable) in interpreters
+                                and Path(argv[1]) == root / "transport_png_exporter.py")
+            if (renderer and cwd and Path(cwd) == root
                     and len(argv) in (6, 8) and argv[0] == executable
-                    and Path(argv[1]) == root / "transport_png_exporter.py"
                     and argv[2] == "--spool" and Path(argv[3]).parent == Path(tempfile.gettempdir())
                     and Path(argv[3]).name.startswith("transport-png-")
                     and argv[4] == "--owner-pid" and argv[5] == str(os.getpid())

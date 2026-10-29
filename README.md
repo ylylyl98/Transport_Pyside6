@@ -3,6 +3,12 @@
 **日常启动：双击根目录的 `Transport_App.bat` 或 `Transport_App - Shortcut.lnk`。**
 其他入口和文件分类见 [00_启动说明.txt](00_启动说明.txt)；文档见 [docs 索引](docs/README.md)。
 
+Windows EXE downloads and automated testing are described in
+[GitHub tests and releases](docs/github-release.md). Pushes to `main` and pull
+requests run all offline test modules on separate Windows runners, then build
+and exercise a portable EXE. Version tags (`v*`) publish verified ZIP files to
+[GitHub Releases](https://github.com/ylylyl98/Transport_Pyside6/releases).
+
 The project root is the official PySide6 / Qt Quick version. `Transport_App.bat` is the only
 BAT in this directory and the normal measurement launcher. Development utilities
 live in `tools/`; do not launch copies inside `tmp/` or backups. See

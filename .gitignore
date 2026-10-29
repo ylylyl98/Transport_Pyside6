@@ -14,3 +14,7 @@ workspace_preview*.png
 /curve_map_*_preview*.png
 /curve_map_*_preview*_view.json
 *.lnk
+
+# Reproducible Windows bundles are published as GitHub Release assets.
+/build/
+/dist/

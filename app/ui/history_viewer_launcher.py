@@ -2,11 +2,11 @@
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 
 from PySide6 import QtCore, QtWidgets
 from app.settings import get_app_settings
+from app.process_command import worker_command
 
 
 class HistoryViewerLauncher(QtWidgets.QWidget):
@@ -91,15 +91,12 @@ class HistoryViewerLauncher(QtWidgets.QWidget):
         self._start_viewer()
 
     def _start_viewer(self):
-        executable = Path(sys.executable)
-        # The measurement launcher uses pythonw; IPC requires ordinary stdio.
-        if executable.name.lower() == "pythonw.exe" and executable.with_name("python.exe").exists():
-            executable = executable.with_name("python.exe")
+        command = worker_command("history-widgets", "--folder", str(self.folder_callable()), "--connected")
         root = Path(__file__).resolve().parents[2]
         self._stdout.clear()
         self._stderr = ""
-        self.process.setProgram(str(executable))
-        self.process.setArguments(["-u", str(root / "transport_history_viewer.py"), "--folder", str(self.folder_callable()), "--connected"])
+        self.process.setProgram(command[0])
+        self.process.setArguments(command[1:])
         self.process.setWorkingDirectory(str(root))
         self.status_label.setText("Opening independent history viewer…")
         self.process.start()

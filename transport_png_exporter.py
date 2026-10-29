@@ -16,12 +16,12 @@ def write_json(path, payload):
     os.replace(temporary, path)
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--spool", type=Path, required=True)
     parser.add_argument("--owner-pid", type=int)
     parser.add_argument("--after-pid", type=int, help="Take over a closing reload generation after its worker exits")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     spool = args.spool
     from app.background_process import is_process_running
     if args.after_pid:
