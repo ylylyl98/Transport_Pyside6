@@ -4,7 +4,7 @@ import ctypes
 import sys
 from pathlib import Path
 
-from PySide6 import QtCore, QtGui, QtWidgets
+from PySide6 import QtCore, QtGui
 
 APP_NAME = "Transport Measurement"
 APP_ORG = "MyLab"
@@ -20,7 +20,7 @@ def set_windows_app_id() -> None:
         pass
 
 
-def configure_qapp(app: QtWidgets.QApplication, *, app_name: str = APP_NAME) -> None:
+def configure_qapp(app: QtGui.QGuiApplication, *, app_name: str = APP_NAME) -> None:
     app.setApplicationName(app_name)
     app.setOrganizationName(APP_ORG)
     app.setApplicationDisplayName(app_name)

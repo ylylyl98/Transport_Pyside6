@@ -1,6 +1,7 @@
-PySide6
-matplotlib
-numpy
-pyvisa
-nidaqmx
-pythonnet
+# Validated with Python 3.13.9 on Windows; Python 3.12–3.14 required.
+PySide6==6.11.2
+matplotlib==3.11.1
+numpy==2.5.1
+pyvisa==1.16.2
+nidaqmx==1.5.0
+pythonnet==3.1.0

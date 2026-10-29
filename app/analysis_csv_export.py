@@ -32,6 +32,15 @@ def _source_comment(record, **fields):
 
 def csv_bytes(snapshot, kind):
     """Export all selected samples, independent of zoom, color scale and display units."""
+    if snapshot.get('panels') and kind != 'heatmap':
+        # Four native panels share one self-describing wide CSV. Each trace
+        # retains its own channel/unit labels and full measured data.
+        traces = []
+        for channel in snapshot['view'].get('channel_order', list(snapshot['panels'])):
+            panel = snapshot['panels'][channel]
+            traces.extend({**trace, 'signal': panel['signal'], 'y_unit': panel['y_unit']}
+                          for trace in panel['traces'])
+        snapshot = {**snapshot, 'traces': traces}
     stream = io.StringIO(newline='')
     writer = csv.writer(stream, lineterminator='\r\n')
     records = {record['path']: record for record in snapshot['records']}
@@ -60,8 +69,10 @@ def csv_bytes(snapshot, kind):
             x, y = (np.asarray(trace[key], dtype=float) for key in ('x', 'y'))
             if x.ndim != 1 or y.ndim != 1 or len(x) != len(y):
                 raise ValueError('Trace coordinates and signal values must have matching lengths')
-            info = dict(Signal=snapshot['signal'], X=snapshot['x_name'], XUnit=snapshot['x_unit'],
-                        SignalUnit=snapshot['y_unit'], Selection=selection,
+            signal = trace.get('signal', snapshot['signal'])
+            signal_unit = trace.get('y_unit', snapshot['y_unit'])
+            info = dict(Signal=signal, X=snapshot['x_name'], XUnit=snapshot['x_unit'],
+                        SignalUnit=signal_unit, Selection=selection,
                         Direction=trace.get('direction', ''), Condition=trace.get('condition', ''),
                         Normalization=view.get('normalization', 'raw'), Processing='full selected trace')
             if kind == 'cut':
@@ -70,8 +81,8 @@ def csv_bytes(snapshot, kind):
                 info['FixedAxis'] = fixed_axis
                 info['FixedValue'] = view['fixed_value']
                 info['FixedUnit'] = data['y_unit'] if fixed_axis == data['y_name'] else data['x_unit']
-            names.extend([snapshot['x_name'], snapshot['signal']])
-            units.extend([snapshot['x_unit'], snapshot['y_unit']])
+            names.extend([snapshot['x_name'], signal])
+            units.extend([snapshot['x_unit'], signal_unit])
             comments.extend([_source_comment(records[trace['path']], **info), _comment(**info)])
             columns.extend([map(float, x), map(float, y)])
         writer.writerows([names, units, comments])

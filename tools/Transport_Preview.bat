@@ -10,8 +10,8 @@ if not exist "%PREVIEW_PYTHON%" (
     exit /b 1
 )
 echo Offline preview: hardware and network access are blocked.
-echo Ctrl+Alt+R reloads style. Ctrl+Shift+R rebuilds this preview only.
-"%PREVIEW_PYTHON%" -B "%PREVIEW_ROOT%\transport_ui_preview.py" %*
+echo Ctrl+Shift+R rebuilds this Qt Quick preview only.
+"%PREVIEW_PYTHON%" -B "%PREVIEW_ROOT%\transport_quick_preview.py" %*
 if errorlevel 1 (
     echo [ERROR] Preview stopped. Fix the error above, then run this launcher again.
     pause

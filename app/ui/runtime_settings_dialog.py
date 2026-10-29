@@ -3,6 +3,7 @@ from PySide6 import QtCore, QtWidgets
 
 from app.runtime_settings import APPEARANCE, NEXT_RUN_SETTINGS, get_value, apply_runtime_settings
 from app.ui.style_manager import apply_app_style
+from app.ui.widgets.safe_spinbox import SafeSpinBox, SafeDoubleSpinBox
 
 
 class RuntimeSettingsDialog(QtWidgets.QDialog):
@@ -73,7 +74,7 @@ class RuntimeSettingsDialog(QtWidgets.QDialog):
             control = QtWidgets.QCheckBox()
             control.setChecked(get_value(self.config, spec.path))
         else:
-            control = QtWidgets.QSpinBox() if spec.kind is int else QtWidgets.QDoubleSpinBox()
+            control = SafeSpinBox() if spec.kind is int else SafeDoubleSpinBox()
             if spec.kind is float:
                 control.setDecimals(9 if spec.suffix == " T" else 2)
             control.setRange(spec.minimum, spec.maximum)

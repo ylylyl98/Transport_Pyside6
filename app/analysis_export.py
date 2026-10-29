@@ -186,7 +186,7 @@ def export_automatic(snapshot, *, cut_only=False, heatmap_only=False):
         rendered = _heatmap_snapshot(snapshot) if kind == 'heatmap' else snapshot
         title, detail, _ = captions(rendered)
         description = _description(rendered, detail)
-        properties = ('map_xlim', 'map_ylim', 'clim', 'cmap') if kind == 'heatmap' else ('xlim', 'ylim', 'xscale', 'yscale', 'legend')
+        properties = ('map_xlim', 'map_ylim', 'clim', 'cmap') if kind == 'heatmap' else ('xlim', 'ylim', 'xscale', 'yscale', 'legend', 'four_channels', 'channel_order', 'channel_views')
         image_key = _digest({'renderer': 1, 'data': data_key,
                              'title': title, 'description': description,
                              'view': {name: snapshot['view'].get(name) for name in properties}})
@@ -230,10 +230,11 @@ def export_automatic(snapshot, *, cut_only=False, heatmap_only=False):
                        'sha256': _digest(p['png'].read_bytes())} for p in plans]
             csv_files = [{'path': str(p['csv']), 'kind': p['kind'], 'key': p['data_key'],
                           'sha256': p['data_key']} for p in plans]
+            image_size = (2400, 1800) if snapshot.get('panels') else (1200, 900)
             payload = {'schema': 'transport_plot_view_v1', 'automatic_signal': snapshot['signal'],
                        'export_key': export_key, 'sources': snapshot['records'], 'view': view,
                        'images': images, 'csv_files': csv_files,
-                       'image': {'width': 1200, 'height': 900, 'dpi': DPI}, 'warnings': snapshot.get('warnings', [])}
+                       'image': {'width': image_size[0], 'height': image_size[1], 'dpi': DPI}, 'warnings': snapshot.get('warnings', [])}
             write_bytes_atomic(view_path, json.dumps(payload, ensure_ascii=False, indent=2).encode('utf-8'))
         return {'outputs': [str(p['png']) for p in plans], 'csv_outputs': [str(p['csv']) for p in plans],
                 'view_path': str(view_path), 'reused_outputs': reused, 'warnings': snapshot.get('warnings', [])}

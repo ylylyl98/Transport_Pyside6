@@ -22,47 +22,12 @@ from app.saved_conditions import summarize_conditions
 from app.drag_drive import DUAL_SIGNALS
 from app.analysis_csv_export import csv_bytes, validate_csv_path, temporary_path, write_bytes_atomic
 from app.export_paths import ordinary_path, validate_export_path
+from app.plot_snapshot import save_snapshot, load_snapshot
 
 CHANNELS = ("Ids_DC", "Ids_X", "Ids_Y", "Ids_Keithley", *DUAL_SIGNALS)
 OVERVIEW_CHANNELS = (("I_drag_X", "Drag X"), ("I_drag_Y", "Drag Y"),
                      ("I_drive_X", "Drive X"), ("I_drive_Y", "Drive Y"))
 DPI = 150
-
-
-def save_snapshot(snapshot, path):
-    """Keep arrays out of IPC and forbid pickled objects in the archive."""
-    arrays = {}
-    def encode(value):
-        if isinstance(value, np.ndarray):
-            key = f"array_{len(arrays)}"
-            arrays[key] = value
-            return {"array_key": key}
-        if isinstance(value, Path):
-            return str(value)
-        if isinstance(value, dict):
-            return {key: encode(item) for key, item in value.items()}
-        if isinstance(value, (tuple, list)):
-            return [encode(item) for item in value]
-        if isinstance(value, np.generic):
-            return value.item()
-        return value
-    data = encode(snapshot)
-    with Path(path).open("wb") as stream:
-        np.savez(stream, metadata=np.array(json.dumps(data)), **arrays)
-    return str(path)
-
-
-def load_snapshot(path):
-    with np.load(path, allow_pickle=False) as archive:
-        def decode(value):
-            if isinstance(value, dict):
-                if set(value) == {"array_key"}:
-                    return archive[value["array_key"]].copy()
-                return {key: decode(item) for key, item in value.items()}
-            if isinstance(value, list):
-                return [decode(item) for item in value]
-            return value
-        return decode(json.loads(str(archive["metadata"])))
 
 
 def _current_scale(snapshot):
@@ -172,6 +137,8 @@ def _draw_analysis_traces(fig, snapshot, rect, automatic, differences, pair):
 
 
 def build_analysis_figure(snapshot, cut_only=False, automatic=False, *, map_only=False):
+    if snapshot.get('panels') and not cut_only and not map_only:
+        return build_quick_overview(snapshot)
     from app.map_view import resolved_map_view
     snapshot = resolved_map_view(snapshot)
     if map_only:
@@ -225,6 +192,37 @@ def build_analysis_figure(snapshot, cut_only=False, automatic=False, *, map_only
             rect = axis.get_position()
             extra = (6 - bounds.x0) / fig.bbox.width
             axis.set_position((rect.x0 + extra, rect.y0, rect.width - extra, rect.height))
+    return fig
+
+
+def build_quick_overview(snapshot):
+    """Render the native live four-panel snapshot in the detached Agg process.
+
+    Each panel carries its own physical Y limits; X is shared exactly as in the
+    Qt Quick view. Numeric samples are the full frozen buffers, not screen pixels.
+    """
+    fig = Figure(figsize=(16, 12), dpi=DPI, facecolor='white')
+    FigureCanvasAgg(fig)
+    title, detail, differences = captions(snapshot)
+    heading = _fit_header(fig, title, .08, .985, .97)
+    fig.canvas.draw()
+    detail_top = .985 - heading.get_window_extent(fig.canvas.get_renderer()).height / fig.bbox.height - .012
+    subheading = _fit_header(fig, detail, .08, detail_top, .97, '.30')
+    fig.canvas.draw()
+    top = min(.90, detail_top - subheading.get_window_extent(fig.canvas.get_renderer()).height / fig.bbox.height - .035)
+    panel_height = (top - .22) / 2
+    axes = []
+    order = snapshot['view'].get('channel_order', list(snapshot['panels']))
+    for i, channel in enumerate(order[:4]):
+        data = snapshot['panels'][channel]
+        left = .09 + (i % 2) * .50
+        bottom = .10 + (1 - i // 2) * (panel_height + .12)
+        ax = _draw_analysis_traces(fig, data, (left, bottom, .37, panel_height), False, differences, True)
+        ax.set_title(channel, fontsize=18, pad=8)
+        if axes:
+            ax.sharex(axes[0])
+        axes.append(ax)
+    fig.canvas.draw()
     return fig
 
 
@@ -370,8 +368,9 @@ def export_analysis(snapshot, output=None, cut_only=False, *, heatmap_only=False
         view = {**snapshot["view"], "signal": snapshot["signal"], "x": snapshot.get("map", {}).get("x_name", snapshot["x_name"]),
                 "kind": snapshot["kind"], "map_y": snapshot.get("map", {}).get("y_name", "None (1D)"),
                 "cut_only": bool(cut_only), "heatmap_only": bool(heatmap_only)}
+        image_size = (2400, 1800) if snapshot.get('panels') else (1200, 900)
         payload = {"schema": "transport_plot_view_v1", "sources": snapshot["records"], "view": view,
-                   "image": {"width": 1200, "height": 900, "dpi": DPI},
+                   "image": {"width": image_size[0], "height": image_size[1], "dpi": DPI},
                    "images": [{"path": str(target), "kind": kind} for target, kind in zip(outputs, kinds)],
                    "csv_files": [{"path": str(target), "kind": kind} for target, kind in zip(csv_outputs, kinds)],
                    "warnings": snapshot.get("warnings", [])}

@@ -17,7 +17,6 @@ from dataclasses import asdict, is_dataclass
 from copy import deepcopy
 
 from PySide6 import QtCore
-from PySide6 import QtWidgets
 
 from app.engine.bfield_transport_sweep import (
     BFieldTransportSafetyError,
@@ -36,6 +35,13 @@ from app.signal_chain import signal_chain_metadata
 from app.utils import safe_ramp
 from utils.config import cfg
 from app.engine.transport_tasks import TaskLane
+
+
+def __getattr__(name):
+    if name == "QtWidgets":
+        from PySide6 import QtWidgets
+        return QtWidgets
+    raise AttributeError(name)
 
 
 class BFieldTransportController(QtCore.QObject):
@@ -337,7 +343,7 @@ class BFieldTransportController(QtCore.QObject):
         }.get(hold["phase"])
         self.state_changed.emit("thermal_hold", "Telemetry recovered; check temperature and continue manually")
 
-    def start(self):
+    def start(self, *, verified_calibration=None):
         if self._active:
             self.error.emit("A B-field Transport sweep is already running")
             return False
@@ -367,11 +373,16 @@ class BFieldTransportController(QtCore.QObject):
                     )
                 os.makedirs(planned.output_dir, exist_ok=True)
             policy = normalize_cooldown_policy(self.plan.params.cooldown_policy)
-            window = self.tab.window()
-            panel = getattr(window, "magnet_panel", None)
-            if panel is None or not bool(panel._review_valid()):
+            if callable(getattr(self.tab, "transport_review_valid", None)):
+                panel = self.tab
+            else:
+                window = self.tab.window()
+                panel = getattr(window, "magnet_panel", None)
+            review = getattr(panel, "transport_review_valid", None) or getattr(panel, "_review_valid", None)
+            if not callable(review) or not bool(review()):
                 raise BFieldTransportSafetyError("APS100 commissioning review is required before transport")
-            backend = getattr(panel, "_backend", None)
+            backend = (panel.transport_backend() if callable(getattr(panel, "transport_backend", None))
+                       else getattr(panel, "_backend", None))
             if backend is not None and str(backend) != "1000":
                 raise BFieldTransportSafetyError("B-field Transport requires the APS100 backend (1000)")
             if not bool(getattr(self.magnet, "is_connected", False)):
@@ -385,16 +396,23 @@ class BFieldTransportController(QtCore.QObject):
             if snapshot_age is not None and (not math.isfinite(float(snapshot_age)) or
                                              not 0 <= float(snapshot_age) <= cfg.lakeshore335.maximum_field_reading_age_s):
                 raise BFieldTransportSafetyError("Fresh APS100 telemetry is required before transport")
-            rates_getter = getattr(self.tab, "get_global_rates", None)
-            signal_getter = getattr(self.tab, "get_signal_chain", None)
-            self._calibration = tuple(rates_getter()) if callable(rates_getter) else (1e7, 100.0)
+            if verified_calibration is None:
+                # The Widgets port still captures calibration at start. Quick
+                # supplies the result of its reserved background preflight.
+                rates_getter = getattr(self.tab, "get_global_rates", None)
+                signal_getter = getattr(self.tab, "get_signal_chain", None)
+                self._calibration = tuple(rates_getter()) if callable(rates_getter) else (1e7, 100.0)
+                self._signal_chain = signal_getter() if callable(signal_getter) else None
+                capture = getattr(self.tab, "capture_run_signal_chain", None)
+                if self._signal_chain is not None and callable(capture):
+                    self._signal_chain = capture(self._signal_chain)
+            else:
+                amp_rate, lockin_rate, signal_chain = verified_calibration
+                self._calibration = (amp_rate, lockin_rate)
+                self._signal_chain = deepcopy(signal_chain)
             if len(self._calibration) != 2 or any(not math.isfinite(float(v)) or float(v) <= 0 for v in self._calibration):
                 raise BFieldTransportSafetyError("Signal-chain rates are invalid; verify calibration before transport")
-            self._signal_chain = signal_getter() if callable(signal_getter) else None
             if self._signal_chain is not None:
-                capture = getattr(self.tab, "capture_run_signal_chain", None)
-                if callable(capture):
-                    self._signal_chain = capture(self._signal_chain)
                 for key in ("frequency_hz", "lockin_sensitivity_v", "preamp_sensitivity_a"):
                     value = getattr(self._signal_chain, key, None)
                     if value is None and isinstance(self._signal_chain, dict):
@@ -1064,6 +1082,12 @@ class BFieldTransportController(QtCore.QObject):
             return True
         if not hasattr(snapshot, "field_t"):
             raise BFieldTransportSafetyError("Stored APS100 field/polarity could not be reviewed")
+        confirm = getattr(self.tab, "confirm_persistent_field", None)
+        if callable(confirm):
+            if not confirm(snapshot):
+                raise BFieldTransportSafetyError("Stored persistent field confirmation is required")
+            return True
+        from PySide6 import QtWidgets
         answer = QtWidgets.QMessageBox.question(
             self.tab, "Confirm stored APS100 field",
             f"APS100 heater is OFF and stored field is {float(snapshot.field_t):+.6f} T.\n\n"
@@ -1472,7 +1496,10 @@ class BFieldTransportController(QtCore.QObject):
         return [value / averages for value in raw]
 
     def _emit_measurement_update(self, row):
-        """Update the visible progress/plot/log from each acquired row."""
+        """Update the presentation port from each acquired row."""
+        receiver = getattr(self.tab, "accept_transport_record", None)
+        if callable(receiver):
+            receiver(dict(row))
         target = float(row.get("B_target_T", 0.0))
         start = float(self.plan.params.start_field_t)
         stop = float(self.plan.params.stop_field_t)

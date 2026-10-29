@@ -10,6 +10,8 @@ tmp：本机验证报告、截图和历史备份。不要使用里面的 BAT 启
   验证报告：tmp/verification/reports
   预览截图及配套 JSON：tmp/verification/previews
 
-这次只整理入口、文档和验证产物的位置。程序源代码、根目录 .venv 和 requirements.txt 的位置不变。
+默认界面已切换为 Qt Quick/QML；程序源代码、根目录 .venv 和 requirements.txt 的位置不变。
+回退旧界面：正常关闭后，在 PowerShell 执行 .\Transport_App.bat --widgets。
+Qt Quick 迁移、离线验证和环境说明见 docs/qt-quick-migration.md。实机验收需另行完成。
 测量数据仍保存到程序里配置的数据目录，不属于上述验证文件夹。
 详细安装、启动和使用方法见 README.md。

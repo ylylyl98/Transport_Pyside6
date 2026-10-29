@@ -31,6 +31,9 @@ class PhotocurrentWorker(RunWorker):
         self.conns = conns
         self.g1 = kw.get("g1")
         self.g2 = kw.get("g2")
+        # Quick validates and reserves connected fixed-zero gates explicitly.
+        # Widgets retains its existing recipe-only reservation contract.
+        self.apply_connected_gate_biases = bool(kw.get("apply_connected_gate_biases", False))
         self.g3 = kw.get("g3")
         self.daq = kw.get("daq")
         self.mono = kw.get("mono")
@@ -95,8 +98,8 @@ class PhotocurrentWorker(RunWorker):
                 raise RuntimeError("Vds ramp step must be greater than zero.")
             if self.p.use_vds and self.p.vds_source == "None":
                 raise RuntimeError("Vds bias is enabled but no Vds source is selected.")
-            self._uses_g1 = any(abs(condition.vtg) > 1e-12 for condition in conditions)
-            self._uses_g2 = any(abs(condition.vbg) > 1e-12 for condition in conditions)
+            self._uses_g1 = (self.apply_connected_gate_biases and self.g1 is not None) or any(abs(condition.vtg) > 1e-12 for condition in conditions)
+            self._uses_g2 = (self.apply_connected_gate_biases and self.g2 is not None) or any(abs(condition.vbg) > 1e-12 for condition in conditions)
             if self._uses_g1 and self.g1 is None:
                 raise RuntimeError("G1 / Vtg is required because a selected condition uses a nonzero Vtg.")
             if self._uses_g2 and self.g2 is None:

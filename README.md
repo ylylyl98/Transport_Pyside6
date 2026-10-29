@@ -3,10 +3,23 @@
 **日常启动：双击根目录的 `Transport_App.bat` 或 `Transport_App - Shortcut.lnk`。**
 其他入口和文件分类见 [00_启动说明.txt](00_启动说明.txt)；文档见 [docs 索引](docs/README.md)。
 
-The project root is the official PySide6 version. `Transport_App.bat` is the only
+The project root is the official PySide6 / Qt Quick version. `Transport_App.bat` is the only
 BAT in this directory and the normal measurement launcher. Development utilities
 live in `tools/`; do not launch copies inside `tmp/` or backups. See
 [release and rollback notes](docs/pyside6-release.md).
+
+The main window, instrument panels, live plots and independent history viewer use
+Qt Quick/QML. Python retains instrument ownership, acquisition, safety and file
+writing. See [Qt Quick migration and validation](docs/qt-quick-migration.md).
+Launch `Transport_App.bat --widgets` to use the retained Widgets frontend.
+The launcher checks installed dependencies locally and reuses a successful
+offline startup check when source and environment are unchanged. It rechecks
+after changes; `TRANSPORT_VALIDATE_STARTUP=1` forces a fresh preflight. UI
+responsiveness measurements and hardware-blocked benchmark commands are in the
+[migration and validation notes](docs/qt-quick-migration.md#responsiveness-update).
+The migration baseline covers 1,099 tests in 87 modules; physical instrument
+acceptance remains separate. Four-channel live snapshot PNGs are 2400 × 1800;
+single-panel analysis PNGs retain the 1200 × 900 format described below.
 
 Desktop application for automated electrical transport and photocurrent measurements. The PySide6 interface coordinates Keithley 2400 source meters, an NI DAQ device, and an SP-2300 monochromator; it provides live plots while saving each measurement to CSV.
 
@@ -34,7 +47,7 @@ Live plots default to **Follow Sweep** for the x-axis: Gate Scan follows its sel
 ## Hardware and software requirements
 
 - Windows 10/11 (the supplied launcher is a Windows batch file)
-- Python **3.10 or newer**
+- Python **3.12–3.14** (validated locally with 3.13.9)
 - [NI-DAQmx](https://www.ni.com/en/support/downloads/drivers/download.ni-daq-mx.html) runtime and a supported NI DAQ device
 - A VISA implementation with the required GPIB/serial interfaces available (for example, NI-VISA)
 - Up to three Keithley 2400 instruments:
@@ -67,18 +80,18 @@ With the environment activated:
 python transport_UI.py
 ```
 
-`main.py` is an equivalent direct entry point. On Windows, double-clicking [`Transport_App.bat`](Transport_App.bat) creates and reuses a project-local `.venv`, synchronizes `requirements.txt` on every launch (reusing already satisfied dependencies), validates the application imports, and launches the UI. The project shortcut also runs this launcher so dependency setup is not skipped. Python must be available on `PATH` for the first launch.
+`main.py` is an equivalent direct entry point. On Windows, double-clicking [`Transport_App.bat`](Transport_App.bat) creates and reuses a project-local `.venv`, checks the pinned `requirements.txt` locally, and installs dependencies only when needed. It runs a hardware-blocked offscreen startup check after source or environment changes, reuses a matching successful check, and launches the UI. The project shortcut also runs this launcher so dependency setup is not skipped. Python must be available on `PATH` for the first launch. An incompatible existing environment is preserved and reported; the launcher does not delete it.
 
 The launcher also creates/repairs `Transport_App - Shortcut.lnk` in the project folder. This shortcut runs Transport_App.bat to check dependencies before starting the UI, uses the bundled `assets/transport.ico`, and shares the application's Windows taskbar identity. Use it for subsequent launches and taskbar pinning. After moving the checkout, run `Transport_App.bat` again to refresh its paths. To repair only the shortcut without starting the app, run `powershell -NoProfile -ExecutionPolicy RemoteSigned -File .\tools\Update-TransportShortcut.ps1`. This execution-policy setting applies only to that PowerShell process. If an old taskbar pin still shows a generic icon, unpin it and pin the repaired shortcut again. Restart the app when convenient to apply window-icon changes; reloading analysis applies them to the history viewer only.
 
 ## Typical measurement workflow
 
-1. Start the application and open **Devices** in the top command area. Instrument controls are in the left sidebar.
-2. Select the GPIB/serial/DAQ addresses and the operating mode for each Keithley. Use **Scan Hardware** to populate detected resources.
+1. Start the application and open **Instruments** in the top command area. Select **Connections & protection** in the left sidebar.
+2. Select the GPIB/serial/DAQ addresses and the operating mode for each Keithley. Use **Scan** to list detected resources.
 3. Set the save location, operator name, device ID, amplifier gain, and lock-in gain as appropriate for the experiment.
 4. Click **Connect All** and confirm that the required instruments report an OK status.
 5. Use **Manual Controls** in Instrument Setup when needed: type and ramp a gate target, use the ±0.1 V ramp buttons, read one gate on demand, safely ramp a gate or DAQ AO back to 0 V, or move the monochromator. Gate controls are available only in 2-wire voltage-source mode and while no measurement is active.
-6. Select a measurement tab, set its sweep bounds, timing, averaging, source, and file name, then review any preview or estimated sweep information. The Photocurrent tab supports an editable bias recipe: unchecked rows are retained but skipped, every enabled condition creates its own CSV file, and Vds values are available only when a compatible Vds source is connected and explicitly enabled.
+6. Select a measurement mode above the parameters, set its sweep bounds, timing, averaging, source, and file name, then review the trajectory summary. Photocurrent supports an editable bias recipe: unchecked rows are retained but skipped, every enabled condition creates its own CSV file, and Vds values require a compatible connected and explicitly enabled source.
 7. Start the measurement and monitor the live plot and status messages. Use **Stop measurement** for the active run or the fixed top **STOP ALL / ZERO VOLTAGES** button when needed.
 8. Review the resulting CSV in the selected save directory.
 
@@ -86,17 +99,23 @@ The application uses dock-managed connections: address or Keithley-mode changes 
 
 For **2D Map**, the **Keithley 2400** source option supports both 2400 and 2401 instruments. The app checks the detected model and confirmed source range before starting, including fixed Vds values. If a supported source has no cached range, Start refreshes its readback in the background; review the result and press Start again. Resolution messages show which source, model, range or readback error needs attention. The 2401 uses the 0.2, 2 and 20 V source ranges; its resolution check does not accept a 200 V range.
 
-**Instruments → Magnet** contains separate temperature controls for **attoDRY1000 / LS335** and **attoDRY2100 / SDK**. **Detect & connect system** tries the configured connections and selects the only connected system; if both are online, choose one manually. The main page shows the selected system's read-only summary and a **Temperature controls…** shortcut. The 1000 supports verified sample targets, heater ranges, ramps, optional stability waiting and automatic ranges from commissioned temperature bands. See [sample-temperature instructions](docs/guides/SAMPLE_TEMPERATURE_1000.md).
+**Instruments → Magnet & temperature** contains separate controls for **attoDRY1000 / LS335** and **attoDRY2100 / SDK**. **Detect & connect** tries the configured connections and selects the only connected system; if both are online, choose one manually. The header shows the selected system's read-only summary. The 1000 supports verified sample targets, heater ranges, ramps, optional stability waiting and automatic ranges from commissioned temperature bands. See [sample-temperature instructions](docs/guides/SAMPLE_TEMPERATURE_1000.md).
 
-Long names, paths and numeric lists have a wrapped full-value preview. Use the expand icon or **Alt+Enter** to edit the full text, then Save or **Ctrl+Enter** to apply. Data root also has a folder chooser; visual wrapping preserves the stored value.
+Long names, paths and numeric lists offer an inline **Expand** action or **Alt+Enter** to view/edit the full text, then Save or **Ctrl+Enter** to apply. Read-only values can also be expanded and copied. Data root has an inline folder chooser (**Alt+B**); visual wrapping preserves the stored value.
+
+The Quick workspace separates **Measurement setup** on the left, **Live data** in the center, and **Instruments** on the right. Open Instruments, then use **Pin** (also available in View) to keep the panel beside the plot; this works at 1920×1080 with 125% scaling. Narrower windows show instruments in a right-hand drawer while keeping the global Stop and measurement actions reachable. Drag the section dividers to resize; **Hide / Show setup** expands or restores the plot area. The measurement log has its own panel and Close control; opening it in a narrow window selects Live plot automatically.
+
+Each measurement page groups its trajectory first and folds advanced ramps, output and plot settings; field errors must be corrected before Start. Recipe editors are visually separated from the condition list and actions. B-field Gate Scan edits the selected execution condition, and B-field Sweep displays Vtg/Vbg calculated from its shared coupling ratio.
 
 ## Measurement history and curve comparison
 
-Select **Curve Compare** to open the independent **Transport — Measurement History** window. It defaults to the current operator/device directory, searches its date/type subfolders, and shows **All dates**, newest first. Vds Sweep, Gate Scan, 2D Map, B-field Gate Scan, B-field Sweep and Photocurrent each have their own history page; selections do not mix across types. Use **Browse folder…** for another directory, or **Current device** to resume following Sample / Files. Date filters and search remain available.
+Select **History** to open the independent **Transport — Measurement History** window. It defaults to the current operator/device directory, searches its date/type subfolders, and shows **All dates**, newest first. Vds Sweep, Gate Scan, 2D Map, B-field Gate Scan, B-field Sweep and Photocurrent each have their own history page; selections do not mix across types. Use **Browse folder…** for another directory, or **Current device** to resume following Sample / Files. Date filters and search remain available.
 
 The full-height file list is on the left, with time, filename, conditions and status shown on separate lines. Drag the divider to resize it, or click **Expand file list** to use the whole content area. **Return to comparison** restores the split layout without losing checks or plots. Check files to overlay curves. Choose X, signal and direction; forward/unknown traces are solid and backward traces are dashed. Condition blocks and snake rows stay separate, source order is preserved, and units must match. Selections and display choices are remembered per folder and measurement type. The plot toolbar supports zoom/pan and saving figures.
 
 Long filenames wrap at underscores, with character wrapping for oversized components, and row heights follow the list width. When an existing CSV grows, background refresh updates its data without resetting the list's current row or scroll position. Unchanged refreshes do not rewrite saved view preferences. Use **Reload analysis** to apply analysis UI changes while Transport remains open.
+
+Background checks wait four seconds after the previous scan finishes. Unchanged checks keep the current view and export controls available; changes to unselected files update the file list without rebuilding selected curves. Search text appears immediately and filters the list after a 150 ms typing pause. **Refresh** / **F5** still requests an immediate scan.
 
 **Normalize** switches between **Raw**, **Max |Y|** (`Y / max(abs(Y))`, retaining signs) and **0–1** (`(Y - min(Y)) / (max(Y) - min(Y))`). Each displayed direction/condition trace is scaled independently using its finite plotted points across the entire trace, regardless of zoom. Zero traces remain zero; constant traces become zero in 0–1 mode; missing points remain gaps. For 2D maps, **Normalize cuts** affects comparison cuts while the heatmap retains physical units. Normalization runs in the analysis read worker, preserves original CSV/cache values, and is remembered per measurement type and folder, including analysis reload and PNG view export/restore. Normalized axes are dimensionless and labeled with the method. Automatic measurement PNGs retain physical values.
 
@@ -106,7 +125,7 @@ The **Signal** selector includes **Drag ratio X**, **Drag ratio Y** and **Drag r
 
 For **2D Map**, choose the map's X and **Map Y** coordinates. **Map file** selects the checked map displayed on the left; **Fixed axis** and **Measured value** produce cuts from all checked compatible maps on the right. Only exact measured coordinates are used. **All rows** is the default: native `PassIndex` is a slow-axis row number. A specific **Row / pass** or direction can isolate rows or resolve repeated coordinates. Duplicate points are never averaged, missing cells remain blank, and a file without the requested coordinate/channel is reported separately. Use **None (1D)** for a one-axis scan saved by 2D Map.
 
-History discovery, CSV loading and Matplotlib rendering run in a separate Python/Qt process with lower CPU priority. The measurement app only sends directory, refresh, focus and close notifications; the viewer imports no instrument/control modules and never modifies measurement CSVs or metadata. Header indexing is cached; complete CSVs are loaded only when checked, with a bounded 64 MiB numeric cache. Visible history refreshes periodically and when measurements finish. This separates GUI work and failures from acquisition; CPU, RAM and disk remain shared resources. Large datasets can still contend for disk bandwidth, so this is not a hard real-time guarantee.
+History discovery, CSV loading and native Quick plotting run in a separate Python/Qt process with lower CPU priority. The measurement app only sends directory, refresh, focus and close notifications; the viewer imports no instrument/control modules and never modifies measurement CSVs or metadata. Header indexing is cached; complete CSVs are loaded only when checked, with a bounded 64 MiB numeric cache. Visible history refreshes periodically and when measurements finish. This separates GUI work and failures from acquisition; CPU, RAM and disk remain shared resources. Large datasets can still contend for disk bandwidth, so this is not a hard real-time guarantee.
 
 Closing the history window leaves measurements running. Selecting Curve Compare again reopens it. The viewer can also run independently with `python transport_history_viewer.py --folder <measurement-directory>`.
 
@@ -126,7 +145,7 @@ Each analysis PNG is **1200 × 900 pixels**, **150 dpi**, white and opaque, with
 
 PNG rendering owns no instruments, runs in a serial detached process and never modifies source CSVs or measurement JSON. It does not block acquisition or the next batch run. Accepted jobs drain after a normal app close; the viewer hands its immutable snapshot to disk before Transport closes it. Rendering failures are reported separately from measurement state. CPU, RAM and disk are still shared with acquisition. The history plot-toolbar save action also uses automatic PNG + CSV export and creates a reproducible view sidecar.
 
-**Reload analysis modules** in the Curve Compare entry (or **Reload analysis** in its history window) reloads analysis and PNG-rendering Python code while Transport stays open. Accepted exports finish first; run exports submitted during reload are durably queued for the replacement renderer. The reopened viewer restores its folder/follow-current choice, checked files, measurement tab, filters, primary map, cuts, zoom, color scale, splitter and window geometry. If the current device changes while a following viewer reloads, it follows the new device rather than transplanting the previous device's view. A closed viewer stays closed. Reload errors are shown separately from measurement state. Main-window controls, acquisition/controller code and dependency/environment updates still require a full app restart.
+**Reload analysis** in the View menu (or **Reload analysis** in its history window) reloads analysis and PNG-rendering Python code while Transport stays open. Accepted exports finish first; run exports submitted during reload are durably queued for the replacement renderer. The reopened viewer restores its folder/follow-current choice, checked files, measurement tab, filters, primary map, cuts, zoom, color scale, splitter and window geometry. If the current device changes while a following viewer reloads, it follows the new device rather than transplanting the previous device's view. A closed viewer stays closed. Reload errors are shown separately from measurement state. Main-window controls, acquisition/controller code and dependency/environment updates still require a full app restart.
 
 ## Data output
 
@@ -160,7 +179,8 @@ Always confirm actual instrument state independently after an error, interrupted
 Transport_App.bat       Normal Windows measurement launcher
 Transport_App - Shortcut.lnk  Local shortcut to the same launcher
 app/                    PySide6 UI, application models, workers, and device manager
-app/ui/tabs/            Measurement tabs: Vds Sweep, Gate Scan, 2D Map, Photocurrent
+app/quick/              Qt Quick presenters, native plotting and QML views
+app/ui/tabs/            Retained Widgets measurement tabs for --widgets fallback
 app/workers/            Background acquisition and CSV-writing workers
 instruments/            Keithley, NI-DAQ, monochromator, and other instrument drivers
 transport_UI.py         Primary GUI entry point
@@ -185,32 +205,33 @@ of these verification folders.
 Use **View → Reload UI style** (**Ctrl+Alt+R**) after editing
 `app/ui/app.qss`. It validates and applies the style to the existing main window;
 invalid or incomplete style files leave the previous appearance in place.
-**Tools → Runtime settings…** applies the main-window font immediately, and
+**View → Runtime settings** applies the main-window font immediately, and
 exposes B-field endpoint/recovery settings for application while measurements
 and instrument operations are idle. Changes are saved to the existing per-user
-configuration. Device addresses and Keithley modes continue to use **Devices**
+configuration. Device addresses and Keithley modes use **Connections & protection**
 and individual reconnection; driver/SDK and other startup configuration changes
 still need a normal restart while idle.
 
-Use **Tools → Offline UI preview…** or `tools/Transport_Preview.bat` to develop layouts
-in a separate, hardware-blocked window with synthetic plots and isolated user
-settings. **Preview → Rebuild preview from disk** (**Ctrl+Shift+R**) replaces only
-the preview process, preserving its selected page and window position. The main
-measurement application remains open. This fast entry uses the existing `.venv`
-without dependency installation and reuses a separate preview font cache.
-Normal launch and dependency repair still use `Transport_App.bat`.
+Use `tools/Transport_Preview.bat` to develop layouts in a separate,
+hardware-blocked Qt Quick window with synthetic plots and isolated settings.
+**View → Rebuild offline preview** (**Ctrl+Shift+R**) replaces only that preview
+process and preserves its mode, panel and window size. Normal launch and
+dependency repair use `Transport_App.bat`. The previous Widgets preview remains
+available as `python -B transport_ui_preview.py`.
 
-The main window remembers geometry, dock layout, command visibility and the last
-measurement page. **View → Reset window layout** restores the default layout.
+The Quick window remembers its size, instrument/parameter visibility and theme.
 No instrument connection, output state or running measurement is restored.
-See [the development feedback workflow](docs/development-feedback.md) for the
-reload boundaries, preview commands and isolated validation procedure.
+Acquisition/controller changes require a normal restart while idle; analysis code
+can be reloaded from View. See [Qt Quick release notes](docs/qt-quick-migration.md)
+for preview, regression and rollback commands. The older
+[development workflow](docs/development-feedback.md) describes Widgets-specific
+QSS reload and remains applicable when using `--widgets`.
 
 B-field Transport runs voltage ramps and sample acquisition on one serialized worker, and CSV/checkpoint writes on another. STOP cancels ramps between steps, pauses APS100, then waits for in-flight instrument work, bias zeroing, and output flushing before releasing devices. An unresponsive driver can still delay cleanup, but it no longer blocks Qt telemetry processing.
 
 APS100 and Lake Shore cache completed readings in their polling workers and coalesce superseded UI updates. Temporary stale/missing monitoring requests an acknowledged APS100 pause instead of immediately ending the series. The `mcd.transport_monitor_recovery_timeout_s` default is 30 seconds; missing pause acknowledgement escalates after the communication allowance (normally 5 seconds). Recovery requires `mcd.transport_monitor_recovery_reads` (default 3) new valid pairs of readings after acknowledgement, followed by thermal permission. The commissioned thermal recovery dwell has a separate clock. Real temperature/sensor/quench/voltage faults retain their fault handling. Holds and acquisition gaps are logged, and acquisitions spanning a hold are discarded; no missing samples are fabricated.
 
-Plots reuse a single trace with at most four refreshes per second. CSV writes remain ordered and synchronized; growing checkpoints are coalesced, normally at most once every two seconds during acquisition, with final files flushed before completion. CSV records include acquisition start/end timestamps and Keithley read errors for timing diagnostics.
+Quick plots coalesce display notifications at 33 ms and reduce displayed vertices to the viewport while retaining every recorded sample. CSV writes remain ordered and synchronized; growing checkpoints are coalesced, normally at most once every two seconds during acquisition, with final files flushed before completion. CSV records include acquisition start/end timestamps and Keithley read errors for timing diagnostics.
 
 B-field Transport continuous sweeps accept the first fresh reading inside the endpoint window approached in the commanded direction, save its measured field, and wait for pause acknowledgement before reversing. The window uses `magnet.field_tolerance_t` (default 0.002 T), capped at 1% of the sweep span with an instrument-resolution floor for short spans.
 
@@ -222,7 +243,7 @@ Doping/E-field (or Vtg/Vbg) and Vds share this syntax; scalar values repeat and 
 
 Quick-added Vds uses Keithley 2400; the source remains editable in the conditions table. Connected voltage protections are checked during preview, and full instrument validation still runs before starting a sweep.
 
-Optional endpoint settling is controlled through **Tools → Runtime settings…**, or in the saved configuration's `mcd` section: `transport_endpoint_settling_enabled` defaults to `false`, and `transport_endpoint_settling_timeout_s` defaults to `120.0`. When enabled, `endpoint_stable_reads` (default 3) consecutive in-window readings are required. The sweep advances immediately once they pass; excursions reset the count without restarting the timeout. The settings dialog applies supported changes while idle without restarting. Manual JSON edits are read at the next application startup. Existing instrument protections remain active.
+Optional endpoint settling is controlled through **View → Runtime settings**, or in the saved configuration's `mcd` section: `transport_endpoint_settling_enabled` defaults to `false`, and `transport_endpoint_settling_timeout_s` defaults to `120.0`. When enabled, `endpoint_stable_reads` (default 3) consecutive in-window readings are required. The sweep advances immediately once they pass; excursions reset the count without restarting the timeout. The settings dialog applies supported changes while idle without restarting. Manual JSON edits are read at the next application startup. Existing instrument protections remain active.
 
 The app saves user configuration and plot-mode preferences through Qt settings. Before modifying an instrument driver or measurement worker, test against a controlled setup or suitable hardware simulation—never a device whose limits have not been confirmed.
 

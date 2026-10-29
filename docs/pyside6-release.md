@@ -1,5 +1,14 @@
 # PySide6 official local version
 
+## Qt Quick update
+
+The current root launcher opens the Qt Quick/QML frontend. Its migration,
+dependencies, validation commands and fallback are documented in
+[Qt Quick migration](qt-quick-migration.md). Close normally and run
+`Transport_App.bat --widgets` to use the retained Widgets frontend with the same
+environment. No restoration of the historical backup below is required for this
+frontend fallback. The earlier promotion record below is historical.
+
 The project root now contains the PySide6 implementation, including workspace
 layout, manual response improvements, sweep precision validation, completed-history
 ETA calibration, and Lock-in refresh recovery. Start it with the root

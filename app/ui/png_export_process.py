@@ -30,7 +30,7 @@ class _SnapshotTask(QtCore.QRunnable):
         self.snapshot, self.path = snapshot, path
 
     def run(self):
-        from app.png_export import save_snapshot
+        from app.plot_snapshot import save_snapshot
         temporary = self.path.with_suffix(".tmp")
         try:
             save_snapshot(self.snapshot, temporary)

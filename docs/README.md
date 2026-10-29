@@ -7,6 +7,7 @@
 | 文档 | 内容 |
 | --- | --- |
 | [PySide6 发布与回退](pyside6-release.md) | 正式版本位置、启动与历史备份说明 |
+| [Qt Quick 迁移与验证](qt-quick-migration.md) | 六阶段实现、QML 预览、依赖、离线验收与 Widgets 回退 |
 | [减少开发时的重启](development-feedback.md) | 样式重载、运行时设置、离线预览及验证流程 |
 | [Lock-in 控制](lockin-control.md) | Lock-in 配置、读回与测量前检查 |
 | [Drag/Drive 设置](drag-drive.md) | 双 Lock-in 测量配置及信号解释 |

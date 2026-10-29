@@ -12,7 +12,7 @@ import time
 import uuid
 from types import SimpleNamespace
 
-from PySide6 import QtCore, QtWidgets
+from PySide6 import QtCore
 
 from app.models import LineSweepParams
 from app.numeric_series import parse_numeric_series
@@ -20,6 +20,15 @@ from app.run_output import (PlannedOutput, field_output_tag, output_blocking_rea
                             new_run_id, compose_output_stem, planned_output_at,
                             unique_planned_output, gate_scan_filename_parts)
 from utils.config import cfg
+
+
+def __getattr__(name):
+    # Compatibility for legacy widget clients and tests; Quick imports do not
+    # load QtWidgets. Dialogs remain exclusively on the legacy fallback path.
+    if name == "QtWidgets":
+        from PySide6 import QtWidgets
+        return QtWidgets
+    raise AttributeError(name)
 
 
 def _system_local_iso(*, timespec="seconds"):
@@ -72,6 +81,7 @@ class GateScanFieldBatch(QtCore.QObject):
     error = QtCore.Signal(str)
     finished = QtCore.Signal()
     stopped = QtCore.Signal(str)
+    cleanup_finished = QtCore.Signal(str, str)
 
     # Keep the expansion bounded even when a typo such as ``0:1000000:0.1``
     # is entered.  This is a limit on the complete ordered series, including
@@ -805,6 +815,11 @@ class GateScanFieldBatch(QtCore.QObject):
         if snapshot.heater_on is not False:
             self._persistent_confirmation_granted = True
             return True
+        confirm = getattr(self.tab, "confirm_persistent_field", None)
+        if callable(confirm):
+            self._persistent_confirmation_granted = bool(confirm(snapshot))
+            return self._persistent_confirmation_granted
+        from PySide6 import QtWidgets
         answer = QtWidgets.QMessageBox.question(
             self.tab,
             "Confirm stored APS100 field",
@@ -1436,6 +1451,7 @@ class GateScanFieldBatch(QtCore.QObject):
         self._cleanup()
 
     def _cleanup(self):
+        terminal_phase = self._state.phase
         self._measurement_monitor_timer.stop()
         self._early_move_results = []
         self._verification_timer.stop()
@@ -1461,3 +1477,6 @@ class GateScanFieldBatch(QtCore.QObject):
         self._thermal_wait_context = None
         self._last_persistent_field_t = None
         self._move_started_from_persistent = False
+        if terminal_phase in {"complete", "stopped", "failed"}:
+            status = {"complete": "finished", "stopped": "stopped", "failed": "error"}[terminal_phase]
+            self.cleanup_finished.emit(status, "B-field Gate Scan " + terminal_phase)
