@@ -114,6 +114,46 @@ class StyleReloadTests(unittest.TestCase):
 
 
 class OfflinePolicyTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "Windows short-path regression")
+    def test_hardware_guard_accepts_windows_short_module_path(self):
+        import __main__
+        import ctypes
+        import app.hw_discovery
+        get_short_path = ctypes.WinDLL("kernel32", use_last_error=True).GetShortPathNameW
+        get_short_path.argtypes = (ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint32)
+        get_short_path.restype = ctypes.c_uint32
+        # The checkout volume may disable 8.3 names. Use the same temporary
+        # location as the portable release smoke test to obtain a real alias.
+        with tempfile.TemporaryDirectory(prefix="transport package alias ") as directory:
+            root = Path(directory).resolve()
+            module = root / "hw_discovery.py"
+            module.write_text("# Module provenance fixture\n", encoding="utf-8")
+            size = get_short_path(str(module), None, 0)
+            if not size:
+                raise ctypes.WinError(ctypes.get_last_error())
+            buffer = ctypes.create_unicode_buffer(size)
+            if not get_short_path(str(module), buffer, size):
+                raise ctypes.WinError(ctypes.get_last_error())
+            short_path = Path(buffer.value)
+            if short_path.is_relative_to(root):
+                self.skipTest("Temporary filesystem provides no different ancestor short-path alias")
+            self.assertEqual(short_path.resolve(), module)
+            # Reuse the wrapper's existing sandbox: installing another audit
+            # hook would permanently constrain unrelated tests in this process.
+            with patch.object(__main__.sandbox, "root", root), \
+                    patch.object(app.hw_discovery, "__file__", str(short_path)):
+                __main__.sandbox.install_hardware_guards()
+
+    def test_hardware_guard_still_rejects_modules_outside_project(self):
+        import __main__
+        import app.hw_discovery
+        with tempfile.TemporaryDirectory(prefix="transport outside project ") as directory:
+            module = Path(directory) / "hw_discovery.py"
+            module.write_text("# Outside module fixture\n", encoding="utf-8")
+            self.assertFalse(module.resolve().is_relative_to(__main__.sandbox.root))
+            with patch.object(app.hw_discovery, "__file__", str(module)), self.assertRaises(AssertionError):
+                __main__.sandbox.install_hardware_guards()
+
     def test_frozen_preview_is_unavailable_while_source_launch_is_preserved(self):
         from app.ui.main_window import MainWindow
         root = Path(__file__).resolve().parents[1]

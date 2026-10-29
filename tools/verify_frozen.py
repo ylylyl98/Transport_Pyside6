@@ -75,7 +75,13 @@ def main(argv=None):
             if not passed:
                 result["error"] = error or evidence.get("error", "EXE did not publish successful frozen evidence")
             reports.append(result)
-            print(("PASS " if passed else "FAIL ") + mode, flush=True)
+            print(("PASS " if passed else "FAIL ") + mode
+                  + (": " + result["error"] if not passed else ""), flush=True)
+            if not passed:
+                for name in ("runtime.log", "process.log"):
+                    log_path = destination / name
+                    if log_path.is_file():
+                        print(log_path.read_text(encoding="utf-8", errors="replace")[-8000:], flush=True)
         (output / "summary.json").write_text(json.dumps(reports, indent=2), encoding="utf-8")
     return 0 if all(item["success"] for item in reports) else 1
 

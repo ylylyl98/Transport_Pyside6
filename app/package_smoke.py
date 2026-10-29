@@ -245,7 +245,7 @@ def main(argv=None):
                     raise RuntimeError("Unhandled Qt callback exceptions: " + "; ".join(exceptions))
                 report["success"] = True
             except Exception as exc:
-                report["error"] = str(exc)
+                report["error"] = f"{type(exc).__name__}: {exc}"
                 traceback.print_exc()
             finally:
                 sys.excepthook = original_hook

@@ -96,7 +96,7 @@ class OfflineSandbox:
         app.hw_discovery.scan_all = lambda: {"gpib": [], "asrl": [], "daq": []}
         from utils.config import cfg
         cfg.filename.base_out = str(self.directory)
-        assert Path(app.hw_discovery.__file__).is_relative_to(self.root)
+        assert Path(app.hw_discovery.__file__).resolve().is_relative_to(self.root)
         if self.preview:
             # QProcess bypasses CPython's subprocess audit hook. A UI preview
             # never needs analysis, renderer, or arbitrary child processes.
