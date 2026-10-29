@@ -442,7 +442,8 @@ class SampleControlWorkerTests(unittest.TestCase):
         cls.app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
     def setUp(self):
-        self.worker = _LakeShoreWorker()
+        from tests.heating_interlock_fixtures import safe_interlock
+        self.worker = _LakeShoreWorker(safe_interlock())
         self.results = []
         self.worker.control_result.connect(self.results.append)
         self.addCleanup(lambda: self.worker._timer.stop())
@@ -518,8 +519,9 @@ class SampleControlThreadTests(unittest.TestCase):
         self.assertTrue(predicate(), "Queued temperature control did not complete")
 
     def test_ui_queued_apply_stability_and_heater_off_through_real_worker_thread(self):
+        from tests.heating_interlock_fixtures import safe_interlock
         adapter = MockLakeShore335Adapter(sample_temperature_k=4.2, reservoir_temperature_k=3)
-        controller = LakeShore335Controller()
+        controller = LakeShore335Controller(interlock=safe_interlock())
         bar = SampleTemperatureBar(controller, cfg.lakeshore335)
         try:
             bar.set_backend("1000")
@@ -551,8 +553,9 @@ class SampleControlThreadTests(unittest.TestCase):
             bar.deleteLater()
 
     def test_queued_auto_apply_resolves_configuration_and_off_stays_off(self):
+        from tests.heating_interlock_fixtures import safe_interlock
         adapter = MockLakeShore335Adapter(sample_temperature_k=4.2, reservoir_temperature_k=3)
-        controller = LakeShore335Controller()
+        controller = LakeShore335Controller(interlock=safe_interlock())
         bar = SampleTemperatureBar(controller, cfg.lakeshore335)
         try:
             bar.set_backend("1000")

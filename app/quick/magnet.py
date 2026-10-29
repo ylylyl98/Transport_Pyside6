@@ -16,6 +16,7 @@ from controllers.lakeshore335_controller import LakeShore335Controller
 from app.thermal_safety import ThermalSafetyEvaluator, _sensor_status_is_clear
 from app.quick.forms import field, checked_value
 from app.sample_heater_ranges import validate_heater_ranges, select_heater_range
+from app.sample_heating_interlock import SampleHeatingInterlock
 from utils.config import cfg
 
 
@@ -30,9 +31,15 @@ class MagnetService(QObject):
     def __init__(self, parent=None, *, offline=False, magnet1000=None, magnet2100=None, lakeshore=None):
         super().__init__(parent)
         self.offline = offline
-        self.magnet1000 = magnet1000 or MagnetController(self)
+        self.heating_interlock = (getattr(magnet1000, "heating_interlock", None)
+                                  or getattr(lakeshore, "heating_interlock", None)
+                                  or SampleHeatingInterlock())
+        self.magnet1000 = magnet1000 or MagnetController(self, interlock=self.heating_interlock)
         self.magnet2100 = magnet2100 or AttoDRY2100Controller(config=cfg.attodry2100, parent=self)
-        self.lakeshore335 = lakeshore or LakeShore335Controller(self)
+        self.lakeshore335 = lakeshore or LakeShore335Controller(self, interlock=self.heating_interlock)
+        if (getattr(self.lakeshore335, "heating_interlock", self.heating_interlock)
+                is not self.heating_interlock):
+            raise ValueError("APS100 and LS335 controllers must share their heating interlock")
         self.thermal_safety = ThermalSafetyEvaluator(cfg.lakeshore335)
         self._backend = "1000"
         self._auto = True
@@ -53,6 +60,7 @@ class MagnetService(QObject):
         self._last_ready = None
         self._closing = False
         self._last_temperature_poll = 0.
+        self._last_heating_block = None
         self._bands = deepcopy(cfg.lakeshore335.sample_auto_heater_ranges)
         self._values = dict(target_field=0., final_mode="persistent", target_temperature=4.,
                             heater_range=None, ramp_enabled=None, ramp_rate=1., wait_temperature=False)
@@ -106,6 +114,7 @@ class MagnetService(QObject):
     manualBusy = Property(bool, lambda s: bool(s._pending or s.magnet1000.exclusive_owner or s.magnet2100.has_pending_work), notify=changed)
     pendingOperations = Property('QVariantList', lambda s: sorted(s._pending), notify=changed)
     temperatureAvailable = Property(bool, lambda s: s._connected["temperature"] if s._backend == "1000" else s._connected["2100"] and bool(getattr(getattr(s._snapshots.get("2100"), "capabilities", None), "sample_temperature_control", False)), notify=changed)
+    heatingBlockReason = Property(str, lambda s: s.heating_interlock.heating_block_reason() if s._backend == "1000" else "", notify=changed)
     thermalStatus = Property(str, lambda s: f"{s.thermal_safety.state.value}: {s.thermal_safety.reason}", notify=changed)
 
     @Property(str, notify=changed)
@@ -579,6 +588,10 @@ class MagnetService(QObject):
         return self._values["wait_temperature"], self._target if not self._control_failed and not self._temperature_pending() and self._control_state is not None else None
 
     def _tick(self):
+        heating_block = self.heatingBlockReason
+        if heating_block != self._last_heating_block:
+            self._last_heating_block = heating_block
+            self.changed.emit()
         self.thermal_safety.evaluate(self._snapshots.get("temperature"))
         if not self._temperature_valid():
             self._stable_since = None

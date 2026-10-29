@@ -67,9 +67,10 @@ ColumnLayout {
         }
         FieldForm { fields: section.magnet.fields.filter(item => item.group === "Sample temperature").map(item => Object.assign({}, item, {group: ""})); target: section.magnet; locked: section.magnet.busy; Layout.fillWidth: true }
         Label { text: section.magnet.heaterAutoPreview; visible: text.length > 0; wrapMode: Text.Wrap; Layout.fillWidth: true; color: Theme.muted }
+        Label { text: section.magnet.heatingBlockReason; visible: text.length > 0; wrapMode: Text.Wrap; Layout.fillWidth: true; color: Theme.muted }
         Flow {
             Layout.fillWidth: true; spacing: 6
-            Button { text: "Apply temperature"; enabled: !section.magnet.busy && section.magnet.temperatureAvailable; onClicked: section.magnet.command("temperature") }
+            Button { text: "Apply temperature"; enabled: !section.magnet.busy && section.magnet.temperatureAvailable && !section.magnet.heatingBlockReason; onClicked: section.magnet.command("temperature") }
             Button { text: section.magnet.backend === "1000" ? "Heater OFF" : "Stop temperature"; onClicked: section.magnet.command("temperature_stop") }
         }
         ColumnLayout {

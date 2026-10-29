@@ -8,6 +8,7 @@ from app.thermal_safety import ThermalSafetyEvaluator, ThermalState
 from app.devices.aps100_attodry1000_adapter import APS100SafetyError
 from controllers.magnet_controller import _MagnetWorker
 from utils.config import LakeShore335Config
+from tests.heating_interlock_fixtures import safe_interlock
 
 
 class LiveFieldThermalTests(unittest.TestCase):
@@ -50,7 +51,7 @@ class LiveFieldThermalTests(unittest.TestCase):
         self.assertFalse(self.decision(.4,3.5).magnet_permission)
 
     def worker(self, field, temp):
-        worker = _MagnetWorker()
+        worker = _MagnetWorker(safe_interlock())
         worker.thermal_source = self.safety
         self.safety.latest_snapshot = self.snapshot(temp)
         worker.adapter = Mock()
@@ -138,6 +139,25 @@ class LiveFieldThermalTests(unittest.TestCase):
         with self.assertRaises(APS100SafetyError):
             worker._check_thermal()
         worker.adapter.pause.assert_called_once()
+
+    def test_heater_readback_loss_stops_active_sweep_without_automatic_resume(self):
+        worker = self.worker(.4, 3.5)
+        worker.heating_interlock.invalidate_control()
+        with self.assertRaisesRegex(APS100SafetyError, 'heater OFF readback'):
+            worker._check_thermal()
+        worker.adapter.pause.assert_called_once()
+        self.assertTrue(worker._stop_event.is_set())
+        from tests.heating_interlock_fixtures import heater_off_state
+        worker.heating_interlock.note_control(heater_off_state())
+        worker._check_thermal()
+        self.assertTrue(worker._stop_event.is_set())
+
+    def test_unknown_sample_heater_does_not_prevent_protective_persistent_cleanup(self):
+        worker = self.worker(.4, 3.5)
+        worker.heating_interlock.invalidate_control()
+        worker._protective_operation = True
+        worker._check_thermal()
+        worker.adapter.pause.assert_not_called()
 
     def test_temperature_stop_preserves_mandatory_switch_dwell(self):
         worker = self.worker(.4,5.45)

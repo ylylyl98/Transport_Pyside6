@@ -5,6 +5,47 @@ Open **Instruments → Magnet**, select **attoDRY1000 (APS100)**, and connect
 Lake Shore 335 sample output independently of the APS100 persistent-switch heater.
 The default channel mapping is sample B and magnet/reservoir A.
 
+## APS100 / sample-heater interlock
+
+LS335 temperature commands require a fresh APS100 observation confirming idle,
+fault-free standby, persistent-switch heater OFF, and zero magnet field and power
+supply output. This includes target-only and Keep-range requests: their effect
+depends on the instrument's existing control configuration. Driven operation,
+nonzero persistent fields, sweeps, active magnet commands/reservations, unknown
+switch states, missing readings and expired readings inhibit these commands.
+Both the Quick and Widgets interfaces use the same controller-level interlock;
+commands are checked again in the worker when they execute.
+
+Zero uses the commissioned `magnet.field_tolerance_t` for both field readings
+(default 0.002 T), and `magnet.current_match_tolerance_a` for output current
+(default 0.01 A). These are software readback tolerances, not newly established
+physical heating limits. The magnetic readback age limit is
+`lakeshore335.maximum_field_reading_age_s` (default 5 seconds).
+
+Before entering driven mode, moving field or starting a transport sweep, the
+worker requires fresh LS335 readback with sample RANGE=0 and heater output=0;
+Zone mode additionally requires the ramp stopped. An enabled range with zero
+instantaneous output is insufficient. Use **Heater OFF**, then wait for its
+readback and the existing thermal protection to permit the magnet operation.
+Control readback freshness uses `maximum_reading_age_s` (default 3 seconds).
+An atomic reservation prevents the two workers from starting conflicting commands.
+
+During LS335 control polling (default every 2 seconds), an unsafe or unknown
+magnet state with sample heating enabled or unconfirmed requests sample Heater OFF
+and reports a fault. Communication failures leave shutdown unconfirmed and block
+new magnet starts. Heating never restarts automatically after recovery. The
+dedicated **Heater OFF**, magnet **Pause**, and persistent-mode cleanup remain
+available. This protection never changes the APS100 persistent-switch heater as
+part of shutting off sample heating, and preserves mandatory switch dwell timing.
+
+This is a software interlock with polling and communication latency. It cannot
+prevent front-panel changes before their next readback, or guarantee shutdown
+after communications/power loss or application exit. Existing magnet temperature
+and fault protection remains necessary. Offline mock verification does not replace
+controlled hardware acceptance.
+
+## Temperature controls
+
 The main measurement page shows a read-only temperature summary for the selected
 system. **Temperature controls…** opens and scrolls to that system's controls.
 Selecting **attoDRY2100 (SDK)** shows its separate SDK sample/VTI temperature area.

@@ -490,6 +490,7 @@ class MainWindowMagnetLifecycleTests(unittest.TestCase):
         from app.ui.main_window import MainWindow
         window = MainWindow()
         self.assertIs(window.magnet_panel.magnet1000, window.magnet1000)
+        self.assertIs(window.magnet1000.heating_interlock, window.lakeshore335.heating_interlock)
         self.assertIs(window.magnet_panel.magnet2100, window.magnet2100)
         self.assertTrue(window.instrument_workspace.isAncestorOf(window.lockin_panel))
         self.assertTrue(window.instrument_workspace.isAncestorOf(window.magnet_panel))

@@ -22,6 +22,7 @@ from app.devices.aps100_attodry1000_adapter import (
     MockAPS100Adapter,
 )
 from utils.config import cfg
+from app.sample_heating_interlock import SampleHeatingInterlock
 
 
 class _MagnetWorker(QObject):
@@ -41,10 +42,14 @@ class _MagnetWorker(QObject):
     transport_sweep_result = Signal(object)
     transport_restore_result = Signal(object)
 
-    def __init__(self) -> None:
+    def __init__(self, interlock=None) -> None:
         super().__init__()
+        self.heating_interlock = interlock or SampleHeatingInterlock()
+        self.snapshot_updated.connect(self.heating_interlock.note_magnet, Qt.ConnectionType.DirectConnection)
+        self.disconnected.connect(self.heating_interlock.invalidate_magnet, Qt.ConnectionType.DirectConnection)
         self.adapter = None
         self.thermal_source = None
+        self._protective_operation = False
         self._thermal_target = None
         self._terminal_session_notified = False
         self._last_fault_key = None
@@ -82,7 +87,16 @@ class _MagnetWorker(QObject):
         """
         source = self.thermal_source
         if source is None:
-            return  # Standalone adapter/tests without the application's gate.
+            # The LS335 output interlock also applies to standalone controllers.
+            reason = "" if self._protective_operation else self.heating_interlock.magnet_block_reason()
+            if reason:
+                try:
+                    status = status if status is not None else self.adapter.get_status()
+                except Exception as exc:
+                    status = SimpleNamespace(sweep_active=True)
+                    reason += f"; APS100 status unavailable: {exc}"
+                self._stop_for_thermal(reason, status)
+            return  # Temperature envelope is configured by the application.
         from app.thermal_safety import ThermalSafetyEvaluator
         adapter = self.adapter
         try:
@@ -115,24 +129,30 @@ class _MagnetWorker(QObject):
             else:
                 next_field = field + max(-0.05, min(0.05, destination - field))
         decision = evaluator.evaluate(temperature, for_continuation=True, target_t=next_field)
-        reason = None if decision.magnet_permission else decision.reason
+        reason = "" if self._protective_operation else self.heating_interlock.magnet_block_reason()
+        if not reason:
+            reason = None if decision.magnet_permission else decision.reason
         if reason is None and precharge and temperature.reservoir_temperature_k > 4.2:
             reason = "Magnet must be <=4.2 K before a new charging cycle"
         if reason is not None:
-            self.request_stop("thermal")
-            pause_error = ""
-            if status.sweep_active:
-                try:
-                    adapter.pause()
-                except Exception as exc:
-                    pause_error = f" PAUSE NOT CONFIRMED: {exc}"
-            message = f"Thermal stop: {reason}. Manual restart required; heater state is unchanged.{pause_error}"
-            if not getattr(self, "_thermal_stop_reported", False):
-                self._thermal_stop_reported = True
-                self.fault.emit(message)
-            if getattr(adapter, "thermal_dwell_active", False) is True and not pause_error:
-                return  # Preserve the mandatory switch dwell; stop before any next action.
-            raise APS100SafetyError(message)
+            self._stop_for_thermal(reason, status)
+
+    def _stop_for_thermal(self, reason, status):
+        adapter = self.adapter
+        self.request_stop("thermal")
+        pause_error = ""
+        if getattr(status, "sweep_active", None) is not False:
+            try:
+                adapter.pause()
+            except Exception as exc:
+                pause_error = f" PAUSE NOT CONFIRMED: {exc}"
+        message = f"Thermal stop: {reason}. Manual restart required; APS100 switch heater is unchanged.{pause_error}"
+        if not getattr(self, "_thermal_stop_reported", False):
+            self._thermal_stop_reported = True
+            self.fault.emit(message)
+        if getattr(adapter, "thermal_dwell_active", False) is True and not pause_error:
+            return  # Preserve the mandatory switch dwell; stop before any next action.
+        raise APS100SafetyError(message)
 
     @Slot(str, bool)
     def connect_instrument(self, resource: str, use_mock: bool) -> None:
@@ -176,6 +196,7 @@ class _MagnetWorker(QObject):
 
     @Slot()
     def disconnect_instrument(self) -> None:
+        self.heating_interlock.invalidate_magnet()
         self._timer.stop()
         self._timer.setInterval(max(100, int(float(cfg.magnet.poll_interval_s) * 1000)))
         self._last_fault_key = None
@@ -201,7 +222,7 @@ class _MagnetWorker(QObject):
             return
         try:
             snapshot = self.adapter.read_snapshot()
-            if self.thermal_source is not None and snapshot.status.sweep_active:
+            if getattr(snapshot.status, "sweep_active", False):
                 self._check_thermal(snapshot.status)
             self._update_poll_interval(snapshot)
             self.snapshot_updated.emit(snapshot)
@@ -218,6 +239,7 @@ class _MagnetWorker(QObject):
                 self.fault.emit("APS100 fault: " + ", ".join(messages))
             self._last_fault_key = fault_key if any(fault_key) else None
         except Exception as exc:
+            self.heating_interlock.invalidate_magnet()
             if self._is_terminal_session_error(exc):
                 self._handle_terminal_session(exc)
                 return
@@ -295,7 +317,10 @@ class _MagnetWorker(QObject):
             return
         self._stop_event.clear()
         self._thermal_stop_reported = False
+        reserved = False
         try:
+            self.heating_interlock.begin_magnet()
+            reserved = True
             self._thermal_target = None
             self._check_thermal(precharge=True)
             self.adapter.enter_driven_mode(
@@ -308,6 +333,9 @@ class _MagnetWorker(QObject):
         except Exception as exc:
             self.error.emit(f"Enter driven mode failed: {exc}")
             self.operation_finished.emit("failed:enter_driven_mode")
+        finally:
+            if reserved:
+                self.heating_interlock.end_magnet()
 
     @Slot(bool)
     def enter_persistent_mode(self, zero_leads: bool) -> None:
@@ -316,6 +344,8 @@ class _MagnetWorker(QObject):
             return
         self._stop_event.clear()
         self._thermal_stop_reported = False
+        self.heating_interlock.begin_magnet(protective=True)
+        self._protective_operation = True
         try:
             self.adapter.enter_persistent_mode(
                 zero_leads=bool(zero_leads),
@@ -329,6 +359,9 @@ class _MagnetWorker(QObject):
         except Exception as exc:
             self.error.emit(f"Enter persistent mode failed: {exc}")
             self.operation_finished.emit("failed:enter_persistent_mode")
+        finally:
+            self._protective_operation = False
+            self.heating_interlock.end_magnet()
 
     @Slot(str, float, str, bool, bool, float, float, float, bool)
     def safe_move_to_field(
@@ -370,7 +403,10 @@ class _MagnetWorker(QObject):
         snapshot = None
         audit_record = None
         gate_scan_rate_plan = None
+        reserved = False
         try:
+            self.heating_interlock.begin_magnet()
+            reserved = True
             starting_snapshot = adapter.read_snapshot()
             self._thermal_target = float(target_t)
             self._check_thermal(starting_snapshot.status, target=float(target_t),
@@ -444,6 +480,8 @@ class _MagnetWorker(QObject):
             except Exception:
                 pass
         finally:
+            if reserved:
+                self.heating_interlock.end_magnet()
             self._thermal_target = None
             adapter.command_observer = previous_observer
             audit_record = {
@@ -610,13 +648,19 @@ class _MagnetWorker(QObject):
         if self.adapter is None:
             self.transport_sweep_result.emit({"success": False, "error": "APS100 is not connected"})
             return
+        reserved = False
         try:
+            self.heating_interlock.begin_magnet()
+            reserved = True
             self._thermal_target = float(target_t)
             self._check_thermal(target=float(target_t))
             direction = self.adapter.start_sweep_to(float(target_t))
             self.transport_sweep_result.emit({"success": True, "target_t": float(target_t), "direction": direction})
         except Exception as exc:
             self.transport_sweep_result.emit({"success": False, "target_t": float(target_t), "error": str(exc)})
+        finally:
+            if reserved:
+                self.heating_interlock.end_magnet()
 
     @Slot(object, object)
     def restore_transport(self, rates, limits) -> None:
@@ -681,13 +725,14 @@ class MagnetController(QObject):
     _transport_sweep_requested = Signal(float)
     _transport_restore_requested = Signal(object, object)
 
-    def __init__(self, parent: Optional[QObject] = None) -> None:
+    def __init__(self, parent: Optional[QObject] = None, *, interlock=None) -> None:
         super().__init__(parent)
         # Latch before queueing a connect: an empty adapter alone cannot
         # distinguish an unused controller from a pending or lost connection.
         self._has_requested_connection = False
         self._thread = QThread(self)
-        self._worker = _MagnetWorker()
+        self._worker = _MagnetWorker(interlock)
+        self.heating_interlock = self._worker.heating_interlock
         from app.engine.transport_tasks import LatestTelemetry
         self.telemetry_cache = LatestTelemetry()
         self._worker.snapshot_updated.connect(self.telemetry_cache.publish, Qt.ConnectionType.DirectConnection)
@@ -890,6 +935,7 @@ class MagnetController(QObject):
         if not self._exclusive_lock.acquire(blocking=False):
             return False
         self._exclusive_owner = str(owner)
+        self.heating_interlock.reserve_magnet(True)
         self._polling_requested.emit(False)
         self.exclusive_changed.emit(True, self._exclusive_owner)
         return True
@@ -898,6 +944,7 @@ class MagnetController(QObject):
         if not self._exclusive_lock.locked() or self._exclusive_owner != str(owner):
             return
         self._exclusive_owner = ""
+        self.heating_interlock.reserve_magnet(False)
         self._exclusive_lock.release()
         self._polling_requested.emit(True)
         self.exclusive_changed.emit(False, "")

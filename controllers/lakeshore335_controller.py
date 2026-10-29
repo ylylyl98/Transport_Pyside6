@@ -9,6 +9,7 @@ from PySide6.QtCore import QObject, QMetaObject, QThread, QTimer, Qt, Signal, Sl
 from app.devices.lakeshore335_adapter import LakeShore335Adapter, MockLakeShore335Adapter, LakeShore335Snapshot
 import time
 from utils.config import cfg
+from app.sample_heating_interlock import SampleHeatingInterlock
 
 
 
@@ -21,8 +22,9 @@ class _LakeShoreWorker(QObject):
     fault = Signal(str)
     control_result = Signal(object)
 
-    def __init__(self):
+    def __init__(self, interlock=None):
         super().__init__()
+        self.heating_interlock = interlock or SampleHeatingInterlock()
         self.adapter = None
         self._last_control_poll = None
         self._timer = QTimer(self)
@@ -45,6 +47,7 @@ class _LakeShoreWorker(QObject):
 
     @Slot()
     def disconnect_instrument(self):
+        self.heating_interlock.invalidate_control()
         self._timer.stop()
         self._last_control_poll = None
         adapter, self.adapter = self.adapter, None
@@ -70,6 +73,8 @@ class _LakeShoreWorker(QObject):
                 getattr(self.adapter, "identity", None), None, None, str(exc),
             )
             self.snapshot_updated.emit(invalid)
+            self.heating_interlock.invalidate_control()
+            self._enforce_heating_interlock()
             self.fault.emit(f"Lake Shore 335 telemetry unavailable: {exc}")
             return
         interval = max(0.5, float(cfg.lakeshore335.control_polling_interval_s))
@@ -83,11 +88,26 @@ class _LakeShoreWorker(QObject):
             if self.adapter is None:
                 raise RuntimeError("Lake Shore 335 is not connected")
             state = self.adapter.read_control_configuration(cfg.lakeshore335.sample_channel)
+            self.heating_interlock.note_control(state)
             self.control_result.emit({"operation": "read_control", "ok": True, **state})
+            self._enforce_heating_interlock()
         except Exception as exc:
+            self.heating_interlock.invalidate_control()
             # Control mapping/configuration failure is distinct from valid
             # sample/reservoir telemetry and must not disarm thermal protection.
             self.control_result.emit({"operation": "read_control", "ok": False, "error": str(exc)})
+            self._enforce_heating_interlock()
+
+    def _enforce_heating_interlock(self):
+        """Cut only the LS335 sample output on unsafe/unknown APS observations.
+
+        Polling catches external changes too. OFF remains possible without a
+        magnet connection and never operates the APS persistent-switch heater.
+        """
+        reason = self.heating_interlock.heating_block_reason()
+        if reason and self.heating_interlock.magnet_block_reason():
+            self.heater_off()
+            self.fault.emit(f"Sample heating interlock: {reason}; sample Heater OFF requested")
 
     @Slot(bool)
     def set_polling_enabled(self, enabled):
@@ -102,27 +122,43 @@ class _LakeShoreWorker(QObject):
             self.control_result.emit({"operation": "setpoint", "ok": False, "error": "Not connected"})
             self.error.emit("Lake Shore 335 is not connected")
             return
+        reserved = False
         try:
             config = cfg.lakeshore335
             if not config.verified_channel_mapping:
                 raise RuntimeError("Sample/reservoir channel mapping must be verified")
+            self.heating_interlock.begin_sample_control()
+            reserved = True
             result = self.adapter.set_sample_control(target, config.sample_channel,
                 minimum_temperature_k=config.sample_minimum_temperature_k,
                 maximum_temperature_k=config.sample_maximum_temperature_k,
                 maximum_heater_range=config.sample_maximum_heater_range)
+            self.heating_interlock.note_control(result)
+            reason = self.heating_interlock.heating_block_reason()
+            if reason:
+                self.heater_off()
+                raise RuntimeError(reason)
             self.control_result.emit({"operation": "setpoint", "ok": True, **result})
         except Exception as exc:
+            if reserved:
+                self.heating_interlock.invalidate_control()
             self.control_result.emit({"operation": "setpoint", "ok": False, "error": str(exc)})
             self.error.emit(f"Lake Shore setpoint failed: {exc}")
+        finally:
+            if reserved:
+                self.heating_interlock.end_sample_control()
 
     @Slot(object)
     def set_sample_control(self, settings):
+        reserved = False
         try:
             if self.adapter is None:
                 raise RuntimeError("Lake Shore 335 is not connected")
             config = cfg.lakeshore335
             if not config.verified_channel_mapping:
                 raise RuntimeError("Sample/reservoir channel mapping must be verified")
+            self.heating_interlock.begin_sample_control()
+            reserved = True
             result = self.adapter.set_sample_control(
                 settings["temperature_k"], config.sample_channel,
                 heater_range=settings.get("heater_range"),
@@ -133,19 +169,37 @@ class _LakeShoreWorker(QObject):
                 maximum_heater_range=config.sample_maximum_heater_range,
                 auto_heater_ranges=config.sample_auto_heater_ranges,
             )
+            self.heating_interlock.note_control(result)
+            reason = self.heating_interlock.heating_block_reason()
+            if reason:
+                self.heater_off()
+                raise RuntimeError(reason)
             self.control_result.emit({"operation": "sample_control", "ok": True, **result})
         except Exception as exc:
+            if reserved:
+                self.heating_interlock.invalidate_control()
             self.control_result.emit({"operation": "sample_control", "ok": False, "error": str(exc)})
             self.error.emit(f"Lake Shore sample control failed: {exc}")
+        finally:
+            if reserved:
+                self.heating_interlock.end_sample_control()
 
     @Slot()
     def heater_off(self):
+        self.heating_interlock.invalidate_control()
         if self.adapter is None:
             self.control_result.emit({"operation": "heater_off", "ok": False, "error": "Not connected; OFF unconfirmed"})
             self.error.emit("Lake Shore 335 is not connected; heater-off is unconfirmed")
             return
         try:
             result = self.adapter.heater_off(cfg.lakeshore335.sample_channel)
+            # RANGE OFF confirmation remains useful even if other configuration
+            # queries fail; magnet starts additionally need a full fresh readback.
+            try:
+                state = self.adapter.read_control_configuration(cfg.lakeshore335.sample_channel)
+                self.heating_interlock.note_control(state)
+            except Exception:
+                self.heating_interlock.invalidate_control()
             self.control_result.emit({"operation": "heater_off", "ok": True, **result})
         except Exception as exc:
             self.control_result.emit({"operation": "heater_off", "ok": False, "error": str(exc)})
@@ -173,10 +227,11 @@ class LakeShore335Controller(QObject):
     _control_refresh_requested = Signal()
     _heater_off_requested = Signal()
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, interlock=None):
         super().__init__(parent)
         self._thread = QThread(self)
-        self._worker = _LakeShoreWorker()
+        self._worker = _LakeShoreWorker(interlock)
+        self.heating_interlock = self._worker.heating_interlock
         from app.engine.transport_tasks import LatestTelemetry
         self.telemetry_cache = LatestTelemetry()
         self._worker.snapshot_updated.connect(self.telemetry_cache.publish, Qt.ConnectionType.DirectConnection)

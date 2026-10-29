@@ -229,6 +229,10 @@ class SampleTemperatureBar(QtWidgets.QFrame):
         available = selected and self._connected and not self._pending_operation
         for widget in (self.target, self.heater_range, self.ramp_mode, self.set_button):
             widget.setEnabled(available)
+        interlock = getattr(self.controller, "heating_interlock", None)
+        reason = interlock.heating_block_reason() if interlock is not None and selected else ""
+        self.set_button.setEnabled(available and not reason)
+        self.set_button.setToolTip(reason)
         self.ramp_rate.setEnabled(available and self.ramp_mode.currentData() is not None)
         # OFF remains available while an apply request is being processed.
         self.off_button.setEnabled(selected and self._connected and self._pending_operation != "heater_off")
@@ -324,6 +328,7 @@ class SampleTemperatureBar(QtWidgets.QFrame):
         return True, "valid"
 
     def _on_age_timer(self):
+        self._update_controls()
         valid, reason = self._valid_sample_snapshot(self._snapshot)
         if not valid and self._stable_since is not None:
             self._stable_since = None

@@ -5,11 +5,12 @@ from dataclasses import replace
 from app.devices.aps100_attodry1000_adapter import MockAPS100Adapter
 from controllers.magnet_controller import _MagnetWorker
 from utils.config import cfg
+from tests.heating_interlock_fixtures import safe_interlock
 
 
 class GateScanRateTests(unittest.TestCase):
     def run_move(self, *, gate=True, target=2.0, start=0.0, mismatch=False, boundary=40.0, stalled=False):
-        worker = _MagnetWorker()
+        worker = _MagnetWorker(safe_interlock())
         snapshot = replace(MockAPS100Adapter().read_snapshot(), field_t=start,
                            output_field_t=start)
         adapter = MagicMock()

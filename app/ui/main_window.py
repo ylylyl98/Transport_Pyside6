@@ -81,7 +81,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.magnet2100.disconnected.connect(lambda: setattr(self, "_experiment_2100_temperature", None))
         # The 1000 uses LS335 for sample control and thermal monitoring.
         # The 2100 uses its own SDK temperature controller.
-        self.lakeshore335 = LakeShore335Controller(parent=self)
+        self.lakeshore335 = LakeShore335Controller(parent=self, interlock=self.magnet1000.heating_interlock)
         self.thermal_safety = ThermalSafetyEvaluator(cfg.lakeshore335)
         self.magnet1000._worker.thermal_source = self.thermal_safety
         self.magnet1000._worker.thermal_field_updated.connect(self.thermal_safety.note_magnet_snapshot)

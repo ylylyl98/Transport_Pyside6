@@ -322,12 +322,13 @@ class GateRecoveryTests(unittest.TestCase):
 
 class FastZeroTests(unittest.TestCase):
     def test_worker_reports_intentional_pause_without_generic_fault(self):
+        from tests.heating_interlock_fixtures import safe_interlock
         from unittest.mock import MagicMock
         from controllers.magnet_controller import _MagnetWorker
         from app.devices.aps100_attodry1000_adapter import MockAPS100Adapter, APS100OperationCancelled
         for reason in ("thermal", "monitor", "user"):
             with self.subTest(reason=reason):
-                worker = _MagnetWorker()
+                worker = _MagnetWorker(safe_interlock())
                 worker.adapter = MagicMock()
                 worker.adapter.read_snapshot.return_value = MockAPS100Adapter().read_snapshot()
                 worker.adapter.get_rates.return_value = {}
