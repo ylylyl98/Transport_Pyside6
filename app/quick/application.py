@@ -15,6 +15,7 @@ from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtQuickControls2 import QQuickStyle
 
 from app.app_identity import configure_qapp, set_windows_app_id
+from app.update_check import UpdateService
 from app.settings import get_app_settings
 from app.curve_history import device_history_folder
 from app.quick.instruments import InstrumentService
@@ -41,6 +42,7 @@ class ApplicationBackend(QObject):
         super().__init__(parent)
         self._offline = offline
         self.settings = get_app_settings()
+        self._updates = UpdateService(self, settings=self.settings)
         self._message = "OFFLINE PREVIEW — synthetic data; acquisition disabled" if offline else "Ready"
         self._closing = False
         self._hardware_closed = False
@@ -114,6 +116,7 @@ class ApplicationBackend(QObject):
     plotModel = Property(QObject, lambda self: self._plot, notify=changed)
     runtime = Property(QObject, lambda self: self._runtime, constant=True)
     history = Property(QObject, lambda self: self._history, constant=True)
+    updates = Property(QObject, lambda self: self._updates, constant=True)
     offline = Property(bool, lambda self: self._offline, constant=True)
     message = Property(str, lambda self: self._message, notify=changed)
     closing = Property(bool, lambda self: self._closing, notify=changed)
@@ -329,6 +332,7 @@ class ApplicationBackend(QObject):
             if not self._history.prepare_shutdown():
                 return
             self.settings.sync()
+            self._updates.close()
             self._close_accepted = True
             self.changed.emit()
             self.closeReady.emit()
@@ -387,6 +391,9 @@ def main(argv=None):
     if args.panel is not None or args.preview:
         pane.setProperty("section", args.panel if args.panel is not None else int(backend.preference("previewPanel", 0)))
     backend.closeReady.connect(window.close)
+    app.aboutToQuit.connect(backend._updates.close)
+    if not args.preview and not args.check and not args.screenshot:
+        backend._updates.start()
     if args.preview:
         import numpy as np
         x = np.linspace(-1, 1, 401)

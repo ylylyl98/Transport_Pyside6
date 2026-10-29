@@ -1,6 +1,15 @@
 Transport 正式程序启动说明
 
-平时做测量：双击本文件旁边的 Transport_App.bat。
+EXE 用户：从 GitHub Releases/latest 下载 Transport-Setup-windows-x64.exe，为当前用户安装，无需管理员权限。
+默认安装位置：%LOCALAPPDATA%\Programs\Transport Measurement；从开始菜单打开 Transport Measurement，桌面快捷方式可选。
+便携版仍可下载完整 Transport-windows-x64.zip，解压后运行 Transport/Transport.exe。
+便携版保留 TransportWorker.exe、_internal 和所有随包文件；安装器不会安装仪器驱动，仍需按设备单独准备。
+SHA256SUMS.txt 包含安装包和便携 ZIP 的校验值。当前发布未签名；遇到 Windows 提示先核对来源及校验值，不关闭安全检查。
+更新或卸载前，等待测量和仪器清理结束，正常关闭 Transport、历史窗口和后台工作进程。
+安装版通过 Windows“设置 → 应用 → 已安装的应用”卸载；保留 AppData 设置和测量数据。数据请保存在程序目录之外。
+下载、驱动和首次配置见 README.zh-CN.md 及 docs/user-setup.zh-CN.md。
+
+源码用户平时做测量：双击本文件旁边的 Transport_App.bat。
 也可以双击 Transport_App - Shortcut.lnk；它指向同一个正式启动程序。
 根目录只保留这一个 BAT。移动项目文件夹后，先运行一次 Transport_App.bat，更新快捷方式。
 
@@ -14,4 +23,4 @@ tmp：本机验证报告、截图和历史备份。不要使用里面的 BAT 启
 回退旧界面：正常关闭后，在 PowerShell 执行 .\Transport_App.bat --widgets。
 Qt Quick 迁移、离线验证和环境说明见 docs/qt-quick-migration.md。实机验收需另行完成。
 测量数据仍保存到程序里配置的数据目录，不属于上述验证文件夹。
-详细安装、启动和使用方法见 README.md。
+英文首页见 README.md；中文首页见 README.zh-CN.md，详细测量说明见 docs/measurement-guide.md。

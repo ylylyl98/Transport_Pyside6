@@ -73,6 +73,54 @@ class QuickApplicationTests(unittest.TestCase):
         self.assertFalse(self.backend.closing)
         self.assertTrue(self.backend._magnet.magnet1000._thread.isRunning())
         self.assertIn("zero unconfirmed", self.backend.message)
+        self.assertFalse(self.backend._updates._closed)
+
+    def test_update_banner_preserves_stop_controls_and_requires_download_click(self):
+        service = self.backend._updates
+        service._current = 'v2026.10.28'
+        engine = QtQml.QQmlApplicationEngine()
+        warnings = []
+        engine.warnings.connect(lambda items: warnings.extend(str(item) for item in items))
+        engine.rootContext().setContextProperty("appBackend", self.backend)
+        engine.load(QtCore.QUrl.fromLocalFile(str(Path(__file__).resolve().parents[1] / "app/quick/qml/Main.qml")))
+        self.assertTrue(engine.rootObjects(), warnings)
+        window = engine.rootObjects()[0]
+        window.setWidth(800)
+        window.setHeight(600)
+        banner = window.findChild(QtCore.QObject, "updateBanner")
+        self.assertFalse(banner.property('visible'))
+        release_url = 'https://github.com/ylylyl98/Transport_Pyside6/releases/tag/v2026.10.29'
+        with patch.object(service, '_eligible', return_value=True), patch('app.update_check.QtGui.QDesktopServices.openUrl') as opened:
+            service._receive({
+                'tag_name': 'v2026.10.29', 'draft': False, 'prerelease': False,
+                'html_url': release_url,
+                'assets': [{'name': 'Transport-Setup-windows-x64.exe',
+                            'browser_download_url': release_url.replace('/tag/', '/download/') + '/Transport-Setup-windows-x64.exe'}],
+            }, '')
+            QtTest.QTest.qWait(100)
+            self.assertTrue(banner.property('visible'))
+            opened.assert_not_called()
+            for name in ('stopMeasurement', 'stopAll', 'downloadUpdate', 'dismissUpdate'):
+                item = window.findChild(QtCore.QObject, name)
+                position = item.mapToScene(QtCore.QPointF(0, 0))
+                self.assertGreaterEqual(position.x(), 0)
+                self.assertGreaterEqual(position.y(), 0)
+                self.assertLessEqual(position.x() + item.width(), window.width())
+                self.assertLessEqual(position.y() + item.height(), window.height())
+            download = window.findChild(QtCore.QObject, 'downloadUpdate')
+            QtTest.QTest.mouseClick(window, QtCore.Qt.MouseButton.LeftButton,
+                                   pos=download.mapToScene(QtCore.QPointF(download.width()/2, download.height()/2)).toPoint())
+            opened.assert_called_once_with(QtCore.QUrl(release_url))
+            dismiss = window.findChild(QtCore.QObject, 'dismissUpdate')
+            QtTest.QTest.mouseClick(window, QtCore.Qt.MouseButton.LeftButton,
+                                   pos=dismiss.mapToScene(QtCore.QPointF(dismiss.width()/2, dismiss.height()/2)).toPoint())
+            self.assertFalse(service.available)
+            self.application.processEvents()
+            self.assertFalse(banner.property('visible'))
+        self.assertEqual(warnings, [])
+        window.hide()
+        engine.deleteLater()
+        self.application.sendPostedEvents(None, QtCore.QEvent.Type.DeferredDelete)
 
     def test_small_window_drawer_and_long_confirmation_keep_actions_reachable(self):
         engine = QtQml.QQmlApplicationEngine()

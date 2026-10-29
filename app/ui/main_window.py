@@ -9,6 +9,7 @@ from PySide6 import QtWidgets
 from PySide6.QtCore import Qt, QTimer
 
 from app.app_identity import APP_NAME, configure_qapp, set_windows_app_id
+from app.update_check import UpdateService
 from app.device_manager import DeviceManager
 from app.engine.gate_scan_field_batch import GateScanFieldBatch
 from app.engine.bfield_transport_controller import BFieldTransportController
@@ -64,6 +65,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if frozen:
             self.preview_action.setText("Offline UI preview (source checkout only)")
             self.preview_action.setToolTip("Run the Python source checkout to use the development preview.")
+        self._setup_updates()
         self._runtime_settings_dialog = None
         self._last_measurement_page = "Vds Sweep"
 
@@ -262,6 +264,63 @@ class MainWindow(QtWidgets.QMainWindow):
         self._temperature_summary_timer.start()
         self._update_temperature_summary()
         restore_workspace(self)
+        self.update_service.start()
+
+    def _setup_updates(self):
+        self.update_service = UpdateService(self)
+        self._update_notice_requested = False
+        self._dismissed_update_version = ""
+        self.tools_menu.addSeparator()
+        self.check_updates_action = self.tools_menu.addAction("Check for updates...", self._check_updates)
+        self.auto_updates_action = self.tools_menu.addAction("Automatically check for updates")
+        self.auto_updates_action.setCheckable(True)
+        self.auto_updates_action.setChecked(self.update_service.autoCheck)
+        self.auto_updates_action.toggled.connect(self.update_service.setAutoCheck)
+        self.update_notice = QtWidgets.QWidget(self)
+        notice_layout = QtWidgets.QHBoxLayout(self.update_notice)
+        notice_layout.setContentsMargins(6, 0, 0, 0)
+        self.update_notice_label = QtWidgets.QLabel()
+        self.update_notice_label.setWordWrap(True)
+        self.update_notice_label.setMaximumWidth(480)
+        notice_layout.addWidget(self.update_notice_label)
+        self.update_download_button = QtWidgets.QPushButton("Download update")
+        self.update_download_button.setToolTip(
+            "Open the release page. Stop measurements and close Transport normally before upgrading.")
+        self.update_download_button.clicked.connect(self.update_service.openRelease)
+        notice_layout.addWidget(self.update_download_button)
+        self.update_dismiss_button = QtWidgets.QPushButton("Dismiss")
+        self.update_dismiss_button.clicked.connect(self._dismiss_update_notice)
+        notice_layout.addWidget(self.update_dismiss_button)
+        self.statusBar().addPermanentWidget(self.update_notice)
+        self.update_service.changed.connect(self._update_release_status)
+        self._update_release_status()
+
+    def _check_updates(self):
+        self._update_notice_requested = True
+        self._dismissed_update_version = ""
+        self.update_service.checkNow()
+        self._update_release_status()
+
+    def _dismiss_update_notice(self):
+        self._update_notice_requested = False
+        if self.update_service.available:
+            self._dismissed_update_version = self.update_service.latestVersion
+        self.update_notice.hide()
+
+    def _update_release_status(self):
+        service = self.update_service
+        self.check_updates_action.setEnabled(not service.checking)
+        self.auto_updates_action.blockSignals(True)
+        self.auto_updates_action.setChecked(service.autoCheck)
+        self.auto_updates_action.blockSignals(False)
+        text = (f"Transport {service.latestVersion} is available (installed: {service.currentVersion})."
+                if service.available else service.message)
+        self.update_notice_label.setText(text)
+        self.update_notice_label.setToolTip(text)
+        self.update_download_button.setVisible(service.available)
+        new_release = (service.available
+                       and service.latestVersion != self._dismissed_update_version)
+        self.update_notice.setVisible(bool(text) and (new_release or self._update_notice_requested))
 
     def _save_workspace_state(self):
         save_workspace(self)
@@ -625,6 +684,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lakeshore335.shutdown()
         self.png_coordinator.shutdown()
         self.png_exporter.shutdown()
+        update_service = getattr(self, "update_service", None)
+        if update_service is not None:
+            update_service.close()
         self._png_close_pending = True
         # All hardware owners are now stopped. Keep the remaining export
         # drain from allowing another measurement or connection request.

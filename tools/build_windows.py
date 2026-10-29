@@ -55,8 +55,9 @@ def main(argv=None):
     }
     (bundle / "build-info.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     (bundle / "README.txt").write_text(
-        "Transport Measurement - Windows x64 portable package\n\n"
-        "Extract the entire ZIP, then open Transport.exe. Keep TransportWorker.exe\n"
+        "Transport Measurement - Windows x64\n\n"
+        "After Setup, use the Start menu shortcut. For the portable ZIP, extract\n"
+        "the entire ZIP, then open Transport.exe. Keep TransportWorker.exe\n"
         "and _internal beside it. Python does not need to be installed.\n"
         "For the retained Widgets interface: Transport.exe --widgets\n\n"
         "Install the required NI-DAQmx/VISA drivers separately. Configure instrument\n"
@@ -64,6 +65,9 @@ def main(argv=None):
         "Software tests use simulated instruments; physical instrument acceptance\n"
         "is separate. Close the application normally before replacing this folder.\n"
         "User settings and measured data are not included in this package.\n\n"
+        "Official releases check GitHub for update notices while the app is open.\n"
+        "Use View > Check for updates (Widgets: Tools) to check manually.\n"
+        "Download and install updates only after safely stopping measurements.\n\n"
         f"Source commit: {commit}\n"
         "Source and instructions: https://github.com/ylylyl98/Transport_Pyside6\n",
         encoding="utf-8",

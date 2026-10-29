@@ -120,6 +120,25 @@ ApplicationWindow {
                         MenuSeparator {}
                         MenuItem { text: "Reload analysis"; onTriggered: window.backend.history.reload() }
                         MenuItem { text: "Runtime settings"; onTriggered: window.openInstrumentPage(7) }
+                        MenuSeparator {}
+                        MenuItem {
+                            objectName: "checkForUpdates"
+                            text: window.backend.updates.checking ? "Checking for updates…" : "Check for updates"
+                            enabled: !window.backend.updates.checking && !window.backend.closing
+                            onTriggered: window.backend.updates.checkNow()
+                        }
+                        MenuItem {
+                            objectName: "automaticUpdates"
+                            text: "Check for updates automatically"
+                            checkable: true
+                            checked: window.backend.updates.autoCheck
+                            onTriggered: window.backend.updates.setAutoCheck(checked)
+                        }
+                        MenuItem {
+                            text: window.backend.updates.message
+                            enabled: false
+                            visible: window.backend.updates.message.length > 0
+                        }
                         MenuItem { text: "Rebuild offline preview (Ctrl+Shift+R)"; visible: window.backend.offline; onTriggered: window.backend.rebuildPreview() }
                     }
                 }
@@ -187,6 +206,38 @@ ApplicationWindow {
         anchors.fill: parent
         anchors.margins: 8
         spacing: 6
+        Rectangle {
+            objectName: "updateBanner"
+            visible: window.backend.updates.available && !window.backend.closing
+            Layout.fillWidth: true
+            implicitHeight: updateRow.implicitHeight + 16
+            color: Theme.surface
+            border.color: Theme.accent
+            radius: 4
+            RowLayout {
+                id: updateRow
+                anchors.fill: parent
+                anchors.margins: 8
+                spacing: 8
+                Label {
+                    text: "Transport " + window.backend.updates.latestVersion + " is available. Update after measurements finish."
+                    color: Theme.text
+                    wrapMode: Text.Wrap
+                    Layout.fillWidth: true
+                    Accessible.name: text
+                }
+                Button {
+                    objectName: "downloadUpdate"
+                    text: "Download update"
+                    onClicked: window.backend.updates.openRelease()
+                }
+                ToolButton {
+                    objectName: "dismissUpdate"
+                    text: "Dismiss"
+                    onClicked: window.backend.updates.ignoreLatest()
+                }
+            }
+        }
         RowLayout {
             visible: window.narrow && window.showParameters
             Layout.fillWidth: true
