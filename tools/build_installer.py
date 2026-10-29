@@ -55,7 +55,7 @@ def write_checksums(output):
     if not all(path.is_file() for path in artifacts):
         raise ValueError("Both the portable ZIP and installer must exist before writing release checksums")
     (output / "SHA256SUMS.txt").write_text(
-        "".join(f"{file_digest(path)}  {path.name}\n" for path in artifacts), encoding="ascii")
+        "".join(f"{file_digest(path)}  {path.name}\n" for path in artifacts), encoding="ascii", newline="\n")
 
 
 def main(argv=None):

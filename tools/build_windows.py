@@ -79,7 +79,7 @@ def main(argv=None):
                 zip_file.write(path, path.relative_to(output))
     with archive.open("rb") as stream:
         digest = hashlib.file_digest(stream, "sha256").hexdigest()
-    (output / "SHA256SUMS.txt").write_text(f"{digest}  {archive.name}\n", encoding="ascii")
+    (output / "SHA256SUMS.txt").write_text(f"{digest}  {archive.name}\n", encoding="ascii", newline="\n")
     print(f"Built {archive} ({archive.stat().st_size / 1024**2:.1f} MiB)", flush=True)
     return 0
 

@@ -49,6 +49,9 @@ class InstallerBuildTests(unittest.TestCase):
                 write_checksums(output)
             (output / INSTALLER_NAME).write_bytes(b'installer')
             write_checksums(output)
+            # The Linux release gate matches complete lines, so Windows CRLF
+            # translation must not change the portable checksum format.
+            self.assertNotIn(b'\r', (output / 'SHA256SUMS.txt').read_bytes())
             lines = (output / 'SHA256SUMS.txt').read_text().splitlines()
             self.assertEqual(lines, [hashlib.sha256(b'portable').hexdigest() + '  Transport-windows-x64.zip',
                                      hashlib.sha256(b'installer').hexdigest() + '  ' + INSTALLER_NAME])
