@@ -71,7 +71,7 @@ Choose **Download update** to open the nonmodal in-app update window. Downloads
 run in the background with progress, cancellation and retry; the installer is
 saved in the Windows user cache and checked against GitHub's size and SHA-256.
 When idle, choose **Exit and install**. Transport confirms its normal instrument
-and analysis shutdown, then a separate helper waits for the process to exit,
+and analysis shutdown, then a separate helper waits for Transport and its background exports to exit,
 rechecks the installer and opens the Windows installation wizard using the current
 application folder. The application does not install without this action or restart
 measurements. **Later** keeps the application open; **Release notes** remains an

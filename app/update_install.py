@@ -18,12 +18,23 @@ _HELPER = r'''param(
     [Parameter(Mandatory=$true)][string]$LogPath
 )
 $ErrorActionPreference = 'Stop'
+function Get-TransportProcesses {
+    @([System.Diagnostics.Process]::GetProcessesByName('Transport')) +
+        @([System.Diagnostics.Process]::GetProcessesByName('TransportWorker'))
+}
 try {
     $parent = $null
     try { $parent = [System.Diagnostics.Process]::GetProcessById($ParentId) }
     catch [System.ArgumentException] { } # The parent already exited.
     if ($null -ne $parent -and -not $parent.WaitForExit(120000)) {
         throw 'The application did not exit within the allotted time.'
+    }
+    $deadline = [System.Diagnostics.Stopwatch]::StartNew()
+    while (@(Get-TransportProcesses).Count -gt 0) {
+        if ($deadline.ElapsedMilliseconds -ge 120000) {
+            throw 'Close other Transport windows or wait for exports to finish, then retry the installer.'
+        }
+        [System.Threading.Thread]::Sleep(250)
     }
     $hasher = [System.Security.Cryptography.SHA256]::Create()
     $stream = [System.IO.File]::OpenRead($Installer)
@@ -37,11 +48,12 @@ try {
 } catch {
     $detail = $_ | Out-String
     try { Add-Content -LiteralPath $LogPath -Value ((Get-Date -Format o) + ' ' + $detail) -Encoding UTF8 } catch {}
+    $message = if ($detail -like '*Close other Transport windows*') { 'Close other Transport windows or wait for exports to finish, then retry the installer.' } else { 'The update could not be installed. See the update log for details.' }
     try {
         Add-Type -AssemblyName System.Windows.Forms
-        [System.Windows.Forms.MessageBox]::Show('The update could not be installed. See the update log for details.', 'Transport update', 'OK', 'Error') | Out-Null
+        [System.Windows.Forms.MessageBox]::Show($message, 'Transport update', 'OK', 'Error') | Out-Null
     } catch {
-        try { (New-Object -ComObject WScript.Shell).Popup('The update could not be installed. See the update log for details.', 0, 'Transport update', 16) | Out-Null } catch {}
+        try { (New-Object -ComObject WScript.Shell).Popup($message, 0, 'Transport update', 16) | Out-Null } catch {}
     }
     exit 1
 }

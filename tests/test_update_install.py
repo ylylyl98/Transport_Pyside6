@@ -36,7 +36,10 @@ class InstallHandoffTests(unittest.TestCase):
         self.assertEqual(script.parent, self.root)
         source = script.read_text(encoding='ascii')
         self.assertIn('WaitForExit(120000)', source)
-        self.assertLess(source.index('WaitForExit'), source.index('ComputeHash'))
+        self.assertLess(source.index('WaitForExit'), source.index('Get-TransportProcesses).Count'))
+        self.assertLess(source.index('Get-TransportProcesses).Count'), source.index('ComputeHash'))
+        self.assertIn("GetProcessesByName('TransportWorker')", source)
+        self.assertIn('Close other Transport windows', source)
         self.assertLess(source.index('ComputeHash'), source.index('Start-Process'))
         self.assertIn("'/NORESTART'", source)
         self.assertIn(r"$InstallDir -replace '(\\+)$', '$1$1'", source)
@@ -80,6 +83,13 @@ class InstallHandoffTests(unittest.TestCase):
 }
 '''
         source = update_install._HELPER.replace("$ErrorActionPreference = 'Stop'", hook + "\n$ErrorActionPreference = 'Stop'", 1)
+        # Replace enumeration in the test copy so real user processes are never touched.
+        start = source.index('function Get-TransportProcesses {')
+        end = source.index('\ntry {', start)
+        source = source[:start] + r'''function Get-TransportProcesses {
+    if ([System.IO.File]::Exists($LogPath + '.worker')) { return 'test worker' }
+}''' + source[end:]
+
         # Only the test copy changes the failure UI, preventing modal dialogs.
         source = source[:source.index('    try {\n        Add-Type -AssemblyName System.Windows.Forms')] + '    exit 1\n}\n'
         script = self.root / 'harness.ps1'
@@ -105,9 +115,15 @@ class InstallHandoffTests(unittest.TestCase):
         self.assertIsNone(parent.poll())
         self.assertIsNone(helper.poll())
         self.assertFalse(output.exists(), 'Installer was called before parent exit')
+        worker = Path(str(log) + '.worker')
+        worker.touch()
         parent.stdin.write(b'x')
         parent.stdin.close()
         parent.wait(timeout=10)
+        time.sleep(1)
+        self.assertIsNone(helper.poll())
+        self.assertFalse(output.exists(), 'Installer was called while exporter was active')
+        worker.unlink()
         stdout, stderr = helper.communicate(timeout=15)
         self.assertEqual(helper.returncode, 0, (stdout, stderr, log.read_text(encoding='utf-8-sig') if log.exists() else ''))
         recorded = json.loads(output.read_text(encoding='utf-8-sig'))
