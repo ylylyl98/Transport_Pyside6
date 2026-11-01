@@ -68,6 +68,8 @@ class Trace:
     color: str = ''
     revision: int = 0
     source_index: int = 0
+    marker: str = ''
+    style: str = 'auto'
 
     def append(self, record):
         size = next(iter(self.columns.values())).size if self.columns else 0
@@ -229,6 +231,12 @@ class PlotModel(QObject):
         self._channel = 'Ids_DC'
         self._channels = DEFAULT_CHANNELS.copy()
         self._four = False
+        self._overlay = False
+        self._two = False
+        self._one_plot_layout = 'single'
+        self._overlay_channels = []
+        self._overlay_axis = 'shared'
+        self._layout_views = {}
         self._channel_order = None
         self._channel_labels = {}
         self._x_axis = FOLLOW_SWEEP
@@ -237,6 +245,7 @@ class PlotModel(QObject):
         self._y_label = ''
         self._z_label = ''
         self._title = ''
+        self._tick_values = {}
         self._interaction = 'pan'
         self._manual_x = None
         self._manual_y = {}
@@ -275,11 +284,16 @@ class PlotModel(QObject):
     isHeatmap = Property(bool, lambda s: s._heatmap is not None, notify=changed)
     pointCount = Property(int, lambda s: s._count, notify=frameReady)
     channelOptions = Property('QStringList', lambda s: s._channels, notify=changed)
+    channelsForDisplay = Property('QStringList', lambda s: s.channels(), notify=changed)
 
     @Property('QStringList', notify=changed)
     def legendEntries(self):
-        return list(dict.fromkeys(self.legend_text(trace) for channel in self.channels()
-                                 for trace, _, _ in self.traces(channel) if trace.label))
+        return list(dict.fromkeys(self.display_legend(trace, channel) for channel in self.channels()
+                                 for trace, _, _ in self.traces(channel) if (trace.label or self._overlay) and not trace.marker))
+
+    def display_legend(self, trace, channel):
+        text = self.legend_text(trace)
+        return ' · '.join(part for part in (channel, text) if part) if self._overlay or self._two else text
 
     @staticmethod
     def legend_text(trace):
@@ -298,10 +312,148 @@ class PlotModel(QObject):
     channel = Property(str, lambda s: s._channel, _set_channel, notify=changed)
 
     def _set_four(self, value):
-        self._four = bool(value)
-        self.preferencesChanged.emit()
-        self._queue(True)
+        self._set_layout('four' if value else 'single')
     fourChannels = Property(bool, lambda s: s._four, _set_four, notify=changed)
+
+    def _set_layout(self, value):
+        if value not in ('single', 'two', 'four', 'overlay') or self.isHeatmap:
+            return
+        if value == self.layout:
+            return
+        if value in ('overlay', 'two') and len(self._channels) < 2:
+            return
+        self._layout_views[self.layout] = (self._manual_x, dict(self._manual_y))
+        self._four, self._overlay, self._two = value == 'four', value == 'overlay', value == 'two'
+        if value in ('single', 'overlay'):
+            self._one_plot_layout = value
+        self._manual_x, ys = self._layout_views.get(value, (self._manual_x, {}))
+        self._manual_y = dict(ys)
+        if self._overlay or self._two:
+            self._ensure_overlay()
+            self._channel = self._overlay_channels[0]
+        self.preferencesChanged.emit()
+        self.viewChanged.emit()
+        self._queue(True)
+    layout = Property(str, lambda s: 'overlay' if s._overlay else 'two' if s._two else 'four' if s._four else 'single', _set_layout, notify=changed)
+    overlayChannels = Property('QStringList', lambda s: s._overlay_channels.copy(), notify=changed)
+    plotCount = Property(int, lambda s: 4 if s._four else 2 if s._two else 1, notify=changed)
+
+    @Slot(int)
+    def setPlotCount(self, count):
+        if count in (1, 2, 4):
+            self._set_layout({1: self._one_plot_layout, 2: 'two', 4: 'four'}[count])
+
+    @Slot(str, str)
+    @Slot(str, str, str)
+    def setYAxes(self, first, second, layout=''):
+        """Apply direct Y/Y2 selection without publishing an intermediate view."""
+        if self.isHeatmap or first not in self._channels or (second and second not in self._channels) or first == second:
+            return
+        target = ('two' if layout == 'two' or not layout and self._two else 'overlay') if second else 'single'
+        pair = [first, second] if second else self._overlay_channels.copy()
+        if target == self.layout and first == self._channel and (not second or pair == self._overlay_channels):
+            return
+        old_pair = self._overlay_channels.copy()
+        old_channel = self._channel
+        if target != self.layout:
+            self._layout_views[self.layout] = (self._manual_x, dict(self._manual_y))
+            self._manual_x, ys = self._layout_views.get(target, (self._manual_x, {}))
+            self._manual_y = dict(ys)
+        self._four, self._overlay, self._two, self._channel = False, target == 'overlay', target == 'two', first
+        if target in ('single', 'overlay'):
+            self._one_plot_layout = target
+        if second:
+            self._overlay_channels = pair
+            if pair != old_pair:
+                if target == 'overlay' and self._overlay_axis == 'shared':
+                    self._manual_y.clear()
+                else:
+                    for channel in set(old_pair).symmetric_difference(pair):
+                        self._manual_y.pop(channel, None)
+        elif first != old_channel:
+            self._manual_y.pop(first, None)
+        self.preferencesChanged.emit()
+        self.viewChanged.emit()
+        self._queue(True)
+
+    @Slot(str, str)
+    def setPanelChannel(self, old, new):
+        """Replace one displayed channel without disturbing the other panels."""
+        if self.isHeatmap or new not in self._channels or old == new:
+            return
+        channels = self.channels()
+        if old not in channels or new in channels:
+            return
+        if self._four:
+            order = channels.copy()
+            order[order.index(old)] = new
+            self._channel_order = order
+            if self._channel == old:
+                self._channel = new
+            self._manual_y.pop(old, None)
+            self.preferencesChanged.emit()
+            self.viewChanged.emit()
+            self._queue(True)
+        elif self._overlay or self._two:
+            pair = channels.copy()
+            pair[pair.index(old)] = new
+            self.setYAxes(pair[0], pair[1], 'two' if self._two else 'overlay')
+        else:
+            self.setYAxes(new, '')
+
+    def _ensure_overlay(self):
+        # Choose defaults once; configured channels with no samples remain
+        # selected and show Waiting rather than silently substituting data.
+        if not self._overlay_channels:
+            preferred = [self._channel] + self._channels
+            self._overlay_channels = list(dict.fromkeys(preferred))[:2]
+
+    def setChannelOptions(self, channels):
+        """Configure an empty live view without changing acquired records."""
+        if self._count:
+            return
+        channels = list(dict.fromkeys(channels))
+        if channels == self._channels:
+            return
+        self._channels = channels
+        if not (self._overlay or self._two) and self._channel not in channels and channels:
+            self._channel = channels[0]
+        self._queue(True)
+
+    @Slot(int, str)
+    def setOverlayChannel(self, index, channel):
+        self._ensure_overlay()
+        if index not in (0, 1) or channel not in self._channels or len(self._overlay_channels) != 2:
+            return
+        if channel == self._overlay_channels[1 - index] or channel == self._overlay_channels[index]:
+            return
+        self._overlay_channels[index] = channel
+        if self._overlay or self._two:
+            self._channel = self._overlay_channels[0]
+            self._manual_y.clear()
+        self.preferencesChanged.emit()
+        self.viewChanged.emit()
+        self._queue(True)
+
+    def _set_overlay_axis(self, value):
+        if value not in ('shared', 'dual') or value == self._overlay_axis:
+            return
+        self._overlay_axis = value
+        if self._overlay:
+            self._manual_y.clear()
+        self.preferencesChanged.emit()
+        self.viewChanged.emit()
+        self._queue(True)
+    overlayAxis = Property(str, lambda s: s._overlay_axis, _set_overlay_axis, notify=changed)
+
+    @Property(str, notify=frameReady)
+    def overlayStatus(self):
+        if not self._overlay:
+            return ''
+        missing = [c for c in self._overlay_channels if not any(x.bounds and y.bounds for _, x, y in self.traces(c))]
+        if missing:
+            return 'Waiting for data: ' + ', '.join(missing)
+        return 'Shared Y axis · original values' if self._overlay_axis == 'shared' else 'Independent Y axes · compare each curve with its matching axis'
 
     @Slot(str)
     def setXRangeMode(self, value):
@@ -309,6 +461,7 @@ class PlotModel(QObject):
             raise ValueError('X range must be Full sweep or Acquired data')
         self._range_mode = value
         self._manual_x = None
+        self._layout_views = {key: (None, ys) for key, (_, ys) in self._layout_views.items()}
         self.preferencesChanged.emit()
         self.viewChanged.emit()
         self._queue(True)
@@ -318,6 +471,7 @@ class PlotModel(QObject):
         self._x_axis = normalize_plot_x_selection(value)
         self._resolve_axis()
         self._manual_x = None
+        self._layout_views = {key: (None, ys) for key, (_, ys) in self._layout_views.items()}
         self.preferencesChanged.emit()
         self._queue(True)
     xAxis = Property(str, lambda s: s._x_axis, _set_x_axis, notify=changed)
@@ -342,7 +496,8 @@ class PlotModel(QObject):
 
     @Slot('QVariantMap')
     def beginRun(self, snapshot):
-        self._channel_order = None
+        self._tick_values = {}
+        self._layout_views.clear()
         self._channel_labels = {}
         self._snapshot = dict(snapshot)
         self._plan = dict(snapshot.get('planned_ranges', snapshot.get('ranges', {})))
@@ -367,6 +522,9 @@ class PlotModel(QObject):
         self._channels = list(snapshot.get('channels', available))
         if self._channel not in self._channels:
             self._channel = self._channels[0] if self._channels else 'Ids_DC'
+        if self._overlay or self._two:
+            self._ensure_overlay()
+            self._channel = self._overlay_channels[0]
         self._resolve_axis()
         self.home()
 
@@ -411,8 +569,9 @@ class PlotModel(QObject):
                 self._snapshot[key] = deepcopy(result[key])
         self._queue(True)
 
-    def setTraces(self, traces, xLabel='', yLabel='', channelLabels=None):
+    def setTraces(self, traces, xLabel='', yLabel='', channelLabels=None, tickValues=None):
         self._channel_labels = dict(channelLabels or {})
+        self._tick_values = dict(tickValues or {})
         result = []
         for trace in traces:
             x, y = (np.asarray(trace[k], dtype=float).reshape(-1) for k in ('x', 'y'))
@@ -420,7 +579,8 @@ class PlotModel(QObject):
                 raise ValueError('Trace X and Y lengths must match')
             result.append(Trace({'x': NumericBuffer(x), 'y': NumericBuffer(y)},
                                 str(trace.get('label', '')), str(trace.get('direction', '')),
-                                str(trace.get('channel', '')), str(trace.get('color', ''))))
+                                str(trace.get('channel', '')), str(trace.get('color', '')),
+                                marker=str(trace.get('marker', '')), style=str(trace.get('style', 'auto'))))
         self._traces, self._heatmap, self._run = result, None, False
         self._plan = {}
         self._x_label, self._y_label = str(xLabel), str(yLabel)
@@ -428,6 +588,9 @@ class PlotModel(QObject):
         self._queue(True)
 
     def setHeatmap(self, data, xLabel='', yLabel='', zLabel=''):
+        self._tick_values = {}
+        self._overlay = False
+        self._two = False
         self._heatmap = prepare_heatmap(data)
         bounds = finite_bounds(self._heatmap['z'])
         if bounds is not None:
@@ -442,6 +605,7 @@ class PlotModel(QObject):
 
     @Slot()
     def clear(self):
+        self._tick_values = {}
         self._traces, self._heatmap, self._count = [], None, 0
         self._snapshot, self._plan, self._group = {}, {}, None
         self._run = False
@@ -454,6 +618,9 @@ class PlotModel(QObject):
         self._queue(True)
 
     def channels(self):
+        if (self._overlay or self._two) and self._heatmap is None:
+            self._ensure_overlay()
+            return self._overlay_channels.copy()
         if self._heatmap is not None or not self._four:
             return [self._channel]
         if self._channel_order is not None:
@@ -466,6 +633,8 @@ class PlotModel(QObject):
         return (channels + [''] * 4)[:4]
 
     def channelLabel(self, channel):
+        if self._overlay or self._two:
+            return self._channel_labels.get(channel, f'{channel} (A)')
         if self._heatmap is not None or not self._four:
             return self.yLabel
         return self._channel_labels.get(channel, f'{channel} (A)')
@@ -494,14 +663,17 @@ class PlotModel(QObject):
         xbounds = merge_bounds(x.bounds for name in self.channels() for _, x, _ in self.traces(name))
         if self._range_mode == FULL_SWEEP:
             xbounds = merge_bounds([xbounds, self._plan.get(self._resolved_axis)])
-        ybounds = merge_bounds(y.bounds for _, _, y in self.traces(channel))
+        names = self.channels() if self._overlay and self._overlay_axis == 'shared' else [channel]
+        ybounds = merge_bounds(y.bounds for name in names for _, _, y in self.traces(name))
         xlim = self._manual_x if self._manual_x is not None else padded_limits(xbounds or (0, 1))
         ylim = self._manual_y.get(channel, padded_limits(ybounds or (0, 1)))
         return xlim, ylim
 
     def set_limits(self, channel, xlim, ylim):
         self._manual_x = tuple(sorted(float(v) for v in xlim))
-        self._manual_y[channel] = tuple(sorted(float(v) for v in ylim))
+        names = self.channels() if self._overlay and self._overlay_axis == 'shared' else [channel]
+        for name in names:
+            self._manual_y[name] = tuple(sorted(float(v) for v in ylim))
         self.viewChanged.emit()
         self._queue()
 
@@ -549,17 +721,21 @@ class PlotModel(QObject):
                 'manual_y': [c in self._manual_y for c in channels], 'clim': list(self.color_limits()),
                 'clim_auto': self._clim is None, 'cmap': self._cmap,
                 'map_xlim': list(xlim), 'map_ylim': ylims[0], 'xRangeMode': self._range_mode}
-        if self._four and self._heatmap is None:
-            view.update(four_channels=True, channel_order=channels,
+        if (self._four or self._overlay or self._two) and self._heatmap is None:
+            view.update(four_channels=self._four, channel_order=channels,
                         channel_views={c: {'xlim': list(self.limits(c)[0]), 'ylim': list(self.limits(c)[1]),
                                            'manual_x': self._manual_x is not None,
                                            'manual_y': [c in self._manual_y]} for c in channels})
+        if self._overlay or self._two:
+            view.update(layout=self.layout, overlay_channels=channels, overlay_axis=self._overlay_axis)
         return view
 
     @Slot(result='QVariantMap')
     def capturePreferences(self):
         """Small per-measurement settings; no samples, plans or manual zoom."""
         return {'channel': self._channel, 'fourChannels': self._four,
+                'layout': self.layout, 'overlayChannels': self._overlay_channels.copy(), 'overlayAxis': self._overlay_axis,
+                'onePlotLayout': self._one_plot_layout, 'channelOrder': self._channel_order.copy() if self._channel_order is not None else None,
                 'xAxis': self._x_axis, 'xRangeMode': self._range_mode,
                 'interactionMode': self._interaction, 'colorMap': self._cmap}
 
@@ -578,13 +754,37 @@ class PlotModel(QObject):
             raise ValueError('X range must be Full sweep or Acquired data')
         layout = p.get('fourChannels', p.get('plot_mode', self._four))
         four = layout if isinstance(layout, bool) else str(layout) in ('4-Channel Compare', 'true', 'True', '1')
+        chosen_layout = p.get('layout', 'four' if four else 'single') if 'fourChannels' in p or 'plot_mode' in p else p.get('layout', self.layout)
+        if chosen_layout not in ('single', 'two', 'four', 'overlay'):
+            chosen_layout = 'four' if four else 'single'
+        order = p.get('channelOrder', self._channel_order)
+        if isinstance(order, (list, tuple)) and len(order) == 4 and all(isinstance(c, str) for c in order):
+            populated = [c for c in order if c]
+            if len(populated) == len(set(populated)):
+                self._channel_order = list(order)
+        elif order is None:
+            self._channel_order = None
+        pair = p.get('overlayChannels', self._overlay_channels)
+        if isinstance(pair, (list, tuple)) and len(pair) == 2 and all(isinstance(c, str) and c for c in pair) and pair[0] != pair[1]:
+            self._overlay_channels = list(pair)
+        if p.get('overlayAxis') in ('shared', 'dual'):
+            self._overlay_axis = p['overlayAxis']
         cmap = str(p.get('colorMap', p.get('cmap', self._cmap)))
         cmap = next((key for key in COLOR_TABLES if key.lower() == cmap.lower()), 'viridis')
         if axis != self._x_axis or mode != self._range_mode:
             self._manual_x = None
         if channel != self._channel:
             self._manual_y.clear()
-        self._channel, self._four, self._x_axis, self._range_mode = channel, bool(four), axis, mode
+        self._channel, self._four, self._x_axis, self._range_mode = channel, chosen_layout == 'four', axis, mode
+        self._overlay = chosen_layout == 'overlay'
+        self._two = chosen_layout == 'two'
+        if p.get('onePlotLayout') in ('single', 'overlay'):
+            self._one_plot_layout = p['onePlotLayout']
+        if chosen_layout in ('single', 'overlay'):
+            self._one_plot_layout = chosen_layout
+        if self._overlay or self._two:
+            self._ensure_overlay()
+            self._channel = self._overlay_channels[0]
         self._interaction = 'zoom' if p.get('interactionMode', self._interaction) == 'zoom' else 'pan'
         self._cmap = cmap
         if self._run or not self._traces:
@@ -621,6 +821,8 @@ class PlotModel(QObject):
                             'fingerprint': [0, 0], 'metadata': deepcopy(snapshot)})
         x_name, x_unit = split_label(self._x_label, self._resolved_axis, '')
         signal, y_unit = split_label(self._y_label, self._channel, 'A')
+        if self._overlay or self._two:
+            signal = self.channels()[0]
         view = self.captureView()
         view.update(normalization='raw', legend=True, direction='All', **{'pass': 'All rows'})
         view['ylim'] = view['ylim'][0]
@@ -629,7 +831,7 @@ class PlotModel(QObject):
                   'traces': [], 'warnings': [], 'view': view}
 
         def panel(channel):
-            data = {**result, 'signal': channel if self._run or self._four else signal, 'traces': [],
+            data = {**result, 'signal': channel if self._run or self._four or self._overlay or self._two else signal, 'traces': [],
                     'view': {**view, 'ylim': list(self.limits(channel)[1])}}
             for trace, x, y in self.traces(channel):
                 path_index = max(0, min(len(source_paths) - 1, trace.source_index))
@@ -653,16 +855,16 @@ class PlotModel(QObject):
         else:
             current = panel(self._channel)
             result['traces'] = current['traces']
-            if self._four:
+            if self._four or self._overlay or self._two:
                 result['panels'] = {channel: panel(channel) for channel in self.channels()}
-                result['view'].update(four_channels=True, channel_order=self.channels(),
+                result['view'].update(four_channels=self._four, channel_order=self.channels(),
                                       channel_views={c: {'xlim': list(self.limits(c)[0]),
                                                          'ylim': list(self.limits(c)[1]),
                                                          'manual_x': self._manual_x is not None,
                                                          'manual_y': [c in self._manual_y]} for c in self.channels()})
-                if not result['traces']:
+                if not result['traces'] and not (self._overlay or self._two):
                     result['traces'] = next((p['traces'] for p in result['panels'].values() if p['traces']), [])
-        if not result['traces'] and self._heatmap is None:
+        if not result['traces'] and not any(p['traces'] for p in result.get('panels', {}).values()) and self._heatmap is None:
             raise ValueError('No displayed samples to export')
         return result
 
@@ -675,9 +877,18 @@ class PlotModel(QObject):
             if not math.isfinite(low) or not math.isfinite(high) or low >= high:
                 raise ValueError('Axis limits must be finite and increasing')
             return low, high
-        if 'four_channels' in view:
-            self._four = bool(view['four_channels'])
+        if 'layout' in view or 'four_channels' in view:
+            layout = view.get('layout', 'four' if view.get('four_channels') else 'single')
+            self._four, self._overlay, self._two = layout == 'four', layout == 'overlay', layout == 'two'
+            if layout in ('single', 'overlay'):
+                self._one_plot_layout = layout
             self._channel_order = list(view['channel_order']) if self._four and view.get('channel_order') else None
+            pair = view.get('overlay_channels', view.get('channel_order', []))
+            if (self._overlay or self._two) and isinstance(pair, (list, tuple)) and len(pair) == 2 and pair[0] != pair[1]:
+                self._overlay_channels = list(pair)
+                self._channels = list(dict.fromkeys(self._channels + list(pair)))
+            if view.get('overlay_axis') in ('shared', 'dual'):
+                self._overlay_axis = view['overlay_axis']
         if 'signal' in view:
             self._channel = str(view['signal'])
         if 'xlim' in view or 'map_xlim' in view:
@@ -693,7 +904,7 @@ class PlotModel(QObject):
             for c, bound, manual in zip(self.channels(), ys, flags):
                 if manual and (value := limits(bound)) is not None:
                     self._manual_y[c] = value
-        if self._four and view.get('channel_views'):
+        if (self._four or self._overlay or self._two) and view.get('channel_views'):
             self._manual_y.clear()
             for c in self.channels():
                 panel = view['channel_views'].get(c, {})
@@ -713,9 +924,66 @@ def _number(value):
     return f'{value:.4g}'
 
 
+def axis_ticks(bounds, max_ticks=6, integer=False, preferred=None):
+    """Readable ticks inside the existing view; never change plot limits."""
+    low, high = sorted(float(value) for value in bounds)
+    if not all(math.isfinite(value) for value in (low, high)):
+        return []
+    if integer:
+        low = max(0., low)
+    if high < low:
+        return []
+    if high == low:
+        return [low] if not integer or low.is_integer() else []
+    span = high - low
+    if not math.isfinite(span):
+        return []
+    if preferred is not None:
+        values = sorted(set(float(value) for value in preferred if math.isfinite(float(value)) and low <= float(value) <= high
+                            and (not integer or float(value).is_integer())))
+        if 2 <= len(values) <= max_ticks and (values[-1] - values[0]) / span >= .8:
+            return values
+    ideal = span / max(1, min(20, int(max_ticks)) - 1)
+    if ideal == 0:
+        ideal = span
+    base = 10. ** math.floor(math.log10(ideal))
+    if base == 0:
+        base = ideal
+    candidates = [base * factor for factor in (1., 2., 2.5, 5., 10.)]
+    if integer:
+        candidates = [value for value in candidates if value >= 1 and value.is_integer()] or [1.]
+    step = next((value for value in candidates if value >= ideal), candidates[-1])
+
+    def values(spacing):
+        first = math.ceil(math.nextafter(low / spacing, -math.inf))
+        last = math.floor(math.nextafter(high / spacing, math.inf))
+        if last - first > 100:
+            return []
+        return [index * spacing for index in range(first, last + 1)]
+
+    ticks = values(step)
+    if len(ticks) < 2:
+        smaller = [value for value in candidates if value < step]
+        if smaller:
+            ticks = values(smaller[-1])
+    return ticks
+
+
+def format_tick(value, step):
+    """Keep neighboring ticks distinct without floating point noise or -0."""
+    value, step = float(value), abs(float(step))
+    if value == 0 or (step > 0 and abs(value) < step * 1e-9):
+        return '0'
+    if not math.isfinite(value) or not math.isfinite(step) or step == 0:
+        return _number(value)
+    precision = max(2, min(17, math.floor(math.log10(abs(value))) - math.floor(math.log10(step)) + 2))
+    return f'{value:.{precision}g}'
+
+
 class QuickPlot(QQuickPaintedItem):
     modelChanged = Signal()
     themeChanged = Signal()
+    axisTitlesChanged = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -726,6 +994,10 @@ class QuickPlot(QQuickPaintedItem):
         self._run_cache = {}
         self._image_cache = None
         self._dark = False
+        self._editable_x_axis = False
+        self._editable_y_axis = False
+        self.widthChanged.connect(self.axisTitlesChanged.emit)
+        self.heightChanged.connect(self.axisTitlesChanged.emit)
         self.setAntialiasing(True)
         self.setAcceptedMouseButtons(Qt.MouseButton.LeftButton | Qt.MouseButton.MiddleButton)
         self.setAcceptHoverEvents(True)
@@ -737,6 +1009,7 @@ class QuickPlot(QQuickPaintedItem):
             try:
                 self._model.frameReady.disconnect(self._request_update)
                 self._model.changed.disconnect(self._request_update)
+                self._model.changed.disconnect(self._axis_metadata)
             except RuntimeError:
                 # QML can clear its bindings after the owning backend has been
                 # deleted during window/engine teardown.
@@ -747,9 +1020,47 @@ class QuickPlot(QQuickPaintedItem):
         if model is not None:
             model.frameReady.connect(self._request_update)
             model.changed.connect(self._request_update)
+            model.changed.connect(self._axis_metadata)
         self._request_update()
         self.modelChanged.emit()
+        self.axisTitlesChanged.emit()
     model = Property(QObject, lambda s: s._model, _set_model, notify=modelChanged)
+
+    def _axis_metadata(self):
+        self.axisTitlesChanged.emit()
+
+    def _set_axis_editable(self, axis, value):
+        name = '_editable_x_axis' if axis == 'x' else '_editable_y_axis'
+        if getattr(self, name) == bool(value):
+            return
+        setattr(self, name, bool(value))
+        self.axisTitlesChanged.emit()
+        self.update()
+    editableXAxis = Property(bool, lambda s: s._editable_x_axis, lambda s, v: s._set_axis_editable('x', v), notify=axisTitlesChanged)
+    editableYAxis = Property(bool, lambda s: s._editable_y_axis, lambda s, v: s._set_axis_editable('y', v), notify=axisTitlesChanged)
+
+    @Property('QVariantList', notify=axisTitlesChanged)
+    def axisTitles(self):
+        model = self._model
+        if model is None or model.isHeatmap:
+            return []
+        rows = []
+        for index, (channel, rect) in enumerate(self.panels()):
+            if self._editable_x_axis:
+                rows.append(dict(role='x', channel=channel, panel=index, text=model.xLabel,
+                                 cx=rect.center().x(), cy=rect.bottom()+39, extent=rect.width(), rotation=0, color=''))
+            if self._editable_y_axis:
+                text = model.channelLabel(channel) if channel else 'Choose Y'
+                if model.layout == 'overlay' and model.overlayAxis == 'shared':
+                    text = 'Current (A)' if model._run or all(model.channelLabel(c).endswith('(A)') for c in model.channels()) else model.yLabel
+                color = 'first' if model.layout == 'overlay' and model.overlayAxis == 'dual' else ''
+                rows.append(dict(role='y', channel=channel, panel=index, text=text,
+                                 cx=rect.left()-63, cy=rect.center().y(), extent=rect.height(), rotation=-90, color=color))
+                if model.layout == 'overlay' and model.overlayAxis == 'dual':
+                    other = model.channels()[1]
+                    rows.append(dict(role='y2', channel=other, panel=index, text=model.channelLabel(other),
+                                     cx=rect.right()+82, cy=rect.center().y(), extent=rect.height(), rotation=-90, color='second'))
+        return rows
 
     def _set_dark(self, value):
         self._dark = bool(value)
@@ -758,7 +1069,13 @@ class QuickPlot(QQuickPaintedItem):
     darkMode = Property(bool, lambda s: s._dark, _set_dark, notify=themeChanged)
 
     def _curve_color(self, trace, index):
-        return QColor(trace.color or (COLORS_DARK if self._dark else COLORS)[index % len(COLORS)])
+        palette = COLORS_DARK if self._dark else COLORS
+        if trace.color.startswith('preview_curve_'):
+            return QColor(palette[int(trace.color.rsplit('_', 1)[1]) % len(palette)])
+        semantic = {'preview_start': palette[2], 'preview_end': palette[5],
+                    'preview_boundary': '#a8b7c9' if self._dark else '#526b8d',
+                    'preview_turn': '#ffce85' if self._dark else '#8a4a00'}
+        return QColor(semantic.get(trace.color, trace.color) or palette[index % len(COLORS)])
 
     def _request_update(self):
         # Path keys carry data revision, view and panel geometry. Retain paths
@@ -766,12 +1083,60 @@ class QuickPlot(QQuickPaintedItem):
         self._image_cache = None
         self.update()
 
+    def _paint_endpoint(self, painter, rect, trace, index, px, py, overlays):
+        painter.save()
+        painter.setClipRect(rect)
+        color = self._curve_color(trace, index)
+        painter.setPen(QPen(color, 2))
+        if trace.marker == 'start':
+            painter.setBrush(color)
+            painter.drawEllipse(QPointF(px, py), 4, 4)
+        elif trace.marker == 'end':
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRect(QRectF(px-7, py-7, 14, 14))
+        else:
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.translate(px, py)
+            painter.rotate(45)
+            painter.drawRect(QRectF(-5, -5, 10, 10))
+            painter.rotate(-45)
+            painter.translate(-px, -py)
+        text = trace.label
+        tw = painter.fontMetrics().horizontalAdvance(text) + 10
+        th = painter.fontMetrics().height() + 4
+        y = py-th-12 if trace.marker != 'end' else py+12
+        if py+th+12 > rect.bottom() and trace.marker in ('start', 'end'):
+            y = py-(2*th+16 if trace.marker == 'start' else th+4)
+        left = min(max(px+11, rect.left()+2), rect.right()-tw-2)
+        top = min(max(y, rect.top()+2), rect.bottom()-th-2)
+        box = QRectF(left, top, tw, th)
+        blocked = [obstacle for obstacle in overlays if obstacle.intersects(box)]
+        if blocked:
+            left = min(obstacle.left() for obstacle in blocked) - tw - 8
+            if left >= rect.left()+2:
+                box.moveLeft(left)
+            else:
+                box.moveTop(min(max(obstacle.bottom() for obstacle in blocked)+8, rect.bottom()-th-2))
+            target_x = box.right() if box.center().x() < px else box.left()
+            painter.setPen(QPen(color, 1))
+            painter.drawLine(QPointF(px, py), QPointF(target_x, box.center().y()))
+            painter.setPen(QPen(color, 2))
+        painter.fillRect(box, QColor('#1d2532' if self._dark else '#ffffff'))
+        painter.drawText(box.adjusted(4, 0, -2, 0), Qt.AlignmentFlag.AlignVCenter, text)
+        painter.restore()
+        overlays.append(box.adjusted(-3, -3, 3, 3))
+
     def panels(self):
         model = self._model
         channels = model.channels() if model else ['Ids_DC']
+        if model and model.layout == 'overlay':
+            channels = channels[:1]
         columns = 2 if len(channels) == 4 else 1
         rows = 2 if len(channels) == 4 else 1
-        right = 92 if model and model.isHeatmap else 20
+        if model and model.layout == 'two':
+            columns = 2 if self.width() >= 680 else 1
+            rows = 1 if columns == 2 else 2
+        right = 100 if model and model.layout == 'overlay' and model.overlayAxis == 'dual' else 92 if model and model.isHeatmap else 20
         w = max(1., (self.width() - 14) / columns)
         h = max(1., (self.height() - 12) / rows)
         return [(c, QRectF((i % columns) * w + 78, (i // columns) * h + 28,
@@ -804,27 +1169,54 @@ class QuickPlot(QQuickPaintedItem):
 
     def _paint_panel(self, painter, channel, rect):
         model = self._model
+        overlay = model.layout == 'overlay' and not model.isHeatmap
+        dual = overlay and model.overlayAxis == 'dual'
+        display_channels = model.channels() if overlay else [channel]
+        curve_rows = [(name, trace, x, y) for name in display_channels for trace, x, y in model.traces(name)]
+        endpoints = []
+        overlays = []
         xlim, ylim = model.limits(channel)
+        indexed = {'Point order', 'Step Index', 'Range endpoint'}
+        preferred = getattr(model, '_tick_values', {})
+        xticks = axis_ticks(xlim, max(2, min(9, int(rect.width() / 110) + 1)), model.xLabel in indexed, preferred.get('x'))
+        yticks = axis_ticks(ylim, max(2, min(7, int(rect.height() / 55) + 1)), model.channelLabel(channel) in indexed, preferred.get('y'))
+        xstep = xticks[1] - xticks[0] if len(xticks) > 1 else xlim[1] - xlim[0]
+        ystep = yticks[1] - yticks[0] if len(yticks) > 1 else ylim[1] - ylim[0]
         painter.setPen(QColor('#344154' if self._dark else '#dce3ed'))
-        for i in range(6):
-            x = rect.left() + rect.width() * i / 5
-            y = rect.bottom() - rect.height() * i / 5
+        for value in xticks:
+            x = rect.left() + (value - xlim[0]) / (xlim[1] - xlim[0]) * rect.width()
             painter.drawLine(QPointF(x, rect.top()), QPointF(x, rect.bottom()))
+        for value in yticks:
+            y = rect.bottom() - (value - ylim[0]) / (ylim[1] - ylim[0]) * rect.height()
             painter.drawLine(QPointF(rect.left(), y), QPointF(rect.right(), y))
         painter.setPen(QColor('#b8c7db' if self._dark else '#465469'))
         painter.drawRect(rect)
-        for i in range(6):
-            x = rect.left() + rect.width() * i / 5
-            y = rect.bottom() - rect.height() * i / 5
-            painter.drawText(QRectF(x - 42, rect.bottom() + 6, 84, 18), Qt.AlignmentFlag.AlignHCenter, _number(xlim[0] + (xlim[1] - xlim[0]) * i / 5))
-            painter.drawText(QRectF(rect.left() - 68, y - 9, 60, 18), Qt.AlignmentFlag.AlignRight, _number(ylim[0] + (ylim[1] - ylim[0]) * i / 5))
-        painter.drawText(QRectF(rect.left(), rect.bottom() + 28, rect.width(), 22), Qt.AlignmentFlag.AlignHCenter, model.xLabel)
+        for value in xticks:
+            x = rect.left() + (value - xlim[0]) / (xlim[1] - xlim[0]) * rect.width()
+            text = format_tick(value, xstep)
+            tw = max(84, painter.fontMetrics().horizontalAdvance(text) + 8)
+            painter.drawText(QRectF(x - tw / 2, rect.bottom() + 6, tw, 18), Qt.AlignmentFlag.AlignHCenter, text)
+        for value in yticks:
+            if dual:
+                painter.setPen(QColor((COLORS_DARK if self._dark else COLORS)[0]))
+            y = rect.bottom() - (value - ylim[0]) / (ylim[1] - ylim[0]) * rect.height()
+            painter.drawText(QRectF(rect.left() - 68, y - 9, 60, 18), Qt.AlignmentFlag.AlignRight, format_tick(value, ystep))
+        painter.setPen(QColor('#b8c7db' if self._dark else '#465469'))
+        if model.isHeatmap or not self._editable_x_axis:
+            painter.drawText(QRectF(rect.left(), rect.bottom() + 28, rect.width(), 22), Qt.AlignmentFlag.AlignHCenter, model.xLabel)
         painter.save()
+        if dual:
+            painter.setPen(QColor((COLORS_DARK if self._dark else COLORS)[0]))
         painter.translate(rect.left() - 63, rect.center().y())
         painter.rotate(-90)
-        painter.drawText(QRectF(-rect.height() / 2, -15, rect.height(), 22), Qt.AlignmentFlag.AlignHCenter,
-                         model.channelLabel(channel))
+        ylabel = model.channelLabel(channel)
+        if overlay and not dual:
+            ylabel = 'Current (A)' if model._run or all(model.channelLabel(c).endswith('(A)') for c in display_channels) else model.yLabel
+        if model.isHeatmap or not self._editable_y_axis:
+            painter.drawText(QRectF(-rect.height() / 2, -15, rect.height(), 22), Qt.AlignmentFlag.AlignHCenter,
+                             ylabel)
         painter.restore()
+        painter.setPen(QColor('#b8c7db' if self._dark else '#465469'))
         title = model.title or (channel if model.fourChannels and not model.isHeatmap else '')
         painter.drawText(QRectF(rect.left(), rect.top() - 24, rect.width(), 20), Qt.AlignmentFlag.AlignHCenter, title)
         painter.save()
@@ -832,8 +1224,10 @@ class QuickPlot(QQuickPaintedItem):
         if model.isHeatmap:
             painter.drawImage(rect, self._heatmap_image(rect, xlim, ylim))
         else:
-            for index, (trace, x, y) in enumerate(model.traces(channel)):
-                slot = (id(trace), channel)
+            for row_index, (source_channel, trace, x, y) in enumerate(curve_rows):
+                index = model.channels().index(source_channel) if overlay or model.layout == 'two' else row_index
+                ylim = model.limits(source_channel)[1]
+                slot = (id(trace), source_channel)
                 data_key = (x, y, trace.revision)
                 key = (data_key, tuple(xlim), tuple(ylim), rect.x(), rect.y(), rect.width(), rect.height())
                 cached = self._cache.get(slot)
@@ -862,41 +1256,71 @@ class QuickPlot(QQuickPaintedItem):
                 pen.setCosmetic(True)
                 painter.setPen(pen)
                 painter.setBrush(Qt.BrushStyle.NoBrush)
-                painter.drawPath(path)
+                if trace.style != 'scatter':
+                    painter.drawPath(path)
                 # Markers are rendered only on small traces, preserving legible
                 # individual measured points without million-point overdraw.
-                if x.size <= 200:
+                if trace.marker or trace.style in ('scatter', 'line+scatter') or (trace.style == 'auto' and x.size <= 200):
                     painter.setBrush(pen.color())
                     for xx, yy in zip(x.values, y.values):
                         if math.isfinite(xx) and math.isfinite(yy):
                             px = rect.left() + (xx - xlim[0]) / (xlim[1] - xlim[0]) * rect.width()
                             py = rect.bottom() - (yy - ylim[0]) / (ylim[1] - ylim[0]) * rect.height()
-                            painter.drawEllipse(QPointF(px, py), 2.1, 2.1)
+                            if trace.marker:
+                                if rect.contains(QPointF(px, py)):
+                                    endpoints.append((trace, index, px, py))
+                            else:
+                                painter.drawEllipse(QPointF(px, py), 2.1, 2.1)
         painter.restore()
+        if dual:
+            self._paint_right_axis(painter, rect, display_channels[1])
         if model.isHeatmap:
             self._paint_colorbar(painter, rect)
         else:
-            legends = [(trace, i) for i, (trace, _, _) in enumerate(model.traces(channel)) if trace.label]
+            legends = [(trace, model.channels().index(name) if overlay or model.layout == 'two' else i, name)
+                       for i, (name, trace, _, _) in enumerate(curve_rows) if (trace.label or overlay) and not trace.marker]
             if legends:
                 available = max(1, min(4, int(rect.height() / 36)))
                 shown = legends[:available]
-                for row, (trace, i) in enumerate(shown):
-                    text = model.legend_text(trace)
+                for row, (trace, i, name) in enumerate(shown):
+                    text = model.display_legend(trace, name)
                     tw = min(rect.width() - 16, painter.fontMetrics().horizontalAdvance(text) + 18)
                     box = QRectF(rect.right() - tw - 5, rect.top() + 5 + row * 18, tw, 18)
+                    overlays.append(box.adjusted(-3, -3, 3, 3))
                     painter.fillRect(box, QColor(29, 37, 50, 230) if self._dark else QColor(255, 255, 255, 230))
                     painter.setPen(self._curve_color(trace, i))
                     painter.drawText(box.adjusted(4, 0, -2, 0), Qt.AlignmentFlag.AlignVCenter,
                                      painter.fontMetrics().elidedText(text, Qt.TextElideMode.ElideRight, int(tw - 6)))
                 if len(legends) > available:
                     text = f'+{len(legends) - available} more · View for full legend'
-                    box = QRectF(rect.left() + 4, rect.top() + 5 + available * 18, rect.width() - 8, 18)
+                    tw = min(rect.width() - 8, painter.fontMetrics().horizontalAdvance(text) + 8)
+                    box = QRectF(rect.right() - tw - 4, rect.top() + 5 + available * 18, tw, 18)
+                    overlays.append(box.adjusted(-3, -3, 3, 3))
                     painter.fillRect(box, QColor('#1d2532' if self._dark else '#ffffff'))
                     painter.setPen(QColor('#b8c7db' if self._dark else '#465469'))
                     painter.drawText(box, Qt.AlignmentFlag.AlignRight, painter.fontMetrics().elidedText(text, Qt.TextElideMode.ElideRight, int(box.width())))
-            if not any(y.bounds is not None for _, _, y in model.traces(channel)):
+            if not any(y.bounds is not None for _, _, _, y in curve_rows):
                 painter.setPen(QColor('#b8c7db' if self._dark else '#465469'))
                 painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, 'No data for this channel')
+        # Endpoint annotations take priority over the legend and other curves.
+        for trace, index, px, py in endpoints:
+            self._paint_endpoint(painter, rect, trace, index, px, py, overlays)
+
+    def _paint_right_axis(self, painter, rect, channel):
+        model = self._model
+        ylim = model.limits(channel)[1]
+        ticks = axis_ticks(ylim, max(2, min(7, int(rect.height() / 55) + 1)))
+        step = ticks[1] - ticks[0] if len(ticks) > 1 else ylim[1] - ylim[0]
+        painter.save()
+        painter.setPen(QColor((COLORS_DARK if self._dark else COLORS)[1]))
+        for value in ticks:
+            y = rect.bottom() - (value - ylim[0]) / (ylim[1] - ylim[0]) * rect.height()
+            painter.drawText(QRectF(rect.right() + 6, y - 9, 64, 18), Qt.AlignmentFlag.AlignLeft, format_tick(value, step))
+        painter.translate(rect.right() + 82, rect.center().y())
+        painter.rotate(-90)
+        if not self._editable_y_axis:
+            painter.drawText(QRectF(-rect.height() / 2, -12, rect.height(), 22), Qt.AlignmentFlag.AlignHCenter, model.channelLabel(channel))
+        painter.restore()
 
     def _heatmap_image(self, rect, xlim, ylim):
         model, h = self._model, self._model._heatmap
@@ -947,6 +1371,7 @@ class QuickPlot(QQuickPaintedItem):
         channel, rect = hit
         self._pressed = {'channel': channel, 'rect': rect, 'position': event.position(),
                          'limits': self._model.limits(channel),
+                         'views': self._interaction_views(channel),
                          'mode': 'pan' if event.button() == Qt.MouseButton.MiddleButton else self._model.interactionMode}
         self._drag = event.position()
         event.accept()
@@ -957,10 +1382,10 @@ class QuickPlot(QQuickPaintedItem):
         self._drag = event.position()
         p = self._pressed
         if p['mode'] == 'pan':
-            xlim, ylim = p['limits']
-            a = self._data_point(p['position'], p['rect'], xlim, ylim)
-            b = self._data_point(event.position(), p['rect'], xlim, ylim)
-            self._model.set_limits(p['channel'], [v + a[0] - b[0] for v in xlim], [v + a[1] - b[1] for v in ylim])
+            for channel, (xlim, ylim) in p['views'].items():
+                a = self._data_point(p['position'], p['rect'], xlim, ylim)
+                b = self._data_point(event.position(), p['rect'], xlim, ylim)
+                self._model.set_limits(channel, [v + a[0] - b[0] for v in xlim], [v + a[1] - b[1] for v in ylim])
         self.update()
         event.accept()
 
@@ -970,10 +1395,11 @@ class QuickPlot(QQuickPaintedItem):
         p = self._pressed
         distance = (event.position() - p['position']).manhattanLength()
         if p['mode'] == 'zoom' and distance >= 8:
-            a = self._data_point(p['position'], p['rect'], *p['limits'])
-            b = self._data_point(event.position(), p['rect'], *p['limits'])
-            if abs(a[0] - b[0]) > 1e-30 and abs(a[1] - b[1]) > 1e-30:
-                self._model.set_limits(p['channel'], [a[0], b[0]], [a[1], b[1]])
+            for channel, bounds in p['views'].items():
+                a = self._data_point(p['position'], p['rect'], *bounds)
+                b = self._data_point(event.position(), p['rect'], *bounds)
+                if abs(a[0] - b[0]) > 1e-30 and abs(a[1] - b[1]) > 1e-30:
+                    self._model.set_limits(channel, [a[0], b[0]], [a[1], b[1]])
         elif distance < 5 and self._model.isHeatmap:
             x, y = self._data_point(event.position(), p['rect'], *p['limits'])
             h = self._model._heatmap
@@ -992,12 +1418,17 @@ class QuickPlot(QQuickPaintedItem):
             event.ignore()
             return
         channel, rect = hit
-        xlim, ylim = self._model.limits(channel)
-        x, y = self._data_point(event.position(), rect, xlim, ylim)
         delta = event.angleDelta().y() or event.pixelDelta().y()
         factor = math.exp(-max(-1200, min(1200, delta)) / 600.)
-        self._model.set_limits(channel, [x + (v - x) * factor for v in xlim], [y + (v - y) * factor for v in ylim])
+        for name, (xlim, ylim) in self._interaction_views(channel).items():
+            x, y = self._data_point(event.position(), rect, xlim, ylim)
+            self._model.set_limits(name, [x + (v - x) * factor for v in xlim], [y + (v - y) * factor for v in ylim])
         event.accept()
+
+    def _interaction_views(self, channel):
+        model = self._model
+        names = model.channels() if model.layout == 'overlay' and model.overlayAxis == 'dual' else [channel]
+        return {name: model.limits(name) for name in names}
 
 
 _registered = False

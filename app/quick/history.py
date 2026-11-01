@@ -23,6 +23,7 @@ from app.plot_export_labels import comparison_labels, conditions
 from app.settings import get_app_settings
 from app.ui.png_export_process import PngExportProcess
 from app.quick.plot import PlotModel
+from app.quick.history_choices import resolve_choices
 
 
 def _defaults(kind):
@@ -49,24 +50,42 @@ def _index_display(folder, header_cache, previous_rows=None):
     return records, warnings, rows, signature
 
 
-def _read_display(records, view, kind, cache):
+def _read_display(records, view, kind, cache, *, resolve_options=True):
     """Runs only on the serial worker, reusing the established parsers."""
-    if view.get("four_channels") and (kind != "map_2d" or view["map_y"] == "None (1D)"):
+    choices = resolve_choices(records, view, kind, cache) if resolve_options else None
+    if choices is not None:
+        view = choices["view"]
+    overlay = view.get("layout") in ("overlay", "two")
+    if (overlay or view.get("four_channels")) and (kind != "map_2d" or view["map_y"] == "None (1D)"):
         panels, panel_traces = {}, {}
-        for channel in view["channel_order"]:
+        order = view.get("overlay_channels", []) if overlay else view["channel_order"]
+        if overlay:
+            view = {**view, "signal": order[0], "channel_order": list(order), "four_channels": False}
+        for channel in order:
             panel_view = {**view, **view.get("channel_views", {}).get(channel, {}),
-                          "signal": channel, "four_channels": False, "auto_axes": False}
-            panels[channel], panel_traces[channel], _ = _read_display(records if channel else [], panel_view, kind, cache)
+                          "signal": channel, "four_channels": False, "layout": "single", "auto_axes": False}
+            panels[channel], panel_traces[channel], _ = _read_display(records if channel else [], panel_view, kind, cache, resolve_options=False)
             if not channel:
                 panels[channel]["warnings"] = ["No channel assigned to this panel"]
         selected = view["signal"] if view["signal"] in panels else next(iter(panels))
         snapshot = {**panels[selected], "signal": selected, "view": view, "panels": panels}
         snapshot["records"] = list({r["path"]: r for p in panels.values() for r in p["records"]}.values())
+        if overlay and not snapshot["x_unit"]:
+            snapshot["x_unit"] = next((p["x_unit"] for p in panels.values() if p["x_unit"]), "")
         snapshot["warnings"] = [f"{c}: {w}" for c, p in panels.items() for w in p["warnings"]]
+        if overlay:
+            snapshot["warnings"].extend(f"{channel}: No data for this channel" for channel, panel in panels.items()
+                                        if not panel["traces"] and not panel["warnings"])
+        if choices is not None:
+            snapshot["choices"] = choices
+            choice_warnings = choices["warnings"]
+            if overlay:
+                choice_warnings = [w for w in choice_warnings if not w.startswith(f"Signal {order[0]} is unavailable") ]
+            snapshot["warnings"].extend(choice_warnings)
         return snapshot, panel_traces[selected], None
     primary = None
     actual = dict(view)
-    if kind == "map_2d" and view["auto_axes"] and records:
+    if kind == "map_2d" and view["auto_axes"] and records and choices is None:
         record = next((r for r in records if str(r.path) == view["primary_path"]), records[0])
         axes = infer_map_axes(record)
         if axes is None:
@@ -117,6 +136,9 @@ def _read_display(records, view, kind, cache):
     if primary:
         for key in ("x", "y", "z"):
             snapshot["map"][key].setflags(write=False)
+    if choices is not None:
+        snapshot["choices"] = choices
+        snapshot["warnings"].extend(choices["warnings"])
     return snapshot, traces, primary
 
 
@@ -134,6 +156,36 @@ class _Worker(QtCore.QRunnable):
             self.signals.done.emit(self.lane, self.ticket, self.function(), "")
         except Exception as exc:
             self.signals.done.emit(self.lane, self.ticket, None, str(exc))
+
+
+class HistoryFileModel(QtCore.QAbstractListModel):
+    """Keep file delegates alive when only selection or metadata changes."""
+    RowRole = QtCore.Qt.ItemDataRole.UserRole + 1
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.rows = []
+
+    def rowCount(self, parent=QtCore.QModelIndex()):
+        return 0 if parent.isValid() else len(self.rows)
+
+    def roleNames(self):
+        return {self.RowRole: b"modelData"}
+
+    def data(self, index, role=QtCore.Qt.ItemDataRole.DisplayRole):
+        return self.rows[index.row()] if index.isValid() and 0 <= index.row() < len(self.rows) and role in (self.RowRole, QtCore.Qt.ItemDataRole.DisplayRole) else None
+
+    def replace(self, rows):
+        if [row["path"] for row in rows] == [row["path"] for row in self.rows]:
+            for i, (previous, current) in enumerate(zip(self.rows, rows)):
+                if previous != current:
+                    self.rows[i] = current
+                    index = self.index(i, 0)
+                    self.dataChanged.emit(index, index, [self.RowRole])
+        else:
+            self.beginResetModel()
+            self.rows = list(rows)
+            self.endResetModel()
 
 
 class HistoryBackend(QtCore.QObject):
@@ -155,6 +207,13 @@ class HistoryBackend(QtCore.QObject):
         self._settings = settings if settings is not None else get_app_settings()
         self._dark = self._settings.value("quick/theme/dark", False, type=bool)
         self._records, self._files = [], []
+        self._file_model = HistoryFileModel(self)
+        self._selection_cache = (None, [])
+        self._catalog_cache = (None, {})
+        self._ui_cache = {}
+        self.changed.connect(self._ui_cache.clear)
+        self.filesChanged.connect(self._ui_cache.clear)
+        self._available = dict(signals=[], axes=[], note="Select saved files to see available signals and coordinates.")
         self._file_rows = {}
         self._kind = "vds_sweep"
         self._views = {k: _defaults(k) for k in MEASUREMENT_TYPES}
@@ -175,6 +234,9 @@ class HistoryBackend(QtCore.QObject):
         self._cache = SnapshotCache(64 * 1024 * 1024)
         self._pool = QtCore.QThreadPool(self)
         self._pool.setMaxThreadCount(1)
+        self._plot_dispatch = QtCore.QTimer(self)
+        self._plot_dispatch.setSingleShot(True)
+        self._plot_dispatch.timeout.connect(self._dispatch_plot)
         self._signals = _WorkerSignals(self)
         self._signals.done.connect(self._finished, QtCore.Qt.ConnectionType.QueuedConnection)
         self._plot = PlotModel(self)
@@ -217,27 +279,32 @@ class HistoryBackend(QtCore.QObject):
     measurementTypes = QtCore.Property("QVariantList", lambda s: [{"key": k, "label": v} for k, v in MEASUREMENT_TYPES.items()], constant=True)
     currentType = QtCore.Property(str, lambda s: s._kind, notify=changed)
     files = QtCore.Property("QVariantList", lambda s: s._files, notify=filesChanged)
+    fileModel = QtCore.Property(QtCore.QObject, lambda s: s._file_model, constant=True)
     state = QtCore.Property("QVariantMap", lambda s: dict(s._views[s._kind]), notify=changed)
     search = QtCore.Property(str, lambda s: s._search, notify=searchChanged)
     date = QtCore.Property(str, lambda s: s._date, notify=changed)
-    dates = QtCore.Property("QVariantList", lambda s: ["All dates"] + sorted({r.date for r in s._records if r.measurement == s._kind}, reverse=True), notify=changed)
+    dates = QtCore.Property("QVariantList", lambda s: ["All dates"] + s._catalog()["dates"][s._kind], notify=changed)
     scrollPosition = QtCore.Property(float, lambda s: s._scroll, notify=changed)
     expanded = QtCore.Property(bool, lambda s: s._expanded, notify=changed)
     status = QtCore.Property(str, lambda s: s.statusDetails, notify=changed)
     statusDetails = QtCore.Property(str, lambda s: "\n".join(dict.fromkeys([*s._index_warnings, *s._status.splitlines()])), notify=changed)
     selectedCount = QtCore.Property(int, lambda s: len(s._selected()), notify=changed)
-    typeFileCount = QtCore.Property(int, lambda s: sum(r.measurement == s._kind for r in s._records), notify=changed)
+    typeFileCount = QtCore.Property(int, lambda s: s._catalog()["counts"][s._kind], notify=changed)
     traceCount = QtCore.Property(int, lambda s: sum(len(p["traces"]) for p in s._snapshot["panels"].values())
                                 if s._snapshot and s._snapshot.get("panels") else
                                 len(s._snapshot.get("traces", [])) if s._snapshot else 0, notify=changed)
-    emptyState = QtCore.Property("QVariantMap", lambda s: s._empty_state(), notify=changed)
-    selectionSummary = QtCore.Property(str, lambda s: s._selection_summary(), notify=changed)
+    emptyState = QtCore.Property("QVariantMap", lambda s: s._cached_ui("empty", s._empty_state), notify=changed)
+    selectionSummary = QtCore.Property(str, lambda s: s._cached_ui("selection", s._selection_summary), notify=changed)
     busy = QtCore.Property(bool, lambda s: s._index_visible or s._plot_active or s._plot_pending, notify=busyChanged)
     exportReady = QtCore.Property(bool, lambda s: bool(s._snapshot and s._snapshot["records"]) and not s.busy and not s._export_job, notify=changed)
     plotModel = QtCore.Property(QtCore.QObject, lambda s: s._plot, constant=True)
     cutPlotModel = QtCore.Property(QtCore.QObject, lambda s: s._cut, constant=True)
-    xChoices = QtCore.Property("QVariantList", lambda s: list(X_COLUMNS), constant=True)
-    signalChoices = QtCore.Property("QVariantList", lambda s: list(SIGNAL_COLUMNS), constant=True)
+    xChoices = QtCore.Property("QVariantList", lambda s: [a for a in s._available["axes"]
+        if s._kind != "map_2d" or a != s._views[s._kind]["map_y"]], notify=changed)
+    yChoices = QtCore.Property("QVariantList", lambda s: ["None (1D)"] + [a for a in s._available["axes"]
+        if a != "Step Index" and a != s._views[s._kind]["x"]], notify=changed)
+    signalChoices = QtCore.Property("QVariantList", lambda s: list(s._available["signals"]), notify=changed)
+    choiceNote = QtCore.Property(str, lambda s: s._available.get("note", ""), notify=changed)
     mapSources = QtCore.Property("QVariantList", lambda s: [{"path": str(r.path), "label": r.path.name} for r in s._selected()], notify=changed)
     hasMap = QtCore.Property(bool, lambda s: bool(s._snapshot and s._snapshot.get("map")), notify=changed)
     cutReady = QtCore.Property(bool, lambda s: s.exportReady and bool(s._snapshot.get("traces")), notify=changed)
@@ -439,7 +506,28 @@ class HistoryBackend(QtCore.QObject):
             self._settings.setValue(self._key(), encoded)
 
     def _selected(self):
-        return [r for r in self._records if r.measurement == self._kind and str(r.path) in self._checked[self._kind]]
+        key = (id(self._records), self._kind, frozenset(self._checked[self._kind]))
+        if key != self._selection_cache[0]:
+            self._selection_cache = (key, [r for r in self._records if r.measurement == self._kind and str(r.path) in self._checked[self._kind]])
+        return self._selection_cache[1]
+
+    def _cached_ui(self, key, function):
+        if key not in self._ui_cache:
+            self._ui_cache[key] = function()
+        return self._ui_cache[key]
+
+    def _catalog(self):
+        key = (id(self._records), len(self._records))
+        if self._catalog_cache[0] != key:
+            counts = {kind: 0 for kind in MEASUREMENT_TYPES}
+            dates = {kind: set() for kind in MEASUREMENT_TYPES}
+            paths = set()
+            for record in self._records:
+                counts[record.measurement] += 1
+                dates[record.measurement].add(record.date)
+                paths.add((str(record.path), record.measurement))
+            self._catalog_cache = (key, dict(counts=counts, dates={kind: sorted(values, reverse=True) for kind, values in dates.items()}, paths=paths))
+        return self._catalog_cache[1]
 
     def _filter(self):
         needle = self._search.casefold().strip()
@@ -457,6 +545,7 @@ class HistoryBackend(QtCore.QObject):
                 files.append({**row, "checked": path in self._checked[self._kind]})
         if files != self._files:
             self._files = files
+            self._file_model.replace(files)
             self.filesChanged.emit()
 
     @staticmethod
@@ -486,15 +575,17 @@ class HistoryBackend(QtCore.QObject):
         if kind not in MEASUREMENT_TYPES or kind == self._kind:
             return
         self._kind, self._scroll = kind, 0.0
+        self._available = dict(signals=[], axes=[], note="Checking the selected files…")
         self._search_timer.stop()
         self._filter()
         self._schedule_plot()
         self.save_state()
-        self.changed.emit()
 
     @QtCore.Slot(str, bool)
     def setChecked(self, path, checked):
-        if not any(str(r.path) == path and r.measurement == self._kind for r in self._records):
+        if (path, self._kind) not in self._catalog()["paths"]:
+            return
+        if bool(checked) == (path in self._checked[self._kind]):
             return
         self._search_timer.stop()
         if checked:
@@ -504,10 +595,10 @@ class HistoryBackend(QtCore.QObject):
         self._filter()
         self._schedule_plot()
         self.save_state()
-        self.changed.emit()
 
     @QtCore.Slot(str, "QVariant")
     def setOption(self, key, value):
+        scheduled = False
         if key in ("search", "date"):
             self._search_timer.stop()
             if key == "search":
@@ -520,6 +611,12 @@ class HistoryBackend(QtCore.QObject):
         elif key == "expanded":
             self._expanded = bool(value)
         elif key in self._views[self._kind]:
+            if key in {"signal", "x", "map_y"} and self._selected() and not self.busy:
+                allowed = self.signalChoices if key == "signal" else self.xChoices if key == "x" else self.yChoices
+                if value not in allowed:
+                    self._status = f"{value} is not available for the current selected data and filters"
+                    self.changed.emit()
+                    return
             if key == "normalization" and value not in ("raw", "max_abs", "min_max"):
                 return
             if key == "direction" and value not in ("All", "forward", "backward", "unknown"):
@@ -533,23 +630,27 @@ class HistoryBackend(QtCore.QObject):
                     self._status = str(exc)
                     self.changed.emit()
                     return
-            if self._views[self._kind][key] == value and not (key == "signal" and self._views[self._kind].get("four_channels")):
+            if self._views[self._kind][key] == value and not (key == "signal" and (self._views[self._kind].get("four_channels") or self._views[self._kind].get("layout") in ("overlay", "two"))):
                 return
             self._views[self._kind][key] = value
             if key == "signal":
                 # The signal selector returns a restored overview to the
                 # requested single channel; the saved overview is explicit.
                 self._views[self._kind]["four_channels"] = False
+                self._views[self._kind]["layout"] = "single"
+                self._plot.layout = "single"
                 self._plot.fourChannels = False
                 self._views[self._kind]["clim_auto"] = True
                 self._plot.autoColorLimits()
             if key in ("x", "map_y"):
                 self._views[self._kind]["auto_axes"] = False
             self._schedule_plot()
+            scheduled = True
         else:
             return
         self.save_state()
-        self.changed.emit()
+        if not scheduled:
+            self.changed.emit()
 
     def _set_search(self, text):
         if text != self._search:
@@ -590,6 +691,8 @@ class HistoryBackend(QtCore.QObject):
         self._generation += 1
         self._revision += 1
         self._records, self._files, self._snapshot = [], [], None
+        self._file_model.replace([])
+        self._available = dict(signals=[], axes=[], note="Select saved files to see available signals and coordinates.")
         self._file_rows = {}
         self._index_warnings = []
         self._range_errors = {axis: "" for axis in ("x", "y", "color")}
@@ -639,9 +742,15 @@ class HistoryBackend(QtCore.QObject):
         self._revision += 1
         self._plot_pending = True
         if not self._plot_active:
-            self._start_plot()
+            self._plot_dispatch.start(0)
         self.busyChanged.emit()
         self.changed.emit()
+
+    def _dispatch_plot(self):
+        # Publish selection/busy changes before a Python CSV worker can
+        # compete for the GIL while QML is evaluating those notifications.
+        if not self._closed and not self._plot_active and self._plot_pending:
+            self._start_plot()
 
     def _start_plot(self):
         self._plot_pending = False
@@ -695,19 +804,26 @@ class HistoryBackend(QtCore.QObject):
             if ticket == (self._generation, self._revision) and not self._closed:
                 if error:
                     self._snapshot = None
+                    self._available = dict(signals=[], axes=[], note="Cannot read the selected data. Open Details for the reason.")
                     self._plot.setTraces([])
                     self._cut.setTraces([])
                     self._status = error
                 else:
                     self._publish(*result)
             if self._plot_pending and not self._closed:
-                self._start_plot()
+                self._plot_dispatch.start(0)
         self.busyChanged.emit()
         self.changed.emit()
 
     def _publish(self, snapshot, traces, primary):
         self._publishing = True
         self._snapshot = snapshot
+        choices = snapshot.get("choices")
+        if choices is not None:
+            self._available = choices
+            for key in ("signal", "x", "map_y", "primary_path", "fixed_axis", "fixed_value"):
+                if key in snapshot["view"]:
+                    self._views[self._kind][key] = snapshot["view"][key]
         # A pan can arrive while the worker is reading. Keep the latest GUI
         # viewport, while accepting axes/cut coordinates inferred by the worker.
         if primary or snapshot["view"].get("auto_axes") and snapshot["kind"] == "map_2d":
@@ -826,6 +942,13 @@ class HistoryBackend(QtCore.QObject):
             if payload.get("schema") != "transport_plot_view_v1":
                 raise ValueError("Unsupported plot-view format")
             view, sources = payload["view"], payload["sources"]
+            if view.get("layout") in ("overlay", "two"):
+                order = view.get("overlay_channels")
+                if (not isinstance(order, list) or len(order) != 2 or len(set(order)) != 2
+                        or any(c not in SIGNAL_COLUMNS for c in order)
+                        or (view.get("layout") == "overlay" and view.get("overlay_axis") not in ("shared", "dual"))):
+                    raise ValueError("Two-channel view requires two supported channels and a valid axis mode")
+                view.update(signal=order[0], channel_order=list(order), four_channels=False, auto_axes=False)
             if view.get("four_channels") or view.get("signal") == "4-Channel Compare":
                 order = view.get("channel_order")
                 if (not isinstance(order, list) or len(order) != 4 or len(set(order)) != 4
@@ -931,6 +1054,7 @@ class HistoryBackend(QtCore.QObject):
         self._timer.stop()
         self._search_timer.stop()
         self._view_save_timer.stop()
+        self._plot_dispatch.stop()
         self.save_state()
         self._generation += 1
         self._pool.clear()

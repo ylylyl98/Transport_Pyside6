@@ -1,18 +1,25 @@
-# History and exports
+# Analysis and exports
 
 These instructions use the default Qt Quick frontend. Widgets-specific export behavior is described separately below. For acquisition and safety, see the [Measurement guide](measurement-guide.md); for launch options, see [Setup and launch](user-setup.md).
 
-## Open and browse history
+## Open Analysis and browse saved measurements
 
-Select **History** to open the independent **Transport — Measurement History (Qt Quick)** window. It defaults to the current operator/device directory, searches its date/type subfolders, and shows **All dates**, newest first. Vds Sweep, Gate Scan, 2D Map, B-field Gate Scan, B-field Sweep and Photocurrent each have their own history page; selections do not mix across types. Use **Browse folder…** for another directory, or **Follow current device** to resume following Sample & files. Date filters and search remain available.
+Select **Analysis** to open the independent **Transport — Analysis** window for saved measurements. The main button shows **Opening…** until the viewer reports ready; failures show a retry action and explanation. Initial file indexing continues in the Analysis window with a loading indicator. It defaults to the current operator/device directory, searches its date/type subfolders, and shows **All dates**, newest first. Vds Sweep, Gate Scan, 2D Map, B-field Gate Scan, B-field Sweep and Photocurrent each have their own history page; selections do not mix across types. Use **Browse folder…** for another directory, or **Follow current device** to resume following Sample & files. Date filters and search remain available.
 
 The full-height file list is on the left, with time, filename, conditions and status shown on separate lines. Drag the divider to resize it, or click **Expand list** to use the whole content area. **Compare files** restores the split layout without losing checks or plots. Check files to overlay curves. Choose X, signal and direction; forward/unknown traces are solid and backward traces are dashed. Condition blocks and snake rows stay separate, source order is preserved, and units must match. Selections and display choices are remembered per folder and measurement type. The plot toolbar supports zoom and pan; use **Export PNG + CSV…** above the plots to save the displayed view.
 
 Long filenames wrap at underscores, with character wrapping for oversized components, and row heights follow the list width. When an existing CSV grows, background refresh updates its data without resetting the list's current row or scroll position. Unchanged refreshes do not rewrite saved view preferences. Use **Reload analysis** to apply analysis UI changes while Transport remains open.
 
+**Restore view…** also opens a Live data overlay or **2 plots** export, restoring its two signals,
+shared or independent Y axes, separate plots, and saved ranges. Missing channels remain empty with a
+warning. Exporting again retains both full-resolution channels; selecting a Signal
+returns to the normal single-signal comparison.
+
+Signal and coordinate selectors are populated from finite, overlapping values in the checked files, including the current direction and pass filters. Missing columns, all-NaN data and undefined Drag/Drive ratios are omitted. Curve and 1D-map comparisons use available data across the checked files; a 2D heatmap uses its primary map source. If a saved signal or coordinate is unavailable, the viewer selects a compatible alternative and reports the change. With no usable data the selectors are disabled and explain what selection or filter needs attention. File inspection runs in the background, and checking a file updates its row without rebuilding the entire list.
+
 Background checks wait four seconds after the previous scan finishes. Unchanged checks keep the current view and export controls available; changes to unselected files update the file list without rebuilding selected curves. Search text appears immediately and filters the list after a 150 ms typing pause. **Refresh** / **F5** still requests an immediate scan.
 
-Closing the history window leaves measurements running. Select **History** again to reopen it. From the project root, the default Quick viewer can also run independently:
+Closing the Analysis window leaves measurements running. Select **Analysis** again to reopen it or focus the existing window. From the project root, the default Quick viewer can also run independently:
 
 ```powershell
 .\.venv\Scripts\python.exe transport_UI.py --history --folder "D:\path\to\measurements"

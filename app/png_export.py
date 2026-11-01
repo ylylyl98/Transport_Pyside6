@@ -136,8 +136,109 @@ def _draw_analysis_traces(fig, snapshot, rect, automatic, differences, pair):
     return ax
 
 
+def build_overlay_figure(snapshot):
+    """Draw two full-resolution channels on a common X axis."""
+    view = snapshot["view"]
+    order = view["overlay_channels"]
+    panels = [snapshot["panels"][name] for name in order]
+    dual = view.get("overlay_axis") == "dual"
+    fig = Figure(figsize=(8, 6), dpi=DPI, facecolor="white")
+    FigureCanvasAgg(fig)
+    title, detail, _ = captions({**snapshot, 'signal': ' + '.join(order)})
+    heading = _fit_header(fig, title, .145, .985, .84 if dual else .96)
+    fig.canvas.draw()
+    detail_top = .985 - heading.get_window_extent(fig.canvas.get_renderer()).height / fig.bbox.height - .012
+    subheading = _fit_header(fig, detail, .145, detail_top, .84 if dual else .96, ".30")
+    fig.canvas.draw()
+    top = min(.89, detail_top - subheading.get_window_extent(fig.canvas.get_renderer()).height / fig.bbox.height - .025)
+    ax = fig.add_axes((.145, .13, .70 if dual else .815, max(.35, top - .13)))
+    axes = [ax, ax.twinx() if dual else ax]
+    combined = {"y_unit": next((p.get("y_unit", "") for p in panels if p.get("y_unit")), ""),
+                "traces": [trace for panel in panels for trace in panel["traces"]]}
+    shared_factor, shared_unit = _current_scale(combined)
+    handles = []
+    for index, (name, panel, axis) in enumerate(zip(order, panels, axes)):
+        factor, unit = _current_scale(panel) if dual else (shared_factor, shared_unit)
+        labels = comparison_labels(panel["records"], panel["traces"], (snapshot["x_name"],))
+        for trace, label in zip(panel["traces"], labels):
+            line, = axis.plot(trace["x"], np.asarray(trace["y"]) / factor,
+                              color=("#2978d5", "#cf650b")[index], lw=1.45,
+                              linestyle="--" if trace.get("direction") == "backward" else "-",
+                              label=f"{name} · {label}")
+            handles.append(line)
+        panel_view = view.get("channel_views", {}).get(name, panel.get("view", {}))
+        if panel_view.get("ylim") and (dual or index == 0):
+            axis.set_ylim(np.asarray(panel_view["ylim"]) / factor)
+        if dual:
+            axis.set_ylabel(comparison_y_label(name, unit, view.get("normalization", "raw")), fontsize=18,
+                            color=("#2978d5", "#cf650b")[index])
+            axis.tick_params(axis='y', colors=("#2978d5", "#cf650b")[index])
+    ax.set_xlabel(_label(snapshot["x_name"], snapshot.get("x_unit", "")), fontsize=22)
+    if not dual:
+        ax.set_ylabel(comparison_y_label(" / ".join(order), shared_unit, view.get("normalization", "raw")), fontsize=18)
+    _style(ax)
+    if dual:
+        axes[1].tick_params(direction="in", labelsize=20)
+        axes[1].yaxis.set_major_locator(MaxNLocator(5))
+    first_view = view.get("channel_views", {}).get(order[0], panels[0].get("view", {}))
+    limits = first_view.get("xlim") or view.get("xlim")
+    if limits:
+        ax.set_xlim(limits)
+    ax.set_xscale(view.get("xscale", "linear"))
+    for axis in dict.fromkeys(axes):
+        axis.set_yscale(view.get("yscale", "linear"))
+    if view.get("legend", True) and handles:
+        ax.legend(handles, [line.get_label() for line in handles], loc="best", frameon=False, fontsize=10)
+    return fig
+
+
+def build_two_figure(snapshot):
+    """Render two channels as separate plots with common X and independent Y."""
+    fig = Figure(figsize=(8, 6), dpi=DPI, facecolor="white")
+    FigureCanvasAgg(fig)
+    title, detail, differences = captions({**snapshot, 'signal': ' + '.join(snapshot['view']['overlay_channels'])})
+    heading = _fit_header(fig, title, .145, .985, .96)
+    fig.canvas.draw()
+    detail_top = .985 - heading.get_window_extent(fig.canvas.get_renderer()).height / fig.bbox.height - .012
+    subheading = _fit_header(fig, detail, .145, detail_top, .96, ".30")
+    fig.canvas.draw()
+    top = min(.89, detail_top - subheading.get_window_extent(fig.canvas.get_renderer()).height / fig.bbox.height - .025)
+    gap = .105
+    height = max(.16, (top - .13 - gap) / 2)
+    axes = []
+    for index, channel in enumerate(snapshot["view"]["overlay_channels"]):
+        panel = snapshot["panels"][channel]
+        panel_view = {**panel["view"], **snapshot["view"].get("channel_views", {}).get(channel, {})}
+        panel = {**panel, "view": panel_view}
+        bottom = .13 + (1 - index) * (height + gap)
+        axis = _draw_analysis_traces(fig, panel, (.145, bottom, .815, height), False, differences, True)
+        axis.set_title(channel, fontsize=14, pad=5)
+        axis.set_ylabel(axis.get_ylabel(), fontsize=18)
+        axis.tick_params(labelsize=16)
+        color = ('#2978d5', '#cf650b')[index]
+        for line in axis.lines:
+            line.set_color(color)
+            if len(line.get_xdata()) > 200:
+                line.set_marker('None')
+        if axis.get_legend():
+            for line in axis.get_legend().get_lines():
+                line.set_color(color)
+        if index == 0:
+            axis.set_xlabel('')
+            axis.tick_params(labelbottom=False)
+        if axes:
+            axis.sharex(axes[0])
+        axes.append(axis)
+    fig.canvas.draw()
+    return fig
+
+
 def build_analysis_figure(snapshot, cut_only=False, automatic=False, *, map_only=False):
     if snapshot.get('panels') and not cut_only and not map_only:
+        if snapshot['view'].get('layout') == 'overlay':
+            return build_overlay_figure(snapshot)
+        if snapshot['view'].get('layout') == 'two':
+            return build_two_figure(snapshot)
         return build_quick_overview(snapshot)
     from app.map_view import resolved_map_view
     snapshot = resolved_map_view(snapshot)
@@ -331,7 +432,8 @@ def export_analysis(snapshot, output=None, cut_only=False, *, heatmap_only=False
     snapshot = resolved_map_view(snapshot)
     if heatmap_only and (cut_only or not snapshot.get("map")):
         raise ValueError("Heatmap-only export requires a displayed map and cannot be combined with cut-only export")
-    if not snapshot.get("traces") and (cut_only or not snapshot.get("map")):
+    paired_samples = any(panel.get("traces") for panel in snapshot.get("panels", {}).values())
+    if not snapshot.get("traces") and not paired_samples and (cut_only or not snapshot.get("map")):
         raise ValueError("No displayed curves to export")
     if output is None:
         from app.analysis_export import export_automatic
@@ -368,7 +470,7 @@ def export_analysis(snapshot, output=None, cut_only=False, *, heatmap_only=False
         view = {**snapshot["view"], "signal": snapshot["signal"], "x": snapshot.get("map", {}).get("x_name", snapshot["x_name"]),
                 "kind": snapshot["kind"], "map_y": snapshot.get("map", {}).get("y_name", "None (1D)"),
                 "cut_only": bool(cut_only), "heatmap_only": bool(heatmap_only)}
-        image_size = (2400, 1800) if snapshot.get('panels') else (1200, 900)
+        image_size = (2400, 1800) if snapshot.get('panels') and snapshot['view'].get('layout') not in ('overlay', 'two') else (1200, 900)
         payload = {"schema": "transport_plot_view_v1", "sources": snapshot["records"], "view": view,
                    "image": {"width": image_size[0], "height": image_size[1], "dpi": DPI},
                    "images": [{"path": str(target), "kind": kind} for target, kind in zip(outputs, kinds)],

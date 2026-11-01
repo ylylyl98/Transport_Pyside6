@@ -49,6 +49,11 @@ class QuickFormTests(unittest.TestCase):
                 yield from descendants(child)
         return next(i for i in descendants(self.window.contentItem()) if i.objectName() == name)
 
+    def recipe_cell(self, key, row, column):
+        model = self.service.rowModel(key)
+        uid = model.data(model.index(row, 0), model.UidRole)
+        return self.find(f"recipeCell_{key}_{uid}_{column}")
+
     def tearDown(self):
         if self.engine.rootObjects():
             self.engine.rootObjects()[0].hide()
@@ -69,6 +74,7 @@ class QuickFormTests(unittest.TestCase):
             self.manager.status_changed.emit("g1", "connected", "telemetry")
             self.app.processEvents()
         self.assertEqual(self.find("field_vds_stop"), original)
+
         self.assertEqual(original.property("text"), "0.12345")
         self.assertTrue(original.hasActiveFocus())
         self.assertNotEqual(self.service.collect_params().vds_stop, .12345)
@@ -76,6 +82,29 @@ class QuickFormTests(unittest.TestCase):
         self.app.processEvents()
         self.assertEqual(self.service.collect_params().vds_stop, .12345)
         self.assertEqual(self.find("field_vds_stop"), original)
+
+    def test_derived_explanation_and_preview_update_without_replacing_inputs(self):
+        self.service.mode = 1
+        self.service.setValue("mode", "Derived")
+        self.load(width=420)
+        field = self.find("field_derived_start")
+        help_label = self.find("measurementHelp_Derived trajectory")
+        preview = self.find("measurementVoltagePreview_Derived trajectory")
+        self.assertIn("Doping = Vtg + r*Vbg", help_label.property("text"))
+        self.assertTrue(help_label.isVisible())
+        field.forceActiveFocus()
+        field.setProperty("text", "-2")
+        QtTest.QTest.keyClick(self.window, QtCore.Qt.Key.Key_Return)
+        self.app.processEvents()
+        self.assertIn("Requested start: Vtg = -1 V; Vbg = -1 V", preview.property("text"))
+        self.assertEqual(self.find("field_derived_start"), field)
+        self.service.setValue("derived_ratio_target", "Vtg")
+        self.app.processEvents()
+        self.assertIn("Doping = r*Vtg + Vbg", help_label.property("text"))
+        self.assertEqual(self.find("field_derived_start"), field)
+        self.service.setValue("derived_ratio", 0.)
+        self.app.processEvents()
+        self.assertIn("non-zero", preview.property("text"))
 
     def test_rejected_text_stays_visible_and_blocks_start_until_correction(self):
         self.load()
@@ -98,26 +127,26 @@ class QuickFormTests(unittest.TestCase):
         self.assertEqual(self.service.collect_params().n_sample, defaults(0)["n_sample"])
         self.assertTrue(self.service.canStart)
 
-    def test_selected_recipe_keeps_editor_and_routes_commit_to_selected_row(self):
+    def test_inline_recipe_routes_by_uid_and_preserves_active_draft(self):
         self.service.mode = 4
         self.service.addRow("conditions")
         self.service.duplicateRow("conditions", 0)
-        self.service.setRowValue("conditions", 1, "raw_vtg_stop", 3.)
         self.service.selectRow("conditions", 0)
-        self.load()
-        original = self.find("field_raw_vtg_stop")
-        self.service.selectRow("conditions", 1)
-        self.app.processEvents()
-        self.assertEqual(self.find("field_raw_vtg_stop"), original)
-        self.assertEqual(original.property("text"), "3")
+        self.load(width=520)
+        QtTest.QTest.qWait(40)
+        original = self.recipe_cell("conditions", 0, "raw_vtg_start")
         original.forceActiveFocus()
         original.setProperty("text", "4.5")
-        QtTest.QTest.keyClick(self.window, QtCore.Qt.Key.Key_Return)
+        self.service.setRowValue("conditions", 1, "raw_vtg_start", 3.)
+        self.app.processEvents()
+        self.assertIs(self.recipe_cell("conditions", 0, "raw_vtg_start"), original)
+        self.assertEqual(original.property("text"), "4.5")
+        self.assertTrue(original.hasActiveFocus())
+        QtTest.QTest.keyClick(self.window, QtCore.Qt.Key_Return)
         self.app.processEvents()
         rows = self.service._values[4]["conditions"]
-        self.assertEqual(rows[1]["raw_vtg_stop"], 4.5)
-        self.assertNotEqual(rows[0]["raw_vtg_stop"], 4.5)
-        self.assertEqual(self.find("field_raw_vtg_stop"), original)
+        self.assertEqual(rows[0]["raw_vtg_start"], 4.5)
+        self.assertEqual(rows[1]["raw_vtg_start"], 3.)
 
     def test_collapsed_review_does_not_build_trajectories_on_form_edits(self):
         self.service.mode = 2
@@ -145,20 +174,20 @@ class QuickFormTests(unittest.TestCase):
         QtTest.QTest.keyClick(self.window, QtCore.Qt.Key.Key_Space)
         self.app.processEvents()
         self.assertEqual(len(self.service._values[3]["bias_conditions"]), 2)
-        self.assertEqual(self.find("measurementEditing_bias_conditions").property("text"), "Editing condition 2 of 2")
+        self.assertEqual(self.service.rowModel("bias_conditions").selectedIndex, 1)
 
         duplicate = self.find("measurementDuplicate_bias_conditions")
         duplicate.forceActiveFocus()
         QtTest.QTest.keyClick(self.window, QtCore.Qt.Key.Key_Space)
         self.app.processEvents()
         self.assertEqual(len(self.service._values[3]["bias_conditions"]), 3)
-        self.assertEqual(self.find("measurementEditing_bias_conditions").property("text"), "Editing condition 3 of 3")
+        self.assertEqual(self.service.rowModel("bias_conditions").selectedIndex, 2)
         remove = self.find("measurementRemove_bias_conditions")
         remove.forceActiveFocus()
         QtTest.QTest.keyClick(self.window, QtCore.Qt.Key.Key_Space)
         self.app.processEvents()
         self.assertEqual(len(self.service._values[3]["bias_conditions"]), 2)
-        self.assertEqual(self.find("measurementEditing_bias_conditions").property("text"), "Editing condition 2 of 2")
+        self.assertEqual(self.service.rowModel("bias_conditions").selectedIndex, 1)
 
         for _ in range(12):
             self.service.addRow("bias_conditions")
@@ -208,25 +237,54 @@ class QuickFormTests(unittest.TestCase):
             self.app.processEvents()
             self.assertEqual(self.service.collect_params().sweep_both_ways, not original)
 
-    def test_recipe_partition_retains_native_tab_order_at_panel_width(self):
+    def test_recipe_inline_grid_retains_tab_order_at_panel_width(self):
         self.service.mode = 3
         self.load(width=366)
         QtTest.QTest.qWait(30)
-        actions = self.find("measurementRemove_bias_conditions")
-        editing = self.find("measurementEditing_bias_conditions")
-        field = self.find("field_vtg")
-        self.assertGreater(editing.mapToScene(QtCore.QPointF()).y(),
-                           actions.mapToScene(QtCore.QPointF(0, actions.height())).y())
+        enabled = self.recipe_cell("bias_conditions", 0, "enabled")
+        field = self.recipe_cell("bias_conditions", 0, "vtg")
+        self.assertTrue(enabled.isVisible())
+        self.assertTrue(field.isVisible())
         self.assertGreaterEqual(field.mapToScene(QtCore.QPointF()).x(), 8)
         self.assertLessEqual(field.mapToScene(QtCore.QPointF(field.width(), 0)).x(), 366)
-        actions.forceActiveFocus()
-        QtTest.QTest.keyClick(self.window, QtCore.Qt.Key.Key_Tab)
-        self.assertEqual(self.window.activeFocusItem(), self.find("field_enabled"))
+        enabled.forceActiveFocus()
+        QtTest.QTest.keyClick(self.window, QtCore.Qt.Key_Tab)
+        self.assertEqual(self.window.activeFocusItem(), field)
+        listing = self.find("measurementRows_bias_conditions")
+        self.assertLessEqual(listing.property("contentWidth"), listing.width() + 1)
         additional = max(i for i, section in enumerate(self.service.uiSections) if not section["advanced"]) + 1
         heading = self.find(f"measurementAdditionalSettings_{additional}")
         self.assertTrue(heading.isVisible())
         section = self.find("measurement_section_Advanced ramps and conversion")
         self.assertLess(heading.mapToScene(QtCore.QPointF()).y(), section.mapToScene(QtCore.QPointF()).y())
+
+    def test_global_vds_toggle_reverts_instead_of_hiding_an_invalid_draft(self):
+        self.service.mode = 3
+        self.service.setValue("use_vds", True)
+        self.load(width=520)
+        QtTest.QTest.qWait(30)
+        field = self.recipe_cell("bias_conditions", 0, "vds")
+        field.forceActiveFocus()
+        QtTest.QTest.keyClick(self.window, QtCore.Qt.Key_A, QtCore.Qt.ControlModifier)
+        for key in (QtCore.Qt.Key_B, QtCore.Qt.Key_A, QtCore.Qt.Key_D):
+            QtTest.QTest.keyClick(self.window, key)
+        toggle = self.find("field_use_vds")
+        toggle.forceActiveFocus()
+        QtTest.QTest.keyClick(self.window, QtCore.Qt.Key_Space)
+        self.app.processEvents()
+        self.assertTrue(self.service.collect_params().use_vds)
+        self.assertTrue(toggle.property("checked"))
+        self.assertFalse(field.property("readOnly"))
+        field.forceActiveFocus()
+        QtTest.QTest.keyClick(self.window, QtCore.Qt.Key_A, QtCore.Qt.ControlModifier)
+        QtTest.QTest.keyClick(self.window, QtCore.Qt.Key_0)
+        QtTest.QTest.keyClick(self.window, QtCore.Qt.Key_Return)
+        toggle.forceActiveFocus()
+        QtTest.QTest.keyClick(self.window, QtCore.Qt.Key_Space)
+        self.app.processEvents()
+        self.assertFalse(self.service.collect_params().use_vds)
+        self.assertFalse(self.find("field_use_vds").property("checked"))
+        self.assertTrue(field.property("readOnly"))
 
     def test_advanced_classification_change_keeps_gate_conversion_draft_and_focus(self):
         self.service.mode = 2
@@ -253,7 +311,7 @@ class QuickFormTests(unittest.TestCase):
         self.service.addRow("conditions")
         self.service.duplicateRow("conditions", 0)
         QtTest.QTest.qWait(30)
-        self.assertEqual(self.find("measurementEditing_conditions").property("text"), "Editing condition 2 of 2")
+        self.assertEqual(self.service.rowModel("conditions").selectedIndex, 1)
 
     def test_generic_form_preserves_active_draft_across_refresh(self):
         self.load("FieldForm")
@@ -265,3 +323,147 @@ class QuickFormTests(unittest.TestCase):
         self.assertEqual(self.find("field_vds_stop"), original)
         self.assertEqual(original.property("text"), "0.654")
         self.assertTrue(original.hasActiveFocus())
+
+    def test_all_filename_editors_wrap_and_restore_output_preview_at_panel_width(self):
+        self.load(width=366)
+        name = "1.67K01_REFImogon_ACDMCs6E1_DCMCs6E2_AmpMoTe2_" + "long_sample_description_" * 4
+        for mode in range(6):
+            self.service.mode = mode
+            QtTest.QTest.qWait(30)
+            editor = self.find("field_base_name")
+            editor.forceActiveFocus()
+            editor.setProperty("text", name)
+            self.app.processEvents()
+            self.assertGreater(editor.property("lineCount"), 1, mode)
+            self.assertGreaterEqual(editor.width(), 250, mode)
+            self.assertLessEqual(editor.width(), 366, mode)
+            self.assertGreater(editor.height(), 40, mode)
+            field_owner = editor.parentItem()
+            while field_owner.property("formField") is None:
+                field_owner = field_owner.parentItem()
+            self.assertTrue(field_owner.findChild(QtCore.QObject, "expandFieldButton").isVisible(), mode)
+            QtTest.QTest.keyClick(self.window, QtCore.Qt.Key_Return)
+            self.app.processEvents()
+            self.assertEqual(self.service.collect_params().base_name, name, mode)
+            editor.setProperty("text", name + "TabApplied")
+            QtTest.QTest.keyClick(self.window, QtCore.Qt.Key_Tab)
+            self.app.processEvents()
+            self.assertFalse(editor.hasActiveFocus(), mode)
+            self.assertEqual(self.service.collect_params().base_name, name + "TabApplied", mode)
+            editor.forceActiveFocus()
+            QtTest.QTest.keyClick(self.window, QtCore.Qt.Key_Tab, QtCore.Qt.ShiftModifier)
+            self.app.processEvents()
+            self.assertFalse(editor.hasActiveFocus(), mode)
+            self.assertNotIn("\t", editor.property("text"), mode)
+            QtTest.QTest.qWait(170)
+            preview = self.find("filenamePreview")
+            self.assertTrue(preview.isVisible(), mode)
+            self.assertTrue(preview.property("readOnly"), mode)
+            self.assertIn(name, preview.property("text"), mode)
+            self.assertIn("{timestamp}", preview.property("text"), mode)
+
+    def test_filename_card_previews_drafts_copies_full_names_and_collapses(self):
+        self.load(width=366)
+        editor = self.find("field_base_name")
+        accepted = self.service.collect_params().base_name
+        draft = "sample_draft_" + "long_name_" * 15
+        editor.forceActiveFocus()
+        editor.setProperty("text", draft)
+        QtTest.QTest.qWait(180)
+        preview = self.find("filenamePreview")
+        self.assertIn(draft, preview.property("text"))
+        self.assertEqual(self.service.collect_params().base_name, accepted)
+        self.assertIn("Draft preview", self.find("filenameDraftNotice").property("text"))
+        # Input and preview share the card rather than separate scrolling sections.
+        self.assertLess(editor.mapToScene(QtCore.QPointF()).y(), preview.mapToScene(QtCore.QPointF()).y())
+        copy = self.find("copyFilenamePreview")
+        copy.forceActiveFocus()
+        QtTest.QTest.qWait(160)
+        QtTest.QTest.keyClick(self.window, QtCore.Qt.Key_Space)
+        self.assertEqual(self.app.clipboard().text(), preview.property("text"))
+        self.assertEqual(self.service.collect_params().base_name, draft)
+        header = self.find("measurement_section_File output")
+        header.forceActiveFocus()
+        QtTest.QTest.keyClick(self.window, QtCore.Qt.Key_Space)
+        self.app.processEvents()
+        self.assertFalse(editor.isVisible())
+        self.assertFalse(preview.isVisible())
+        self.assertTrue(self.find("outputSummaryCount").isVisible())
+        QtTest.QTest.keyClick(self.window, QtCore.Qt.Key_Space)
+        self.app.processEvents()
+        self.assertTrue(editor.isVisible())
+        self.assertEqual(editor.property("text"), draft)
+
+    def test_field_batch_filename_card_edits_the_selected_condition(self):
+        self.service.mode = 4
+        self.service.setValue("fields_t", "0, 1")
+        self.service.addRow("conditions")
+        self.service.duplicateRow("conditions", 0)
+        self.service.selectRow("conditions", 1)
+        self.load(width=366)
+        QtTest.QTest.qWait(160)
+        self.assertTrue(self.find("filenameEditingScope").isVisible())
+        self.assertIn("Condition 2", self.find("filenameEditingScope").property("text"))
+        editor = self.find("field_base_name")
+        editor.forceActiveFocus()
+        editor.setProperty("text", "condition_two_draft")
+        QtTest.QTest.qWait(160)
+        self.assertIn("condition_two_draft", self.find("filenamePreview").property("text"))
+        self.assertIn("4 CSV", self.find("outputSummaryCount").property("text"))
+        QtTest.QTest.keyClick(self.window, QtCore.Qt.Key_Return)
+        self.assertEqual(self.service._values[4]["conditions"][1]["base_name"], "condition_two_draft")
+        self.assertNotEqual(self.service._values[4]["conditions"][0]["base_name"], "condition_two_draft")
+        QtTest.QTest.qWait(160)
+        self.assertNotIn("Draft preview", self.find("filenameDraftNotice").property("text"))
+        # Changing the selected condition must update the always-visible card,
+        # even while the condition's advanced settings remain collapsed.
+        self.service.selectRow("conditions", 0)
+        QtTest.QTest.qWait(160)
+        self.assertIn("Condition 1", self.find("filenameEditingScope").property("text"))
+        self.assertNotEqual(editor.property("text"), "condition_two_draft")
+        editor.setProperty("text", "condition_one")
+        QtTest.QTest.keyClick(self.window, QtCore.Qt.Key_Return)
+        self.assertEqual(self.service._values[4]["conditions"][0]["base_name"], "condition_one")
+        self.assertEqual(self.service._values[4]["conditions"][1]["base_name"], "condition_two_draft")
+
+    def test_wrapped_filename_expand_preserves_draft_and_respects_measurement_lock(self):
+        self.load(width=366)
+        editor = self.find("field_base_name")
+        original = self.service.collect_params().base_name
+        draft = "a_long_filename_" * 12
+        editor.forceActiveFocus()
+        editor.setProperty("text", draft)
+        QtTest.QTest.keyClick(self.window, QtCore.Qt.Key_Return, QtCore.Qt.AltModifier)
+        self.app.processEvents()
+        expanded = self.find("expandedFieldText")
+        self.assertEqual(expanded.property("text"), draft)
+        self.assertEqual(self.service.collect_params().base_name, original)
+        expanded.setProperty("text", "expanded_only_draft")
+        QtTest.QTest.qWait(160)
+        self.assertIn("expanded_only_draft", self.find("filenamePreview").property("text"))
+        QtTest.QTest.keyClick(self.window, QtCore.Qt.Key_Escape)
+        QtTest.QTest.qWait(160)
+        self.assertEqual(editor.property("text"), draft)
+        self.assertIn(draft, self.find("filenamePreview").property("text"))
+        self.assertNotIn("expanded_only_draft", self.find("filenamePreview").property("text"))
+        editor.forceActiveFocus()
+        QtTest.QTest.keyClick(self.window, QtCore.Qt.Key_Return, QtCore.Qt.AltModifier)
+        expanded.setProperty("text", "saved_from_large_editor")
+        QtTest.QTest.keyClick(self.window, QtCore.Qt.Key_Return, QtCore.Qt.ControlModifier)
+        QtTest.QTest.qWait(160)
+        original = "saved_from_large_editor"
+        self.assertEqual(editor.property("text"), original)
+        self.assertEqual(self.service.collect_params().base_name, original)
+        self.assertIn(original, self.find("filenamePreview").property("text"))
+        self.service._batch_claimed = True
+        self.service.changed.emit()
+        self.app.processEvents()
+        self.assertTrue(editor.property("readOnly"))
+        editor.forceActiveFocus()
+        QtTest.QTest.keyClick(self.window, QtCore.Qt.Key_Return, QtCore.Qt.AltModifier)
+        self.app.processEvents()
+        self.assertTrue(expanded.property("readOnly"))
+        QtTest.QTest.keyClick(self.window, QtCore.Qt.Key_Escape)
+        self.app.processEvents()
+        self.assertEqual(self.service.collect_params().base_name, original)
+        self.service._batch_claimed = False

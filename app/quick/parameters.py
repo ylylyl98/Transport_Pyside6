@@ -10,6 +10,8 @@ import re
 from app.models import (DualGateParams, LineSweepParams, CoParams, PhotocurrentParams,
                         PhotocurrentBiasCondition, BFieldTransportParams,
                         BFieldTransportCondition)
+from app.gate_transform import derived_to_gates, ratio_formula_text
+from app.quick.sampling import step_sampling, gate_sampling
 
 MODES = [("vds_sweep", "Vds Sweep", DualGateParams),
          ("gate_scan", "Gate Scan", LineSweepParams),
@@ -59,8 +61,8 @@ def label(key):
                "axis_slow": "Slow axis / dimension", "sweep_both_ways": "Forward + reverse",
                "round_trip": "Return to start field", "use_vds": "Apply Vds", "base_name": "File base name",
                "n_points": "Points / pass", "derived_axis": "Sweep coordinate",
-               "derived_start": "Start (derived V)", "derived_stop": "Stop (derived V)",
-               "derived_fixed": "Held coordinate (derived V)", "derived_vds_mode": "Vds trajectory"}
+               "derived_start": "Start (V)", "derived_stop": "Stop (V)",
+               "derived_fixed": "Held coordinate (V)", "derived_vds_mode": "Vds trajectory"}
     text = key.replace("_", " ")
     text = text[:1].upper() + text[1:]
     for old, new in (("vtg", "Vtg"), ("vbg", "Vbg"), ("vds", "Vds"), ("efield", "E-field")):
@@ -70,7 +72,7 @@ def label(key):
     if any(key.startswith(p) for p in ("vtg", "vbg", "vds", "raw_v", "derived_vds")) and not key.endswith(("active", "source", "mode")):
         text += " (V)"
     if key.startswith(("doping", "efield")):
-        text += " (derived V)"
+        text += " (V)"
     return text
 
 
@@ -91,6 +93,11 @@ def descriptor(key, value, mode):
              "Magnet" if key in {"fields_t", "resume_checkpoint", "start_field_t", "stop_field_t", "rate_t_per_min", "round_trip", "cooldown_policy", "final_mode"} else
              "Trajectory and biases")
     result = {"key": key, "label": label(key), "value": deepcopy(value), "group": group}
+    coordinate_key = key.removeprefix("raw_").removeprefix("derived_")
+    for prefix, coordinate in (("doping", "Doping"), ("efield", "E-field"), ("vtg", "Vtg"), ("vbg", "Vbg"), ("vds", "Vds")):
+        if coordinate_key == prefix or coordinate_key.startswith(prefix + "_"):
+            result["coordinate"] = coordinate
+            break
     if isinstance(value, list):
         example = row_default(key, mode)
         result.update(kind="rows", rows=deepcopy(value), columns=[descriptor(k, v, mode) for k, v in example.items()])
@@ -142,7 +149,7 @@ def schema(values, mode, errors=None):
     return sorted(result, key=lambda item: groups[item["group"]])
 
 
-def measurement_sections(values, mode, selected=None, errors=None):
+def measurement_sections(values, mode, selected=None, errors=None, *, transport_coordinates="Derived", sampling=step_sampling):
     """Compact, task-specific views of the existing acquisition parameters.
 
     Row routing is explicit, so a condition editor never edits ignored global
@@ -156,6 +163,11 @@ def measurement_sections(values, mode, selected=None, errors=None):
 
     def field(key, title=None):
         item = descriptor(key, current[key], mode)
+        if mode in (1, 4):
+            if key in ("derived_axis", "derived_start", "derived_stop"):
+                item["coordinate"] = current["derived_axis"]
+            elif key == "derived_fixed":
+                item["coordinate"] = "E-field" if current["derived_axis"] == "Doping" else "Doping"
         if title:
             item["label"] = title
         item.update(rowKey=row_key, rowIndex=row_index)
@@ -176,6 +188,16 @@ def measurement_sections(values, mode, selected=None, errors=None):
         items = [field(k) for k in keys if k in current]
         if items:
             sections.append(dict(title=title, fields=items, advanced=advanced, description=description, columns=columns))
+            for key in keys:
+                if not key.endswith("_step") or key[:-5] + "_start" not in current:
+                    continue
+                prefix = key[:-5]
+                if any((row_key, row_index, prefix + "_" + part) in errors for part in ("start", "stop", "step")):
+                    text, warning = "Sampling unavailable: correct the highlighted range fields", True
+                else:
+                    policy = "photo" if mode == 3 else "region" if mode == 2 and values["regions"] else "voltage"
+                    text, warning = sampling(current[prefix + "_start"], current[prefix + "_stop"], current[key], "nm" if mode == 3 else "V", policy)
+                sections[-1].update(samplingText=text, samplingWarning=warning)
         return sections[-1] if items else None
 
     def table(key, title, description="", advanced=False):
@@ -214,7 +236,13 @@ def measurement_sections(values, mode, selected=None, errors=None):
         add("Vds trajectory", ["vds_start", "vds_stop", "vds_step", "sweep_both_ways"], columns=3)
         add("Fixed gates", ["vtg_set", "vbg_set"])
     elif mode in (1, 4):
-        add("Gate trajectory", ["mode", "n_points", "sweep_both_ways"])
+        sampling = add("Gate trajectory", ["mode", "n_points", "sweep_both_ways"],
+                      description="All active sweep axes share Points / pass. Step is calculated from each axis range.")
+        if any(scope == row_key and index == row_index and (key == "n_points" or key.startswith(("raw_", "derived_")))
+               for scope, index, key in errors):
+            sampling.update(samplingText="Sampling unavailable: correct the highlighted trajectory fields", samplingWarning=True)
+        else:
+            sampling["samplingText"] = gate_sampling(current)
         if current["mode"] == "Raw":
             for axis in ("vtg", "vbg", "vds"):
                 if axis == "vds" and current["vds_source"] == "None":
@@ -227,8 +255,41 @@ def measurement_sections(values, mode, selected=None, errors=None):
                 if active:
                     section["fields"][2]["label"] = "Stop (V)"
         else:
-            add("Derived trajectory", ["derived_axis", "derived_fixed", "derived_start", "derived_stop", "derived_ratio", "derived_ratio_target"],
-                description="Doping / E-field are voltage combinations; physical gate limits still apply.")
+            axis = current["derived_axis"]
+            held = "E-field" if axis == "Doping" else "Doping"
+            section = add("Derived trajectory", ["derived_axis", "derived_fixed", "derived_start", "derived_stop", "derived_ratio", "derived_ratio_target"],
+                description=(f"One point at {axis} Start; Stop is not visited. Hold {held} fixed." if current["n_points"] == 1 else
+                             f"Sweep {axis} from Start to Stop while holding {held} fixed. Point count is set by Points / pass above."))
+            for item in section["fields"]:
+                if item["key"] == "derived_fixed":
+                    item["label"] = f"Hold {held} (V)"
+                elif item["key"] in ("derived_start", "derived_stop"):
+                    item["label"] = f"{axis} {item['key'].split('_')[-1]} (V)"
+            section["helpText"] = (
+                ratio_formula_text(current["derived_ratio_target"]) + "\n"
+                "Vtg = top-gate voltage; Vbg = back-gate voltage. "
+                "r is a dimensionless weight on the selected gate, not a sweep rate.\n"
+                "Doping and E-field here are weighted gate voltages in V, not calibrated carrier density or electric field. "
+                "r must be non-zero; both physical gate voltage limits still apply."
+            )
+            section.update(previewText="", previewError="")
+            try:
+                if any((row_key, row_index, key) in errors for key in
+                       ("derived_axis", "derived_fixed", "derived_start", "derived_stop", "derived_ratio", "derived_ratio_target")):
+                    raise ValueError("Correct the highlighted coordinate fields to update the voltage preview.")
+                points = []
+                if current["n_points"] < 1:
+                    raise ValueError("Points / pass must be at least 1")
+                for endpoint in (("start",) if current["n_points"] == 1 else ("start", "stop")):
+                    swept, fixed = current[f"derived_{endpoint}"], current["derived_fixed"]
+                    doping, efield = (swept, fixed) if axis == "Doping" else (fixed, swept)
+                    vtg, vbg = derived_to_gates(doping, efield, current["derived_ratio"], current["derived_ratio_target"])
+                    if not all(math.isfinite(v) for v in (vtg, vbg)):
+                        raise ValueError("Coordinate conversion must produce finite gate voltages.")
+                    points.append(f"Requested {endpoint}: Vtg = {vtg:g} V; Vbg = {vbg:g} V")
+                section["previewText"] = "\n".join(points)
+            except (ValueError, OverflowError, ZeroDivisionError) as exc:
+                section["previewError"] = str(exc)
             if current["vds_source"] != "None":
                 add("Vds bias", ["derived_vds_mode"] + (["derived_vds_start", "derived_vds_stop"] if current["derived_vds_mode"] == "Swept" else ["derived_vds_fixed"]))
     elif mode == 2:
@@ -241,9 +302,13 @@ def measurement_sections(values, mode, selected=None, errors=None):
             prefix = {"E-field": "efield", "Doping": "doping"}.get(axis, axis.lower())
             swept = axis in used
             section = add(axis + (" range" if swept else " held"), [prefix+"_start"] + ([prefix+"_stop", prefix+"_step"] if swept else []), columns=3 if swept else 2)
+            section["coordinate"] = axis
+            if axis in ("Doping", "E-field"):
+                section["description"] = ratio_formula_text(current["ratio_target"]).splitlines()[0 if axis == "Doping" else 1] + " (V)"
             for item in section["fields"]:
-                item["label"] = (item["key"].rsplit("_", 1)[-1].capitalize() if swept else "Hold") + (" (derived V)" if axis in ("Doping", "E-field") else " (V)")
-        add("Gate conversion", ["ratio", "ratio_target"], advanced=not derived)
+                item["label"] = (item["key"].rsplit("_", 1)[-1].capitalize() if swept else "Hold") + " (V)"
+        add("Gate conversion", ["ratio", "ratio_target"], advanced=not derived,
+            description="Doping / E-field are weighted gate voltages in V, not calibrated carrier density or electric field. r is a dimensionless weight on the selected gate and must be non-zero. Physical gate voltage limits still apply.")
     elif mode == 3:
         add("Wavelength trajectory", ["wl_start", "wl_stop", "wl_step"], columns=3)
         add("Drain bias", ["use_vds"] + (["vds_source", "ao_channel"] if current["use_vds"] and current["vds_source"] == "NI DAQ AO" else ["vds_source"] if current["use_vds"] else []))
@@ -254,8 +319,13 @@ def measurement_sections(values, mode, selected=None, errors=None):
             section["fields"] = [field(k) for k in ("enabled", "vtg", "vbg", "vds", "settle_s") if k != "vds" or values["use_vds"]]
             row_key, row_index, current = "", -1, values
     else:
-        add("Magnetic field trajectory", ["start_field_t", "stop_field_t", "rate_t_per_min", "round_trip"])
-        add("Shared gate conversion", ["ratio", "ratio_target"], description="One ratio for all conditions; gate voltages are calculated.")
+        add("Magnetic field trajectory", ["start_field_t", "stop_field_t", "rate_t_per_min", "round_trip"],
+            description="Continuous sweep. Acquisition delay sets the sampling interval; the point count depends on sweep time and instrument timing.")
+        conversion = add("Shared gate conversion", ["ratio", "ratio_target"],
+            description="Choose Vtg / Vbg to enter physical gate voltages, or Doping / E-field to enter weighted gate voltages. Switching views keeps the same gate setpoints. "
+                        + ("Changing r keeps Vtg / Vbg fixed in this view." if transport_coordinates == "Raw" else "One ratio applies to all conditions."))
+        conversion["fields"].insert(0, dict(key="transport_coordinates", label="Fixed gate inputs", kind="choice", value=transport_coordinates,
+            options=[dict(value="Raw", label="Vtg / Vbg"), dict(value="Derived", label="Doping / E-field")], columnSpan=2))
         section, index = table("conditions", "Fixed bias conditions")
         if index >= 0:
             current = deepcopy(values["conditions"][index])
@@ -263,7 +333,6 @@ def measurement_sections(values, mode, selected=None, errors=None):
             current["ratio"], current["ratio_target"] = values["ratio"], values["ratio_target"]
             error = ""
             try:
-                from app.gate_transform import derived_to_gates
                 current["vtg"], current["vbg"] = derived_to_gates(current["doping"], current["efield"], current["ratio"], current["ratio_target"])
             except ValueError as exc:
                 current["vtg"], current["vbg"] = "Unavailable", "Unavailable"
@@ -275,7 +344,9 @@ def measurement_sections(values, mode, selected=None, errors=None):
             section["fields"] = [field(k) for k in keys]
             for item in section["fields"]:
                 if item["key"] in ("vtg", "vbg"):
-                    item.update(readOnly=True, description="Calculated from shared ratio", error=error)
+                    item.update(readOnly=transport_coordinates != "Raw", description="Calculated from shared ratio" if transport_coordinates != "Raw" else "Physical gate setpoint", error=error)
+                elif item["key"] in ("doping", "efield") and transport_coordinates == "Raw":
+                    item.update(readOnly=True, description="Calculated from Vtg / Vbg")
             row_key, row_index, current = "", -1, values
         add("Cooldown and completion", ["cooldown_policy", "final_mode"], advanced=True,
             description="Successful completion stays driven (heater ON). Stop, error and interlock retain persistent cleanup.")
@@ -287,16 +358,25 @@ def measurement_sections(values, mode, selected=None, errors=None):
     if mode in (1, 4) and current["mode"] == "Raw":
         ramp_keys += ["derived_ratio", "derived_ratio_target"]
     add("Advanced ramps and conversion", ramp_keys, advanced=True)
-    add("Output and plot", ["base_name", "plot_choice", "plot_x_axis"], advanced=True)
+    file_output = add("File output", ["base_name"], columns=1)
+    sections.remove(file_output)
+    sections.insert(0, file_output)
+    add("Plot settings", ["plot_choice", "plot_x_axis"], advanced=True)
     if mode == 4:
         row_key, row_index, current = "", -1, values
         add("Resume batch", ["resume_checkpoint"], advanced=True, columns=1,
             description="Resume uses the existing field-batch checkpoint and validation.")
-    if mode == 2 and (values["regions"] or (not derived and {values["axis_fast"], values["axis_slow"]} == {"Vtg", "Vbg"})):
-        section, index = table("regions", "Additional gate regions", "Regions merge into the primary map; duplicate coordinates are acquired once.", advanced=True)
+    if mode == 2:
+        available = not derived and {values["axis_fast"], values["axis_slow"]} == {"Vtg", "Vbg"}
+        section, index = table("regions", "Additional gate regions",
+            "The ranges above define Region 1. Add rectangles to form an L-shaped or stepped union. Shared points are acquired once; disconnected regions are rejected." if available else
+            "Multiple rectangles are supported for Raw Vtg/Vbg maps. Choose Use Vtg / Vbg regions below to configure these axes; this does not start acquisition.")
+        section.update(editable=available, configureRegions=not available)
         if index >= 0:
             row_key, row_index, current = "regions", index, values["regions"][index]
             section["fields"] = [field(k) for k in REGION_DEFAULT]
+        sections.remove(section)
+        sections.insert(next(i for i, item in enumerate(sections) if item["title"] == "Gate conversion"), section)
     return sections
 
 

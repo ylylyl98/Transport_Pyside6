@@ -11,7 +11,7 @@ ColumnLayout {
     RowLayout {
         Layout.fillWidth: true
         Label { text: "Step size (V)"; color: Theme.muted; Layout.fillWidth: true }
-        TextField { text: String(section.instruments.manualStep); enabled: !section.instruments.busy; Layout.preferredWidth: 100; onEditingFinished: section.instruments.setManualStep(text); Accessible.name: "Manual gate step voltage" }
+        InputField { text: String(section.instruments.manualStep); enabled: !section.instruments.busy; Layout.preferredWidth: 100; onEditingFinished: section.instruments.setManualStep(text); Accessible.name: "Manual gate step voltage" }
     }
     Repeater {
         // Readback values change frequently; keep the three editable gate rows alive.
@@ -33,15 +33,15 @@ ColumnLayout {
             RowLayout {
                 Layout.fillWidth: true
                 Label { text: "Target (V)"; color: Theme.muted }
-                TextField { id: target; objectName: "manualGateTarget_" + gate.modelData; text: "0"; placeholderText: "Target (V)"; Layout.fillWidth: true; Layout.minimumWidth: 60; Accessible.name: gate.device.label + " target voltage" }
-                Button { text: "Ramp to target"; enabled: gate.device.canRamp; onClicked: section.instruments.command("ramp", {device: gate.device.name, target: target.text}) }
+                InputField { id: target; objectName: "manualGateTarget_" + gate.modelData; text: "0"; placeholderText: "Target (V)"; Layout.fillWidth: true; Layout.minimumWidth: 60; Accessible.name: gate.device.label + " target voltage" }
+                ActionButton { tone: "primary"; text: "Ramp to target"; Accessible.name: gate.device.label + ": ramp to target voltage"; enabled: gate.device.canRamp; onClicked: section.instruments.command("ramp", {device: gate.device.name, target: target.text}) }
             }
             Flow {
                 Layout.fillWidth: true; spacing: 6
-                Button { text: "−" + section.instruments.manualStep + " V"; enabled: gate.device.canRamp; onClicked: section.instruments.command("step", {device: gate.device.name, delta: -section.instruments.manualStep}) }
-                Button { text: "+" + section.instruments.manualStep + " V"; enabled: gate.device.canRamp; onClicked: section.instruments.command("step", {device: gate.device.name, delta: section.instruments.manualStep}) }
-                Button { text: "Read back"; enabled: gate.device.canRead; onClicked: section.instruments.command("read", {device: gate.device.name}) }
-                Button { text: "Ramp to 0 V"; enabled: gate.device.canZero; onClicked: section.instruments.command("ramp", {device: gate.device.name, target: 0}) }
+                ActionButton { text: "−" + section.instruments.manualStep + " V"; Accessible.name: gate.device.label + ": decrease voltage by " + section.instruments.manualStep + " V"; enabled: gate.device.canRamp; onClicked: section.instruments.command("step", {device: gate.device.name, delta: -section.instruments.manualStep}) }
+                ActionButton { text: "+" + section.instruments.manualStep + " V"; Accessible.name: gate.device.label + ": increase voltage by " + section.instruments.manualStep + " V"; enabled: gate.device.canRamp; onClicked: section.instruments.command("step", {device: gate.device.name, delta: section.instruments.manualStep}) }
+                ActionButton { text: "Read back"; Accessible.name: gate.device.label + ": read voltage and current"; enabled: gate.device.canRead; onClicked: section.instruments.command("read", {device: gate.device.name}) }
+                ActionButton { text: "Ramp to 0 V"; Accessible.name: gate.device.label + ": ramp voltage to zero"; enabled: gate.device.canZero; onClicked: section.instruments.command("ramp", {device: gate.device.name, target: 0}) }
             }
             Label { text: gate.device.reconnect ? "Address or mode changed — reconnect" : gate.device.detail; visible: text.length > 0; color: Theme.muted; wrapMode: Text.Wrap; Layout.fillWidth: true }
             Label { text: gate.device.readbackError; visible: text.length > 0; color: Theme.danger; wrapMode: Text.Wrap; Layout.fillWidth: true }
@@ -58,14 +58,14 @@ ColumnLayout {
         RowLayout {
             Layout.fillWidth: true
             Label { text: "Channel"; color: Theme.muted }
-            TextField { id: aoChannel; text: "0"; Layout.preferredWidth: 44; Accessible.name: "DAQ output channel" }
+            InputField { id: aoChannel; text: "0"; Layout.preferredWidth: 44; Accessible.name: "DAQ output channel" }
             Label { text: "Target (V)"; color: Theme.muted }
-            TextField { id: aoTarget; text: "0"; placeholderText: "Target (V)"; Layout.fillWidth: true; Layout.minimumWidth: 60; Accessible.name: "DAQ output target voltage" }
+            InputField { id: aoTarget; text: "0"; placeholderText: "Target (V)"; Layout.fillWidth: true; Layout.minimumWidth: 60; Accessible.name: "DAQ output target voltage" }
         }
         Flow {
             Layout.fillWidth: true; spacing: 6
-            Button { text: "Ramp AO to target"; enabled: !section.instruments.busy; onClicked: section.instruments.command("daq", {channel: aoChannel.text, target: aoTarget.text}) }
-            Button { text: "Ramp AO to 0 V"; enabled: !section.instruments.busy; onClicked: section.instruments.command("daq", {channel: aoChannel.text, target: 0}) }
+            ActionButton { tone: "primary"; text: "Ramp AO to target"; enabled: !section.instruments.busy; onClicked: section.instruments.command("daq", {channel: aoChannel.text, target: aoTarget.text}) }
+            ActionButton { text: "Ramp AO to 0 V"; enabled: !section.instruments.busy; onClicked: section.instruments.command("daq", {channel: aoChannel.text, target: 0}) }
         }
     }
     ColumnLayout {
@@ -74,8 +74,8 @@ ColumnLayout {
         Label { text: "Monochromator wavelength (nm)"; font.bold: true; color: Theme.text }
         RowLayout {
             Layout.fillWidth: true
-            TextField { id: wavelength; text: "550"; Layout.fillWidth: true; Accessible.name: "Monochromator wavelength" }
-            Button { text: "Set wavelength"; enabled: !section.instruments.busy; onClicked: section.instruments.command("wavelength", {target: wavelength.text}) }
+            InputField { id: wavelength; text: "550"; Layout.fillWidth: true; Accessible.name: "Monochromator wavelength" }
+            ActionButton { tone: "primary"; text: "Set wavelength"; enabled: !section.instruments.busy; onClicked: section.instruments.command("wavelength", {target: wavelength.text}) }
         }
     }
     ColumnLayout {

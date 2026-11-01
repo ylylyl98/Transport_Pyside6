@@ -9,9 +9,9 @@ ColumnLayout {
     spacing: 14
     Flow {
         Layout.fillWidth: true; spacing: 6
-        Button { text: "Scan resources"; enabled: !section.instruments.busy; onClicked: section.instruments.command("scan", {}) }
-        Button { text: "Connect all"; enabled: !section.instruments.busy; onClicked: section.instruments.command("connect", {}) }
-        Button { text: "Disconnect all"; enabled: !section.instruments.busy; onClicked: section.instruments.command("disconnect", {}) }
+        ActionButton { text: "Scan resources"; enabled: !section.instruments.busy; onClicked: section.instruments.command("scan", {}) }
+        ActionButton { tone: "primary"; text: "Connect all"; enabled: !section.instruments.busy; onClicked: section.instruments.command("connect", {}) }
+        ActionButton { text: "Disconnect all"; enabled: !section.instruments.busy; onClicked: section.instruments.command("disconnect", {}) }
     }
     Label { text: "Check addresses and source protection below, then Connect all. Reconnect after changing an address or source mode."; color: Theme.muted; wrapMode: Text.Wrap; Layout.fillWidth: true }
     Label { text: Object.keys(section.instruments.discovered).map(k => k.toUpperCase() + ": " + section.instruments.discovered[k].join(", ")).join("\n"); visible: text.length > 0; wrapMode: Text.Wrap; Layout.fillWidth: true; color: Theme.muted }
@@ -27,7 +27,7 @@ ColumnLayout {
             Label { text: "G" + gate.modelData + " · address, source & protection"; font.bold: true; color: Theme.text; wrapMode: Text.Wrap; Layout.fillWidth: true }
             // Keep each source's address beside its mode, limits and Apply action.
             FieldForm { fields: section.instruments.connectionFields.filter(item => item.key === "gate" + gate.modelData || item.key.indexOf("gate" + gate.modelData + "_") === 0).map(item => Object.assign({}, item, {group: "", label: item.key === "gate" + gate.modelData ? "VISA address" : item.label})); target: section.instruments; locked: section.instruments.busy; Layout.fillWidth: true }
-            Button { text: "Apply G" + gate.modelData + " protection"; enabled: !section.instruments.busy; onClicked: section.instruments.command("protection", {device: "g" + gate.modelData}) }
+            ActionButton { text: "Apply G" + gate.modelData + " protection"; enabled: !section.instruments.busy; onClicked: section.instruments.command("protection", {device: "g" + gate.modelData}) }
         }
     }
     ColumnLayout {

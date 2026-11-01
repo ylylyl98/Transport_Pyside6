@@ -7,7 +7,11 @@ ColumnLayout {
     property var measurement: null
     property bool locked: measurement ? measurement.active : false
     property var expandedSections: ({})
+    property var recipeDetails: ({})
     readonly property var sections: measurement ? measurement.uiSections : []
+    readonly property var issues: measurement ? measurement.validationIssues : []
+    signal revealRequested(var item)
+    signal sweepPreviewRequested()
     readonly property int additionalStart: {
         for (let i = sections.length - 1; i >= 0; i--)
             if (!sections[i].advanced) return i + 1
@@ -16,11 +20,32 @@ ColumnLayout {
     spacing: 10
     Layout.fillWidth: true
 
+    ActionButton {
+        objectName: "measurementPreviewSweep"
+        text: "Preview sweep range"
+        tone: "primary"
+        Layout.fillWidth: true
+        focusPolicy: Qt.StrongFocus
+        enabled: pane.measurement && !pane.locked && !pane.measurement.sweepPreview.busy
+        ToolTip.visible: hovered
+        ToolTip.text: "Show the planned range, scan order and merged regions without applying instrument outputs"
+        onClicked: { forceActiveFocus(); Qt.callLater(() => pane.sweepPreviewRequested()) }
+    }
+
     function sectionTitle(title) {
         const text = String(title || "").replace(/^Advanced /, "")
         return text.charAt(0).toUpperCase() + text.slice(1)
     }
     function sectionKey(title) { return String(measurement ? measurement.mode : 0) + ":" + title }
+    function syncRecipeDetails() {
+        if (measurement) measurement.setRecipeDetailsVisible(measurement.mode === 4 && Boolean(recipeDetails[sectionKey("conditions")]))
+    }
+    Component.onCompleted: syncRecipeDetails()
+    onRecipeDetailsChanged: syncRecipeDetails()
+    Connections {
+        target: pane.measurement
+        function onModeChanged() { pane.syncRecipeDetails() }
+    }
     function isExpanded(section) {
         const key = sectionKey(section.title)
         return expandedSections[key] === undefined ? !section.advanced : expandedSections[key]
@@ -29,6 +54,47 @@ ColumnLayout {
         const next = Object.assign({}, expandedSections)
         next[sectionKey(section.title)] = !isExpanded(section)
         expandedSections = next
+    }
+    function sectionIssues(title) { return issues.filter(issue => issue.section === title) }
+    function findItem(parent, predicate) {
+        if (predicate(parent)) return parent
+        for (let child of parent.children || []) {
+            const found = findItem(child, predicate)
+            if (found) return found
+        }
+        return null
+    }
+    function revealSection(title) {
+        const next = Object.assign({}, expandedSections)
+        next[sectionKey(title)] = true
+        expandedSections = next
+        Qt.callLater(() => {
+            const header = findItem(pane, item => item.objectName === "measurement_section_" + title)
+            if (header) { header.forceActiveFocus(); pane.revealRequested(header) }
+        })
+    }
+    function revealIssue(issue) {
+        if (!issue) return
+        if (issue.rowKey) measurement.selectRow(issue.rowKey, issue.rowIndex)
+        if (measurement.mode === 4 && issue.rowKey === "conditions") {
+            const details = Object.assign({}, recipeDetails)
+            details[sectionKey("conditions")] = true
+            recipeDetails = details
+        }
+        revealSection(issue.section)
+        Qt.callLater(() => Qt.callLater(() => {
+            const header = findItem(pane, item => item.objectName === "measurement_section_" + issue.section)
+            const input = header ? findItem(header.parent, item => item.visible && item.objectName === "field_" + issue.key) : null
+            if (input) { input.forceActiveFocus(); pane.revealRequested(input); return }
+            if (issue.rowKey) {
+                const table = findItem(pane, item => item.objectName === "recipeTable_" + issue.rowKey)
+                if (table) {
+                    pane.revealRequested(table)
+                    table.revealField(issue.rowIndex, issue.key)
+                    return
+                }
+            }
+        }))
     }
     function commit(field, value) {
         if (!measurement || locked || field.readOnly) return
@@ -45,9 +111,24 @@ ColumnLayout {
             required property int index
             readonly property var modelData: pane.sections[index] || ({})
             readonly property bool expanded: pane.isExpanded(modelData)
+            readonly property bool fileOutput: modelData.title === "File output"
             readonly property bool rowScoped: (modelData.fields || []).some(field => Boolean(field.rowKey))
             Layout.fillWidth: true
+            visible: section.fileOutput || !section.rowScoped || pane.measurement.mode !== 4 || Boolean(section.modelData.rowKey) || Boolean(pane.recipeDetails[pane.sectionKey("conditions")])
             spacing: 6
+            Loader {
+                Layout.fillWidth: true
+                active: section.fileOutput
+                visible: active
+                sourceComponent: OutputSummary {
+                    measurement: pane.measurement
+                    formField: pane.measurement.filenameField
+                    expanded: section.expanded
+                    errorCount: pane.sectionIssues("File output").length
+                    onToggleRequested: pane.toggleSection(section.modelData)
+                    onCommitted: value => pane.commit(pane.measurement.filenameField, value)
+                }
+            }
             Label {
                 objectName: "measurementAdditionalSettings_" + section.index
                 visible: section.index === pane.additionalStart && Boolean(section.modelData.advanced)
@@ -58,34 +139,43 @@ ColumnLayout {
                 Layout.topMargin: 6
                 Layout.bottomMargin: 2
             }
-            ToolButton {
-                objectName: "measurement_section_" + section.modelData.title
+            ActionToolButton {
+                visible: !section.fileOutput
+                objectName: section.fileOutput ? "" : "measurement_section_" + section.modelData.title
+                readonly property int errorCount: pane.sectionIssues(section.modelData.title).length
                 Layout.fillWidth: true
-                padding: 4
+                padding: 6
+                subtle: true
                 text: (section.expanded ? "−  " : "+  ") + section.modelData.title
                 font.bold: true
-                Accessible.name: section.modelData.title
+                Accessible.name: section.modelData.title + (errorCount ? "; " + errorCount + (errorCount === 1 ? " error" : " errors") : "")
                 Accessible.description: section.expanded ? "Expanded section; activate to collapse" : "Collapsed section; activate to expand"
                 contentItem: RowLayout {
                     spacing: 8
                     Label {
                         text: (section.expanded ? "−  " : "+  ") + pane.sectionTitle(section.modelData.title)
                         font.bold: true
-                        color: Theme.text
+                        color: Theme.coordinateColor(section.modelData.coordinate || "")
                         wrapMode: Text.Wrap
                         Layout.fillWidth: true
                     }
                     Label {
-                        visible: Boolean(section.modelData.advanced)
+                        visible: pane.sectionIssues(section.modelData.title).length > 0
+                        text: pane.sectionIssues(section.modelData.title).length + (pane.sectionIssues(section.modelData.title).length === 1 ? " error" : " errors")
+                        color: Theme.danger
+                        font.bold: true
+                    }
+                    Label {
+                        visible: Boolean(section.modelData.advanced) && !section.modelData.recovery
                         text: "Advanced"
                         color: Theme.muted
-                        font.pointSize: 9
+                        font.pointSize: Theme.captionPointSize
                     }
                 }
                 onClicked: pane.toggleSection(section.modelData)
             }
             ColumnLayout {
-                visible: section.expanded
+                visible: !section.fileOutput && section.expanded
                 Layout.fillWidth: true
                 spacing: 6
                 Label {
@@ -94,7 +184,7 @@ ColumnLayout {
                     Layout.fillWidth: true
                     wrapMode: Text.Wrap
                     color: Theme.muted
-                    font.pointSize: 9
+                    font.pointSize: Theme.captionPointSize
                 }
                 Label {
                     text: section.modelData.error || ""
@@ -104,106 +194,48 @@ ColumnLayout {
                     wrapMode: Text.Wrap
                     Accessible.name: "Condition list error: " + text
                 }
-                ScrollView {
-                    id: rowList
-                    objectName: "measurementRows_" + (section.modelData.rowKey || "")
-                    visible: Boolean(section.modelData.rowKey) && (section.modelData.rows || []).length > 0
+                Loader {
                     Layout.fillWidth: true
-                    Layout.preferredHeight: Math.min(170, rowsColumn.implicitHeight)
-                    contentWidth: availableWidth
-                    ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
-                    ColumnLayout {
-                        id: rowsColumn
-                        width: rowList.availableWidth
-                        spacing: 3
-                        Repeater {
-                            model: (section.modelData.rows || []).length
-                            delegate: ItemDelegate {
-                                id: recipeRow
-                                required property int index
-                                readonly property var modelData: (section.modelData.rows || [])[index] || ({})
-                                objectName: "measurementRow_" + section.modelData.rowKey + "_" + index
-                                Layout.fillWidth: true
-                                highlighted: modelData.index === section.modelData.selectedIndex
-                                function revealSelection() {
-                                    if (!rowList || !highlighted || !rowList.visible) return
-                                    const flick = rowList.contentItem
-                                    if (!flick || flick.contentY === undefined) return
-                                    if (y < flick.contentY) flick.contentY = y
-                                    else if (y + height > flick.contentY + flick.height)
-                                        flick.contentY = Math.min(y + height - flick.height, Math.max(0, flick.contentHeight - flick.height))
-                                }
-                                onHighlightedChanged: if (highlighted) Qt.callLater(revealSelection)
-                                Component.onCompleted: if (highlighted) Qt.callLater(revealSelection)
-                                background: Rectangle {
-                                    color: recipeRow.highlighted ? Theme.selection : recipeRow.hovered ? Theme.background : Theme.surface
-                                    border.color: recipeRow.highlighted ? Theme.accent : Theme.border
-                                    border.width: recipeRow.highlighted || recipeRow.activeFocus ? 2 : 1
-                                    radius: 3
-                                }
-                                Accessible.name: (modelData.enabled ? "Enabled " : "Disabled ") + modelData.name + ". " + modelData.detail
-                                contentItem: ColumnLayout {
-                                    spacing: 2
-                                    Label {
-                                        text: (recipeRow.modelData.enabled ? "On · " : "Off · ") + (recipeRow.modelData.index+1) + ". " + recipeRow.modelData.name
-                                        color: Theme.text
-                                        font.bold: recipeRow.highlighted
-                                        Layout.fillWidth: true
-                                        wrapMode: Text.WrapAnywhere
-                                    }
-                                    Label {
-                                        text: recipeRow.modelData.detail
-                                        color: Theme.muted
-                                        font.pointSize: 9
-                                        Layout.fillWidth: true
-                                        wrapMode: Text.Wrap
-                                    }
-                                }
-                                onClicked: pane.measurement.selectRow(section.modelData.rowKey, modelData.index)
-                            }
+                    active: Boolean(section.modelData.rowKey) && section.modelData.editable !== false
+                    visible: active
+                    sourceComponent: RecipeTable {
+                        objectName: "recipeTable_" + rowKey
+                        measurement: pane.measurement
+                        rowKey: section.modelData.rowKey || ""
+                        locked: pane.locked
+                        onDetailsRequested: row => {
+                            const next = Object.assign({}, pane.recipeDetails)
+                            next[pane.sectionKey("conditions")] = true
+                            pane.recipeDetails = next
                         }
                     }
                 }
-                RowLayout {
-                    visible: Boolean(section.modelData.rowKey)
-                    Layout.fillWidth: true
-                    spacing: 4
-                    Button {
-                        objectName: "measurementAdd_" + section.modelData.rowKey
-                        text: "Add"
-                        enabled: !pane.locked
-                        Accessible.name: "Add " + (section.modelData.rowKey === "regions" ? "region" : "condition")
-                        ToolTip.visible: hovered
-                        ToolTip.text: "Add and edit a new " + (section.modelData.rowKey === "regions" ? "region" : "condition")
-                        onClicked: pane.measurement.addRow(section.modelData.rowKey)
-                    }
-                    Button {
-                        objectName: "measurementDuplicate_" + section.modelData.rowKey
-                        text: "Duplicate"
-                        enabled: !pane.locked && section.modelData.selectedIndex >= 0
-                        Accessible.name: "Duplicate selected " + (section.modelData.rowKey === "regions" ? "region" : "condition")
-                        ToolTip.visible: hovered
-                        ToolTip.text: "Copy the selected row and edit the copy"
-                        onClicked: pane.measurement.duplicateRow(section.modelData.rowKey, section.modelData.selectedIndex)
-                    }
-                    Button {
-                        objectName: "measurementRemove_" + section.modelData.rowKey
-                        text: "Remove"
-                        enabled: !pane.locked && section.modelData.selectedIndex >= 0
-                        Accessible.name: "Remove selected " + (section.modelData.rowKey === "regions" ? "region" : "condition")
-                        ToolTip.visible: hovered
-                        ToolTip.text: "Remove the selected row"
-                        onClicked: pane.measurement.removeRow(section.modelData.rowKey, section.modelData.selectedIndex)
-                    }
+                ActionButton {
+                    visible: Boolean(section.modelData.configureRegions)
+                    text: "Use Vtg / Vbg regions"
+                    enabled: !pane.locked
+                    onClicked: { forceActiveFocus(); Qt.callLater(() => pane.measurement.useGateRegions()) }
                 }
-                Rectangle {
-                    visible: Boolean(section.modelData.rowKey) && section.modelData.selectedIndex >= 0
+                RowLayout {
+                    visible: pane.measurement.mode === 4 && section.modelData.rowKey === "conditions" && Boolean(pane.recipeDetails[pane.sectionKey("conditions")])
                     Layout.fillWidth: true
-                    Layout.topMargin: 3
-                    implicitHeight: 1
-                    color: Theme.border
+                    Label {
+                        text: "Advanced settings for condition " + (pane.measurement.mode === 4 ? pane.measurement.rowModel("conditions").selectedIndex + 1 : 0)
+                        color: Theme.accent
+                        wrapMode: Text.Wrap
+                        Layout.fillWidth: true
+                    }
+                    ActionToolButton {
+                        text: "Hide advanced"
+                        onClicked: {
+                            const next = Object.assign({}, pane.recipeDetails)
+                            next[pane.sectionKey("conditions")] = false
+                            pane.recipeDetails = next
+                        }
+                    }
                 }
                 Item {
+                    visible: !Boolean(section.modelData.rowKey)
                     Layout.fillWidth: true
                     implicitHeight: editorContent.implicitHeight
                     Rectangle {
@@ -235,7 +267,7 @@ ColumnLayout {
                             columnSpacing: 10
                             rowSpacing: 6
                             Repeater {
-                                model: (section.modelData.fields || []).length
+                                model: section.fileOutput ? 0 : (section.modelData.fields || []).length
                                 delegate: FieldEditor {
                                     required property int index
                                     readonly property var modelData: (section.modelData.fields || [])[index] || ({})
@@ -250,10 +282,48 @@ ColumnLayout {
                                 }
                             }
                         }
+                        Label {
+                            objectName: "measurementSampling_" + section.modelData.title
+                            text: section.modelData.samplingText || ""
+                            visible: text.length > 0
+                            Layout.fillWidth: true
+                            wrapMode: Text.Wrap
+                            textFormat: Text.PlainText
+                            color: section.modelData.samplingWarning ? Theme.warning : Theme.muted
+                            font.pointSize: Theme.captionPointSize
+                        }
+                        Label {
+                            objectName: "measurementHelp_" + section.modelData.title
+                            text: section.modelData.helpText || ""
+                            visible: text.length > 0
+                            Layout.fillWidth: true
+                            wrapMode: Text.Wrap
+                            textFormat: Text.PlainText
+                            color: Theme.muted
+                            font.pointSize: Theme.captionPointSize
+                        }
+                        Label {
+                            objectName: "measurementVoltagePreview_" + section.modelData.title
+                            text: section.modelData.previewError || section.modelData.previewText || ""
+                            visible: text.length > 0
+                            Layout.fillWidth: true
+                            wrapMode: Text.Wrap
+                            textFormat: Text.PlainText
+                            color: section.modelData.previewError ? Theme.danger : Theme.text
+                            Accessible.name: "Gate voltage preview: " + text
+                        }
+                        Label {
+                            visible: Boolean(section.modelData.previewText)
+                            text: "Preview of committed inputs only; no voltage is applied here. Gate protection is checked before acquisition."
+                            Layout.fillWidth: true
+                            wrapMode: Text.Wrap
+                            color: Theme.muted
+                            font.pointSize: Theme.captionPointSize
+                        }
                     }
                 }
             }
-            Rectangle { Layout.fillWidth: true; implicitHeight: 1; color: Theme.border; opacity: 0.55 }
+            Rectangle { visible: !section.fileOutput; Layout.fillWidth: true; implicitHeight: 1; color: Theme.border; opacity: 0.55 }
         }
     }
     ColumnLayout {
@@ -262,13 +332,13 @@ ColumnLayout {
         Layout.topMargin: 6
         Layout.bottomMargin: 2
         spacing: 6
-        ToolButton {
+        ActionToolButton {
             id: reviewButton
             objectName: "measurementReviewToggle"
             text: (checked ? "−  " : "+  ") + "Review trajectory / batch jobs"
             checkable: true
             Layout.fillWidth: true
-            contentItem: Label { text: reviewButton.text; color: Theme.accent; wrapMode: Text.Wrap }
+            contentItem: Label { text: reviewButton.text; color: reviewButton.foreground; wrapMode: Text.Wrap }
         }
         Label {
             objectName: "measurementTrajectoryReview"

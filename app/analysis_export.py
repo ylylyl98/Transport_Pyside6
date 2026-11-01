@@ -187,6 +187,8 @@ def export_automatic(snapshot, *, cut_only=False, heatmap_only=False):
         title, detail, _ = captions(rendered)
         description = _description(rendered, detail)
         properties = ('map_xlim', 'map_ylim', 'clim', 'cmap') if kind == 'heatmap' else ('xlim', 'ylim', 'xscale', 'yscale', 'legend', 'four_channels', 'channel_order', 'channel_views')
+        if snapshot['view'].get('layout') in ('overlay', 'two'):
+            properties += ('layout', 'overlay_channels', 'overlay_axis')
         image_key = _digest({'renderer': 1, 'data': data_key,
                              'title': title, 'description': description,
                              'view': {name: snapshot['view'].get(name) for name in properties}})
@@ -230,7 +232,7 @@ def export_automatic(snapshot, *, cut_only=False, heatmap_only=False):
                        'sha256': _digest(p['png'].read_bytes())} for p in plans]
             csv_files = [{'path': str(p['csv']), 'kind': p['kind'], 'key': p['data_key'],
                           'sha256': p['data_key']} for p in plans]
-            image_size = (2400, 1800) if snapshot.get('panels') else (1200, 900)
+            image_size = (2400, 1800) if snapshot.get('panels') and snapshot['view'].get('layout') not in ('overlay', 'two') else (1200, 900)
             payload = {'schema': 'transport_plot_view_v1', 'automatic_signal': snapshot['signal'],
                        'export_key': export_key, 'sources': snapshot['records'], 'view': view,
                        'images': images, 'csv_files': csv_files,

@@ -7,8 +7,20 @@ ColumnLayout {
     objectName: "instrumentPane"
     required property var appBackend
     property int section: 0
+    readonly property int currentGroup: pages.find(page => page.section === section).group
+    property var rememberedSections: [1, 0, 7]
+    function rememberSection() {
+        const remembered = rememberedSections.slice()
+        // Resolve directly: a dependent binding may still hold the previous group
+        // while this section change signal is being delivered.
+        remembered[pages.find(page => page.section === section).group] = section
+        rememberedSections = remembered
+    }
+    function openGroup(group) { section = rememberedSections[group] }
+    Component.onCompleted: rememberSection()
     property var visitedSections: [true, false, false, false, false, false, false, false]
     onSectionChanged: {
+        rememberSection()
         if (!visitedSections[section]) {
             const visited = visitedSections.slice()
             visited[section] = true
@@ -20,25 +32,59 @@ ColumnLayout {
     property var lockin: section === 4 ? appBackend.driveLockin : appBackend.lockin
     // Display workflow order without changing the stable section IDs used by loaders.
     readonly property var pages: [
-        {title: "Connections & protection", section: 1},
-        {title: "Sample & files", section: 5},
-        {title: "Signal chain", section: 6},
-        {title: "Manual controls", section: 0},
-        {title: "Magnet & temperature", section: 2},
-        {title: "Drag / primary lock-in", section: 3},
-        {title: "Drive lock-in", section: 4},
-        {title: "Runtime settings", section: 7}
+        {title: "Connections & protection", label: "Connections", section: 1, group: 0},
+        {title: "Sample & files", label: "Sample & files", section: 5, group: 0},
+        {title: "Signal chain", label: "Signal chain", section: 6, group: 0},
+        {title: "Manual controls", label: "Manual", section: 0, group: 1},
+        {title: "Magnet & temperature", label: "Magnet & temperature", section: 2, group: 1},
+        {title: "Drag / primary lock-in", label: "Drag / primary lock-in", section: 3, group: 1},
+        {title: "Drive lock-in", label: "Drive lock-in", section: 4, group: 1},
+        {title: "Runtime settings", label: "Runtime settings", section: 7, group: 2}
     ]
     spacing: 10
-    ComboBox {
+    RowLayout {
         Layout.fillWidth: true
-        objectName: "instrumentPageSelector"
-        model: pane.pages
-        textRole: "title"; valueRole: "section"
-        currentIndex: pane.pages.findIndex(page => page.section === pane.section)
-        wheelEnabled: false
-        onActivated: pane.section = currentValue
-        Accessible.name: "Instrument panel"
+        spacing: 4
+        Repeater {
+            model: ["Setup", "Controls", "Settings"]
+            NavigationTabButton {
+                required property int index
+                required property string modelData
+                objectName: "instrumentGroup" + index
+                Layout.fillWidth: true
+                text: modelData
+                checkable: false
+                checked: pane.currentGroup === index
+                Accessible.name: "Instrument group: " + modelData
+                onClicked: pane.openGroup(index)
+            }
+        }
+    }
+    Flow {
+        Layout.fillWidth: true
+        spacing: 4
+        Repeater {
+            model: pane.pages
+            NavigationTabButton {
+                required property var modelData
+                objectName: "instrumentPage" + modelData.section
+                visible: modelData.group === pane.currentGroup
+                width: Math.min(implicitWidth, parent.width)
+                text: modelData.label
+                checkable: false
+                checked: pane.section === modelData.section
+                Accessible.name: modelData.title
+                onClicked: pane.section = modelData.section
+            }
+        }
+    }
+    Label {
+        objectName: "instrumentPageTitle"
+        text: pane.pages.find(page => page.section === pane.section).title
+        font.bold: true
+        color: Theme.text
+        wrapMode: Text.Wrap
+        Layout.fillWidth: true
     }
     Label {
         objectName: "instrumentStatus"

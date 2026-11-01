@@ -26,7 +26,7 @@ ColumnLayout {
             ToolTip.text: root.range.title; ToolTip.visible: labelHover.hovered
             HoverHandler { id: labelHover }
         }
-        ComboBox {
+        SelectBox {
             id: mode; objectName: "historyRange_" + root.axis + "_mode"; model: ["Auto", "Fixed"]
             currentIndex: root.range.auto ? 0 : 1; implicitWidth: 88
             onActivated: {
@@ -36,18 +36,20 @@ ColumnLayout {
             }
             Accessible.name: root.label + " range mode"
         }
-        TextField {
+        InputField {
             id: lower; objectName: "historyRange_" + root.axis + "_lower"; implicitWidth: 104
             visible: mode.currentIndex === 1; enabled: visible
+            invalid: Boolean(root.range.error)
             selectByMouse: true; onEditingFinished: root.apply()
             Accessible.name: root.label + " lower bound"
             Accessible.description: root.range.error
             ToolTip.text: String(root.range.bounds[0]); ToolTip.visible: hovered
         }
         Label { text: "to"; visible: mode.currentIndex === 1 }
-        TextField {
+        InputField {
             id: upper; objectName: "historyRange_" + root.axis + "_upper"; implicitWidth: 104
             visible: mode.currentIndex === 1; enabled: visible
+            invalid: Boolean(root.range.error)
             selectByMouse: true; onEditingFinished: root.apply()
             Accessible.name: root.label + " upper bound"
             Accessible.description: root.range.error

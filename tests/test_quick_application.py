@@ -196,12 +196,16 @@ class QuickApplicationTests(unittest.TestCase):
         draft = "uncommitted expanded measurement name " * 3
         input_field.forceActiveFocus()
         input_field.setProperty("text", draft)
+        before_expand = self.backend._measurement._values[0]["base_name"]
         button = find_visual("expandFieldButton")
         QtTest.QTest.mouseClick(window, QtCore.Qt.MouseButton.LeftButton, pos=button.mapToScene(QtCore.QPointF(button.width()/2, button.height()/2)).toPoint())
         QtTest.QTest.qWait(50)
-        editor = input_field.parentItem().parentItem().parentItem()
+        editor = input_field.parentItem()
+        while editor.property("formField") is None:
+            editor = editor.parentItem()
         dialog = editor.findChild(QtCore.QObject, "expandedFieldDialog")
         self.assertTrue(dialog.property("visible"))
+        self.assertEqual(self.backend._measurement._values[0]["base_name"], before_expand)
         self.assertEqual(find_visual("expandedFieldText").property("text"), draft)
         QtCore.QMetaObject.invokeMethod(dialog, "accept")
         QtTest.QTest.qWait(50)
@@ -211,7 +215,9 @@ class QuickApplicationTests(unittest.TestCase):
         input_field.forceActiveFocus()
         QtTest.QTest.keyClick(window, QtCore.Qt.Key.Key_Return, QtCore.Qt.KeyboardModifier.AltModifier)
         QtTest.QTest.qWait(50)
-        editor = input_field.parentItem().parentItem().parentItem()
+        editor = input_field.parentItem()
+        while editor.property("formField") is None:
+            editor = editor.parentItem()
         dialog = editor.findChild(QtCore.QObject, "expandedFieldDialog")
         self.assertTrue(dialog.property("visible"))
         self.assertTrue(find_visual("expandedFieldText").property("readOnly"))
@@ -383,6 +389,20 @@ class QuickApplicationTests(unittest.TestCase):
         self.backend._load_plot_preferences(1)
         self.assertTrue(second.fourChannels)
         self.assertNotIn("traces", self.backend.settings.value("quick/plots/vds_sweep/ordinary", ""))
+
+    def test_filename_preview_tracks_sample_signal_chain_and_parameter_changes(self):
+        preview_changed = QtTest.QSignalSpy(self.backend.measurement.outputPreviewChanged)
+        self.backend._instruments.setValue("device_id", "Preview sample")
+        self.assertGreater(preview_changed.count(), 0)
+        self.assertIn("Preview_sample", self.backend.measurement.outputPreview["csvNames"][0])
+        count = preview_changed.count()
+        self.backend._instruments.setValue("ac_contact", "Drain contacts")
+        self.assertGreater(preview_changed.count(), count)
+        self.assertIn("Drain_contacts", self.backend.measurement.outputPreview["csvNames"][0])
+        count = preview_changed.count()
+        self.backend.measurement.setValue("base_name", "Updated filename")
+        self.assertGreater(preview_changed.count(), count)
+        self.assertIn("Updated_filename", self.backend.measurement.outputPreview["csvNames"][0])
 
     def test_new_run_uses_recipe_channel_and_axis_without_losing_layout_policy(self):
         plot = self.backend.plotModel

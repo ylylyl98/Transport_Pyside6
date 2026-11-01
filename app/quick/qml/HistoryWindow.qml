@@ -10,7 +10,7 @@ ApplicationWindow {
     x: backend.layout.x; y: backend.layout.y
     minimumWidth: 1100; minimumHeight: 700
     visible: true
-    title: "Transport — Measurement History (Qt Quick)"
+    title: "Transport — Analysis"
     font.family: "Segoe UI"
     font.pointSize: 10
     color: Theme.background
@@ -18,13 +18,19 @@ ApplicationWindow {
     palette.base: Theme.surface
     palette.windowText: Theme.text
     palette.text: Theme.text
-    palette.button: Theme.surface
+    palette.button: Theme.controlSurface
     palette.buttonText: Theme.text
-    palette.highlight: Theme.accent
+    palette.highlight: Theme.primary
+    palette.highlightedText: Theme.primaryText
+    palette.brightText: Theme.primaryText
+    palette.mid: Theme.controlBorder
+    palette.dark: Theme.controlBorder
+    palette.light: Theme.controlHover
     palette.placeholderText: Theme.muted
-    palette.disabled.buttonText: Theme.muted
-    palette.disabled.text: Theme.muted
-    palette.disabled.windowText: Theme.muted
+    palette.disabled.button: Theme.disabledSurface
+    palette.disabled.buttonText: Theme.disabledText
+    palette.disabled.text: Theme.disabledText
+    palette.disabled.windowText: Theme.disabledText
     property var backend: historyBackend
     property bool closeAllowed: false
     property bool rangesOpen: false
@@ -64,7 +70,7 @@ ApplicationWindow {
         nameFilters: ["PNG image (*.png)"]
         onAccepted: backend.exportView(window.exportScope, selectedFile.toString())
     }
-    Dialog {
+    ActionDialog {
         id: rangeDialog; objectName: "historyRangeDialog"
         title: "Axis and color ranges"; modal: true
         width: Math.min(window.width - 64, 640)
@@ -80,7 +86,7 @@ ApplicationWindow {
             HistoryRange { backend: window.backend; axis: "color"; label: "Signal"; Layout.fillWidth: true }
         }
     }
-    Dialog {
+    ActionDialog {
         id: detailsDialog; objectName: "historyDetails"
         title: "History details"; modal: true
         width: Math.min(window.width - 80, 900); height: Math.min(window.height - 80, 520)
@@ -91,32 +97,33 @@ ApplicationWindow {
                 Layout.fillWidth: true; Layout.fillHeight: true
                 TextArea { text: backend.statusDetails; readOnly: true; selectByMouse: true; wrapMode: TextEdit.Wrap; color: Theme.text }
             }
-            Button { text: "Copy all details"; onClicked: backend.copyStatus() }
+            ActionButton { text: "Copy all details"; onClicked: backend.copyStatus() }
         }
     }
     ColumnLayout {
         anchors.fill: parent; anchors.margins: 12; spacing: 6
         RowLayout {
             Layout.fillWidth: true
-            Label { text: "Measurement History"; font.pixelSize: 23; font.bold: true; color: Theme.text }
+            Label { text: "Analysis"; font.pixelSize: 23; font.bold: true; color: Theme.text }
+            Label { text: "Saved measurements · Read-only"; color: Theme.muted }
             Item { Layout.fillWidth: true }
             BusyIndicator { running: backend.busy; implicitWidth: 28; implicitHeight: 28 }
-            Button { objectName: "historyThemeToggle"; text: "Dark theme"; checkable: true; checked: backend.dark; onToggled: if (checked !== backend.dark) backend.setDark(checked); Accessible.name: "Dark theme" }
-            Button { text: "Refresh"; onClicked: backend.refresh() }
-            Button { text: "Reload analysis"; visible: historyConnected; onClicked: backend.requestReload() }
+            ActionButton { objectName: "historyThemeToggle"; text: "Dark theme"; checkable: true; checked: backend.dark; onToggled: if (checked !== backend.dark) backend.setDark(checked); Accessible.name: "Dark theme" }
+            ActionButton { text: "Refresh"; onClicked: backend.refresh() }
+            ActionButton { text: "Reload analysis"; visible: historyConnected; onClicked: backend.requestReload() }
         }
         RowLayout {
             Layout.fillWidth: true
             Label { text: "Folder"; color: Theme.muted }
             Label { text: backend.folder; color: Theme.muted; elide: Text.ElideMiddle; Layout.fillWidth: true; Accessible.name: "History folder: " + text; ToolTip.text: text; ToolTip.visible: folderHover.hovered; HoverHandler { id: folderHover } }
-            Button { text: "Browse folder…"; onClicked: window.chooseFolder() }
-            Button { text: "Follow current device"; enabled: !backend.following; onClicked: backend.followCurrent(); ToolTip.text: "Follow the data folder selected in the measurement window"; ToolTip.visible: hovered }
+            ActionButton { text: "Browse folder…"; onClicked: window.chooseFolder() }
+            ActionButton { text: "Follow current device"; enabled: !backend.following; onClicked: backend.followCurrent(); ToolTip.text: "Follow the data folder selected in the measurement window"; ToolTip.visible: hovered }
         }
         TabBar {
             Layout.fillWidth: true
             Repeater {
                 model: backend.measurementTypes
-                TabButton { required property var modelData; text: modelData.label; checked: backend.currentType === modelData.key; onClicked: backend.selectType(modelData.key) }
+                NavigationTabButton { required property var modelData; text: modelData.label; checked: backend.currentType === modelData.key; onClicked: backend.selectType(modelData.key) }
             }
         }
         SplitView {
@@ -149,22 +156,24 @@ ApplicationWindow {
                     RowLayout {
                         Layout.fillWidth: true
                         Label { text: "Files"; font.bold: true; font.pixelSize: 17; color: Theme.text; Layout.fillWidth: true }
-                        Button { objectName: "historyExpandFiles"; text: backend.expanded ? "Compare files" : "Expand list"; onClicked: backend.setOption("expanded", !backend.expanded) }
+                        ActionButton { objectName: "historyExpandFiles"; text: backend.expanded ? "Compare files" : "Expand list"; onClicked: backend.setOption("expanded", !backend.expanded) }
                     }
-                    ComboBox { objectName: "historyDateFilter"; Layout.fillWidth: true; model: backend.dates; currentIndex: Math.max(0, model.indexOf(backend.date)); onActivated: backend.setOption("date", currentText); Accessible.name: "Date filter" }
-                    TextField { id: historySearch; objectName: "historySearch"; Layout.fillWidth: true; placeholderText: "Search filename, conditions, status"; text: backend.search; onTextEdited: backend.queueSearch(text); Accessible.name: "Search history"; selectByMouse: true }
+                    SelectBox { objectName: "historyDateFilter"; Layout.fillWidth: true; model: backend.dates; currentIndex: Math.max(0, model.indexOf(backend.date)); onActivated: backend.setOption("date", currentText); Accessible.name: "Date filter" }
+                    InputField { id: historySearch; objectName: "historySearch"; Layout.fillWidth: true; placeholderText: "Search filename, conditions, status"; text: backend.search; onTextEdited: backend.queueSearch(text); Accessible.name: "Search history"; selectByMouse: true }
                     RowLayout {
                         Layout.fillWidth: true
                         Label { text: fileList.count + " / " + backend.typeFileCount + " visible"; color: Theme.muted; Layout.fillWidth: true }
-                        Button { objectName: "historyClearFilters"; text: "Clear filters"; enabled: backend.search.length > 0 || backend.date !== "All dates"; onClicked: backend.clearFilters() }
+                        ActionButton { objectName: "historyClearFilters"; text: "Clear filters"; enabled: backend.search.length > 0 || backend.date !== "All dates"; onClicked: backend.clearFilters() }
                     }
                     RowLayout {
                         Label { text: backend.selectedCount > 0 ? backend.selectedCount + " selected" : "Check files to compare"; font.bold: backend.selectedCount > 0; color: Theme.text; Layout.fillWidth: true; ToolTip.text: "Selections stay checked when you filter the list"; ToolTip.visible: selectionHover.hovered; HoverHandler { id: selectionHover } }
-                        Button { text: "Clear selection"; enabled: backend.selectedCount > 0; onClicked: backend.clearSelection() }
+                        ActionButton { text: "Clear selection"; enabled: backend.selectedCount > 0; onClicked: backend.clearSelection() }
                     }
                     ListView {
                         id: fileList; Layout.fillWidth: true; Layout.fillHeight: true
-                        clip: true; spacing: 4; model: backend.files
+                        objectName: "historyFileList"
+                        clip: true; spacing: 4; model: backend.fileModel
+                        reuseItems: true
                         ScrollBar.vertical: ScrollBar { }
                         onMovementEnded: backend.setOption("scroll", contentY)
                         Connections {
@@ -178,7 +187,7 @@ ApplicationWindow {
                             radius: 5; border.color: modelData.checked ? Theme.accent : Theme.border
                             RowLayout {
                                 id: row; anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top; anchors.margins: 8
-                                CheckBox { checked: modelData.checked; onToggled: backend.setChecked(modelData.path, checked); Accessible.name: "Compare " + modelData.name }
+                                StateCheckBox { checked: modelData.checked; onClicked: backend.setChecked(modelData.path, checked); Accessible.name: "Compare " + modelData.name }
                                 ColumnLayout {
                                     Layout.fillWidth: true; spacing: 3
                                     Label { text: modelData.time; font.pixelSize: 12; color: Theme.muted }
@@ -208,8 +217,8 @@ ApplicationWindow {
                 RowLayout {
                     Layout.fillWidth: true
                     Label { text: "Comparison"; font.pixelSize: 17; font.bold: true; color: Theme.text; Layout.fillWidth: true }
-                    Button { objectName: "historyRestoreView"; text: "Restore view…"; onClicked: window.chooseRestoreView(); ToolTip.text: "Open an exported analysis view (*_view.json)"; ToolTip.visible: hovered }
-                    Button {
+                    ActionButton { objectName: "historyRestoreView"; text: "Restore view…"; onClicked: window.chooseRestoreView(); ToolTip.text: "Open an exported analysis view (*_view.json)"; ToolTip.visible: hovered }
+                    ActionButton {
                         objectName: "historyExportView"; text: "Export PNG + CSV…"; enabled: backend.exportReady
                         highlighted: true
                         onClicked: backend.hasMap ? exportMenu.open() : window.saveAs("both")
@@ -229,10 +238,11 @@ ApplicationWindow {
                     Row {
                     spacing: 5
                     Label { text: "X axis"; anchors.verticalCenter: parent.verticalCenter }
-                    ComboBox {
+                    SelectBox {
                         width: 150; model: backend.xChoices
-                        displayText: backend.axisLabel(backend.state.x)
-                        currentIndex: Math.max(0, model.indexOf(backend.state.x)); onActivated: backend.setOption("x", currentText)
+                        enabled: !backend.busy && model.length > 0
+                        displayText: currentIndex >= 0 ? backend.axisLabel(backend.state.x) : backend.busy ? "Checking data…" : "Select files"
+                        currentIndex: model.indexOf(backend.state.x); onActivated: backend.setOption("x", currentText)
                         Accessible.name: "X coordinate"
                         delegate: ItemDelegate { required property var modelData; width: parent.width; text: backend.axisLabel(modelData) }
                     }
@@ -240,19 +250,35 @@ ApplicationWindow {
                     Row {
                         spacing: 5
                         Label { text: "Signal"; anchors.verticalCenter: parent.verticalCenter }
-                        ComboBox { width: 200; model: backend.signalChoices; currentIndex: Math.max(0, model.indexOf(backend.state.signal)); onActivated: backend.setOption("signal", currentText); Accessible.name: "Signal"; ToolTip.text: currentText; ToolTip.visible: hovered }
+                        SelectBox {
+                            objectName: "historySignal"
+                            width: 200; model: backend.signalChoices
+                            enabled: !backend.busy && model.length > 0
+                            currentIndex: model.indexOf(backend.state.signal)
+                            displayText: currentIndex >= 0 ? currentText : backend.busy ? "Checking data…" : backend.selectedCount ? "No compatible signal" : "Select files"
+                            onActivated: backend.setOption("signal", currentText)
+                            Accessible.name: "Signal"
+                            ToolTip.text: backend.choiceNote; ToolTip.visible: hovered
+                        }
                     }
                     Row {
                         spacing: 5
                         Label { text: "Direction"; anchors.verticalCenter: parent.verticalCenter }
-                        ComboBox { width: 115; model: ["All", "forward", "backward", "unknown"]; currentIndex: Math.max(0, model.indexOf(backend.state.direction)); onActivated: backend.setOption("direction", currentText); Accessible.name: "Direction" }
+                        SelectBox { width: 115; model: ["All", "forward", "backward", "unknown"]; currentIndex: Math.max(0, model.indexOf(backend.state.direction)); onActivated: backend.setOption("direction", currentText); Accessible.name: "Direction" }
                     }
                     Row {
                         spacing: 5
                         Label { text: backend.hasMap ? "Cut scale" : "Normalize"; anchors.verticalCenter: parent.verticalCenter }
-                        ComboBox { width: 110; model: ["Raw", "Max |Y|", "0–1"]; currentIndex: ["raw", "max_abs", "min_max"].indexOf(backend.state.normalization); onActivated: backend.setOption("normalization", ["raw", "max_abs", "min_max"][currentIndex]); Accessible.name: "Normalization" }
+                        SelectBox { width: 110; model: ["Raw", "Max |Y|", "0–1"]; currentIndex: ["raw", "max_abs", "min_max"].indexOf(backend.state.normalization); onActivated: backend.setOption("normalization", ["raw", "max_abs", "min_max"][currentIndex]); Accessible.name: "Normalization" }
                     }
-                    Button { objectName: "historyRanges"; visible: backend.hasMap; text: "Axis / color ranges…"; onClicked: window.rangesOpen = true }
+                    ActionButton { objectName: "historyRanges"; visible: backend.hasMap; text: "Axis / color ranges…"; onClicked: window.rangesOpen = true }
+                }
+                Label {
+                    text: backend.choiceNote
+                    color: Theme.muted
+                    Layout.fillWidth: true
+                    wrapMode: Text.Wrap
+                    font.pointSize: Theme.captionPointSize
                 }
                 Label { text: backend.selectionSummary; color: Theme.muted; Layout.fillWidth: true; wrapMode: Text.Wrap; maximumLineCount: 2; elide: Text.ElideRight; ToolTip.text: text; ToolTip.visible: summaryHover.hovered; HoverHandler { id: summaryHover } }
                 ColumnLayout {
@@ -266,7 +292,7 @@ ApplicationWindow {
                             Row {
                             spacing: 5
                             Label { text: "Map source"; font.bold: true; anchors.verticalCenter: parent.verticalCenter }
-                            ComboBox {
+                            SelectBox {
                                 width: Math.min(260, comparison.width - 160); model: backend.mapSources; textRole: "label"; valueRole: "path"
                                 currentIndex: { var sources = model; var selected = backend.state.primary_path; for (var i = 0; i < sources.length; ++i) if (sources[i].path === selected) return i; return 0 }
                                 onActivated: backend.setOption("primary_path", currentValue); Accessible.name: "Map source file"
@@ -276,26 +302,26 @@ ApplicationWindow {
                             Row {
                             spacing: 5
                             Label { text: "Y axis"; anchors.verticalCenter: parent.verticalCenter }
-                            ComboBox { width: 130; model: ["None (1D)"].concat(backend.xChoices); currentIndex: Math.max(0, model.indexOf(backend.state.map_y)); onActivated: backend.setOption("map_y", currentText); Accessible.name: "Map Y coordinate" }
+                            SelectBox { width: 130; model: backend.yChoices; enabled: !backend.busy && backend.xChoices.length > 0; currentIndex: model.indexOf(backend.state.map_y); onActivated: backend.setOption("map_y", currentText); Accessible.name: "Map Y coordinate" }
                             }
-                            CheckBox { text: "Infer axes"; checked: backend.state.auto_axes; onToggled: backend.setOption("auto_axes", checked) }
+                            StateCheckBox { text: "Infer axes"; checked: backend.state.auto_axes; onClicked: backend.setOption("auto_axes", checked) }
                         }
                         Flow {
                             visible: backend.state.map_y !== "None (1D)"; Layout.fillWidth: true; Layout.preferredHeight: visible ? implicitHeight : 0; spacing: 5
                             Row {
                             spacing: 5
                             Label { text: "Measured cut"; font.bold: true; anchors.verticalCenter: parent.verticalCenter }
-                            ComboBox { width: 120; model: backend.passes; currentIndex: Math.max(0, model.indexOf(backend.state.pass)); onActivated: backend.setOption("pass", currentText); Accessible.name: "Row or pass" }
+                            SelectBox { width: 120; model: backend.passes; currentIndex: Math.max(0, model.indexOf(backend.state.pass)); onActivated: backend.setOption("pass", currentText); Accessible.name: "Row or pass" }
                             }
                             Row {
                             spacing: 5
                             Label { text: "Fixed axis"; anchors.verticalCenter: parent.verticalCenter }
-                            ComboBox { width: 95; model: [backend.state.x, backend.state.map_y]; currentIndex: Math.max(0, model.indexOf(backend.state.fixed_axis)); onActivated: backend.setOption("fixed_axis", currentText); Accessible.name: "Fixed cut axis" }
+                            SelectBox { width: 95; model: [backend.state.x, backend.state.map_y]; currentIndex: Math.max(0, model.indexOf(backend.state.fixed_axis)); onActivated: backend.setOption("fixed_axis", currentText); Accessible.name: "Fixed cut axis" }
                             }
                             Row {
                             spacing: 5
                             Label { text: "Value"; anchors.verticalCenter: parent.verticalCenter }
-                            ComboBox { width: 155; model: backend.measuredValues; editable: true; currentIndex: model.indexOf(backend.state.fixed_value); editText: backend.state.fixed_value === null ? "" : String(backend.state.fixed_value); onActivated: backend.setOption("fixed_value", currentText); onAccepted: backend.setOption("fixed_value", editText); Accessible.name: "Exact measured cut coordinate" }
+                            SelectBox { width: 155; model: backend.measuredValues; editable: true; currentIndex: model.indexOf(backend.state.fixed_value); editText: backend.state.fixed_value === null ? "" : String(backend.state.fixed_value); onActivated: backend.setOption("fixed_value", currentText); onAccepted: backend.setOption("fixed_value", editText); Accessible.name: "Exact measured cut coordinate" }
                             }
                         }
                     }
@@ -303,8 +329,8 @@ ApplicationWindow {
                 TabBar {
                     id: plotTabs; objectName: "historyPlotTabs"; visible: backend.hasMap && window.narrowPlots
                     Layout.fillWidth: true
-                    TabButton { objectName: "historyHeatmapTab"; text: "Heatmap · " + backend.state.signal }
-                    TabButton { objectName: "historyCutTab"; text: "Measured cut · " + backend.state.fixed_axis + " = " + backend.state.fixed_value; ToolTip.text: backend.traceCount + " displayed traces"; ToolTip.visible: hovered }
+                    NavigationTabButton { objectName: "historyHeatmapTab"; text: "Heatmap · " + backend.state.signal }
+                    NavigationTabButton { objectName: "historyCutTab"; text: "Measured cut · " + backend.state.fixed_axis + " = " + backend.state.fixed_value; ToolTip.text: backend.traceCount + " displayed traces"; ToolTip.visible: hovered }
                 }
                 Item {
                     Layout.fillWidth: true; Layout.fillHeight: true; Layout.minimumHeight: 180
@@ -345,7 +371,7 @@ ApplicationWindow {
                             anchors.centerIn: parent; width: Math.min(parent.width - 40, 520); spacing: 12
                             Label { text: backend.emptyState.title; font.bold: true; font.pixelSize: 20; color: Theme.text; Layout.fillWidth: true; wrapMode: Text.Wrap; horizontalAlignment: Text.AlignHCenter }
                             Label { text: backend.emptyState.detail; color: Theme.muted; Layout.fillWidth: true; wrapMode: Text.Wrap; horizontalAlignment: Text.AlignHCenter }
-                            Button { Layout.alignment: Qt.AlignHCenter; visible: backend.emptyState.action.length > 0; text: backend.emptyState.action === "filters" ? "Clear filters" : "Browse folder…"; onClicked: backend.emptyState.action === "filters" ? backend.clearFilters() : window.chooseFolder() }
+                            ActionButton { Layout.alignment: Qt.AlignHCenter; visible: backend.emptyState.action.length > 0; text: backend.emptyState.action === "filters" ? "Clear filters" : "Browse folder…"; onClicked: backend.emptyState.action === "filters" ? backend.clearFilters() : window.chooseFolder() }
                         }
                     }
                     Rectangle {
@@ -364,7 +390,7 @@ ApplicationWindow {
         RowLayout {
             Layout.fillWidth: true
             Label { Layout.fillWidth: true; text: backend.statusDetails.replace(/\n/g, " · "); elide: Text.ElideRight; color: Theme.muted; font.pixelSize: 12 }
-            Button { text: "Details (" + backend.statusDetails.split("\n").length + ")…"; visible: backend.statusDetails.length > 0; onClicked: detailsDialog.open() }
+            ActionButton { text: "Details (" + backend.statusDetails.split("\n").length + ")…"; visible: backend.statusDetails.length > 0; onClicked: detailsDialog.open() }
         }
     }
 }

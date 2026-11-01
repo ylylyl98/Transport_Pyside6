@@ -7,6 +7,7 @@
 | [Transport_Preview.bat](Transport_Preview.bat) | 启动离线界面预览，使用模拟图形与隔离设置；不能用于测量。依赖已配置好的根目录 `.venv`。 |
 | [Update-TransportShortcut.ps1](Update-TransportShortcut.ps1) | 修复根目录快捷方式的目标、工作目录和图标。正式启动 BAT 也会调用它。 |
 | [verify_quick_release.py](verify_quick_release.py) | 自动发现全部离线测试，支持不同机器分片、逐模块隔离和 CI 报告。 |
+| [benchmark_quick_recipes.py](benchmark_quick_recipes.py) | 在隔离设置、硬件阻断环境中实测 1/100 条条件的输入、提交、滚动和增删；区分事件处理与实际出帧时间。根目录运行 `.venv\Scripts\python.exe -B tools\benchmark_quick_recipes.py --iterations 20`，报告保存在 `tmp/verification/recipes/`。 |
 | [build_windows.py](build_windows.py) | 使用固定的 [Transport.spec](Transport.spec) 构建便携 EXE、版本信息和校验文件。 |
 | [verify_frozen.py](verify_frozen.py) | 搬迁完整 EXE 包，在隔离配置下验证界面、历史进程和实际 PNG 导出。 |
 | [build_installer.py](build_installer.py) / [Transport.iss](Transport.iss) | 使用 Inno Setup 将已验证的便携包构建为当前用户安装包，更新两种下载的校验文件。 |

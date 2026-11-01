@@ -180,6 +180,98 @@ class QuickMeasurementTests(unittest.TestCase):
         self.assertEqual(self.ui_fields()["raw_vtg_stop"]["rowKey"], "")
         self.assertIn("Using default condition", self.service.summary)
 
+    def test_derived_help_and_endpoints_match_worker_for_both_axes_and_ratio_targets(self):
+        from app.gate_transform import ratio_formula_text
+        from app.workers.line_sweep import LineSweepWorker
+        self.service.mode = 1
+        self.service.setValue("mode", "Derived")
+        self.service.setValue("derived_ratio", 2.)
+        self.service.setValue("derived_start", -3.)
+        self.service.setValue("derived_stop", 5.)
+        self.service.setValue("derived_fixed", 1.)
+        self.service.setValue("n_points", 3)
+        for axis in ("Doping", "E-field"):
+            for target in ("Vbg", "Vtg"):
+                with self.subTest(axis=axis, target=target):
+                    self.service.setValue("derived_axis", axis)
+                    self.service.setValue("derived_ratio_target", target)
+                    section = next(s for s in self.service.uiSections if s["title"] == "Derived trajectory")
+                    fields = {f["key"]: f for f in section["fields"]}
+                    held = "E-field" if axis == "Doping" else "Doping"
+                    self.assertEqual(fields["derived_fixed"]["label"], f"Hold {held} (V)")
+                    self.assertEqual(fields["derived_start"]["label"], f"{axis} start (V)")
+                    self.assertEqual(fields["derived_stop"]["label"], f"{axis} stop (V)")
+                    self.assertIn(axis, section["description"])
+                    self.assertIn(held, section["description"])
+                    self.assertIn(ratio_formula_text(target), section["helpText"])
+                    self.assertIn("non-zero", section["helpText"].lower())
+                    self.assertIn("physical", section["helpText"].lower())
+                    self.assertIn("voltage", section["helpText"].lower())
+                    self.assertIn("carrier density", section["helpText"].lower())
+                    worker = LineSweepWorker(self.service.collect_params(), self.service.save, self.manager.connections)
+                    points = worker._build_derived_trajectory()
+                    start, stop = points[0], points[-1]
+                    expected = (f"Requested start: Vtg = {start['vtg']:g} V; Vbg = {start['vbg']:g} V\n"
+                                f"Requested stop: Vtg = {stop['vtg']:g} V; Vbg = {stop['vbg']:g} V")
+                    self.assertEqual(section["previewText"], expected)
+                    self.assertEqual(section["previewError"], "")
+        self.service.setValue("derived_ratio", 0)
+        section = next(s for s in self.service.uiSections if s["title"] == "Derived trajectory")
+        self.assertEqual(section["previewText"], "")
+        self.assertTrue(section["previewError"])
+        self.service.setValue("derived_ratio", 2.)
+        self.service.setValue("derived_start", "invalid")
+        section = next(s for s in self.service.uiSections if s["title"] == "Derived trajectory")
+        self.assertEqual(section["previewText"], "")
+        self.assertTrue(section["previewError"])
+
+    def test_derived_preview_tracks_selected_bfield_condition_and_its_errors(self):
+        from app.gate_transform import ratio_formula_text
+        from app.workers.line_sweep import LineSweepWorker
+        self.service.mode = 4
+        self.service.setValue("mode", "Derived")
+        self.service.addRow("conditions")
+        self.service.duplicateRow("conditions", 0)
+        for row, axis, target, start in ((0, "Doping", "Vbg", 2.), (1, "E-field", "Vtg", 6.)):
+            for key, value in (("mode", "Derived"), ("derived_axis", axis),
+                               ("derived_ratio_target", target), ("derived_ratio", 2.),
+                               ("derived_start", start), ("derived_stop", 8.), ("derived_fixed", 1.)):
+                self.service.setRowValue("conditions", row, key, value)
+        for row, target in ((0, "Vbg"), (1, "Vtg")):
+            self.service.selectRow("conditions", row)
+            section = next(s for s in self.service.uiSections if s["title"] == "Derived trajectory")
+            self.assertIn(ratio_formula_text(target), section["helpText"])
+            params = build_params(self.service._values[4]["conditions"][row], 4)
+            worker = LineSweepWorker(params, self.service.save, self.manager.connections)
+            start = worker._build_derived_trajectory()[0]
+            self.assertIn(f"Requested start: Vtg = {start['vtg']:g} V; Vbg = {start['vbg']:g} V", section["previewText"])
+        self.service.setRowValue("conditions", 1, "derived_start", "invalid")
+        bad = next(s for s in self.service.uiSections if s["title"] == "Derived trajectory")
+        self.assertEqual(bad["previewText"], "")
+        self.assertTrue(bad["previewError"])
+        self.service.selectRow("conditions", 0)
+        good = next(s for s in self.service.uiSections if s["title"] == "Derived trajectory")
+        self.assertTrue(good["previewText"])
+        self.assertEqual(good["previewError"], "")
+
+    def test_derived_map_formulas_follow_selected_ratio_target(self):
+        from app.gate_transform import ratio_formula_text
+        self.service.mode = 2
+        self.service.setValue("coordinate_mode", "Derived")
+        for target in ("Vbg", "Vtg"):
+            with self.subTest(target=target):
+                self.service.setValue("ratio_target", target)
+                sections = self.service.uiSections
+                lines = ratio_formula_text(target).splitlines()
+                doping = next(s for s in sections if s["title"].startswith("Doping "))
+                efield = next(s for s in sections if s["title"].startswith("E-field "))
+                self.assertIn(lines[0], doping["description"])
+                self.assertIn(lines[1], efield["description"])
+                for section in (doping, efield):
+                    for field in section["fields"]:
+                        self.assertIn("(V)", field["label"])
+                        self.assertNotIn("derived V", field["label"])
+
     def test_transport_gate_preview_matches_planner_shared_ratio_without_mutating_rows(self):
         from copy import deepcopy
         from app.engine.bfield_transport_sweep import TransportSweepPlan
@@ -258,6 +350,93 @@ class QuickMeasurementTests(unittest.TestCase):
         self.service.setValue("vds_step", ".05")
         self.assertEqual(self.ui_fields()["vds_step"]["value"], .05)
         self.assertNotIn("error", self.ui_fields()["vds_step"])
+
+    def test_validation_issues_report_friendly_numeric_errors_and_clear(self):
+        self.service.setValue("vds_step", "not a number")
+        issue = self.service.validationIssues[0]
+        self.assertEqual((issue["section"], issue["key"], issue["rowKey"], issue["rowIndex"]),
+                         ("Vds trajectory", "vds_step", "", -1))
+        self.assertIn("valid number", issue["message"])
+        self.assertIn("Vds", issue["message"])
+        self.service.setValue("vds_step", "0.1")
+        self.assertEqual(self.service.validationIssues, [])
+
+        self.service.mode = 3
+        self.service.duplicateRow("bias_conditions", 0)
+        self.service.selectRow("bias_conditions", 0)
+        self.service.setRowValue("bias_conditions", 1, "vtg", "bad")
+        issue = self.service.validationIssues[0]
+        self.assertEqual((issue["section"], issue["key"], issue["rowKey"], issue["rowIndex"]),
+                         ("Bias recipe", "vtg", "bias_conditions", 1))
+        self.assertIn("valid number", issue["message"])
+        self.service.setRowValue("bias_conditions", 1, "vtg", "1")
+        self.assertEqual(self.service.validationIssues, [])
+
+    def test_filename_field_tracks_selected_condition_without_advanced_details(self):
+        self.service.mode = 4
+        self.assertEqual(self.service.filenameField["rowKey"], "")
+        self.service.addRow("conditions")
+        self.service.setRowValue("conditions", 0, "base_name", "first")
+        self.service.duplicateRow("conditions", 0)
+        self.service.setRowValue("conditions", 1, "base_name", "second")
+        self.assertFalse(self.service._recipe_details_visible)
+        changes = []
+        self.service.fieldsChanged.connect(lambda: changes.append(self.service.filenameField.copy()))
+        self.service.selectRow("conditions", 0)
+        self.assertEqual((self.service.filenameField["rowIndex"], self.service.filenameField["value"]), (0, "first"))
+        self.service.selectRow("conditions", 1)
+        self.assertEqual((self.service.filenameField["rowIndex"], self.service.filenameField["value"]), (1, "second"))
+        self.service.setRowValue("conditions", 1, "base_name", "updated")
+        self.assertEqual(changes[-1]["value"], "updated")
+        self.assertEqual(changes[-1]["rowKey"], "conditions")
+
+    def test_filename_draft_preview_is_read_only_and_targets_selected_condition(self):
+        from copy import deepcopy
+        field = {"key": "base_name", "rowKey": "", "rowIndex": -1}
+        before = deepcopy(self.service._values)
+        errors = deepcopy(self.service._field_errors)
+        with patch.object(self.service, "_save_settings") as save, \
+             patch("os.makedirs", side_effect=AssertionError("created directory")):
+            preview = self.service.previewOutputDraft(field, "draft / name\nextra")
+            self.assertIn("draft", preview["csvNames"][0])
+            self.assertEqual(preview["editingScope"], "Measurement")
+            self.assertEqual(self.service._values, before)
+            self.assertEqual(self.service._field_errors, errors)
+            save.assert_not_called()
+        self.service.setValue("vds_step", "invalid")
+        self.assertIn("other invalid", self.service.previewOutputDraft(field, "draft")["error"])
+        self.service.setValue("vds_step", ".1")
+
+        self.service.mode = 4
+        self.service.setValue("fields_t", "0, 1")
+        self.service.addRow("conditions")
+        self.service.duplicateRow("conditions", 0)
+        self.service.selectRow("conditions", 1)
+        before = deepcopy(self.service._values)
+        field = {"key": "base_name", "rowKey": "conditions", "rowIndex": 1}
+        result = self.service.previewOutputDraft(field, "second_draft")
+        self.assertEqual(result["csvCount"], 4)
+        self.assertIn("second_draft", result["csvNames"][0])
+        self.assertEqual(result["editingScope"], "Condition 2")
+        self.assertIn("first field", result["note"])
+        self.assertEqual(self.service._values, before)
+
+    def test_hidden_invalid_field_has_recovery_section_until_corrected(self):
+        self.service.mode = 2
+        self.service.setValue("axis_fast", "Vbg")
+        self.service.setValue("vbg_stop", "bad")
+        self.assertFalse(any(section.get("recovery") for section in self.service.uiSections))
+        self.service.setValue("axis_fast", "Vtg")
+        sections = self.service.uiSections
+        recovery = next(section for section in sections if section.get("recovery"))
+        self.assertEqual(recovery["title"], "Other invalid parameters")
+        field = next(field for field in recovery["fields"] if field["key"] == "vbg_stop")
+        self.assertEqual(field["value"], self.service._values[2]["vbg_stop"])
+        self.assertIn("valid number", field["error"])
+        self.assertEqual(self.service.validationIssues[0]["section"], recovery["title"])
+        self.service.setValue("vbg_stop", "1.5")
+        self.assertEqual(self.service.validationIssues, [])
+        self.assertFalse(any(section.get("recovery") for section in self.service.uiSections))
 
     def test_recipe_rejections_follow_row_selection_duplicate_remove_and_mode(self):
         self.service.mode = 3

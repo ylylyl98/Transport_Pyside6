@@ -23,12 +23,12 @@ ColumnLayout {
         }
         Flow {
             Layout.fillWidth: true; spacing: 6
-            Button { text: "Read settings"; enabled: section.lockin.available; onClicked: section.lockin.command("refresh") }
-            Button { text: "Apply settings"; enabled: section.lockin.available && section.lockin.pendingFields.length > 0; onClicked: section.lockin.command("apply") }
+            ActionButton { text: "Read settings"; enabled: section.lockin.available; onClicked: section.lockin.command("refresh") }
+            ActionButton { tone: "primary"; text: "Apply settings"; enabled: section.lockin.available && section.lockin.pendingFields.length > 0; onClicked: section.lockin.command("apply") }
         }
         Label { text: section.lockin.pendingText; color: section.lockin.pendingFields.length ? Theme.warning : Theme.muted; wrapMode: Text.Wrap; Layout.fillWidth: true }
-        Button { text: "Discard pending edits"; visible: section.lockin.pendingFields.length > 0; enabled: !section.lockin.busy && !section.lockin.lockedBySweep; onClicked: section.lockin.discardPending() }
-        Button { text: "Stop measurement to change settings"; visible: section.lockin.lockedBySweep; onClicked: section.lockin.requestStopForSettings() }
+        ActionButton { text: "Discard pending edits"; visible: section.lockin.pendingFields.length > 0; enabled: !section.lockin.busy && !section.lockin.lockedBySweep; onClicked: section.lockin.discardPending() }
+        ActionButton { tone: "danger"; text: "Stop measurement to change settings"; visible: section.lockin.lockedBySweep; onClicked: section.lockin.requestStopForSettings() }
         Label { text: Object.keys(section.lockin.status).map(k => k.replace(/_/g, " ") + ": " + String(section.lockin.status[k])).join(" · "); visible: text.length > 0; color: Theme.muted; wrapMode: Text.Wrap; Layout.fillWidth: true }
     }
     Repeater {
@@ -54,33 +54,33 @@ ColumnLayout {
             ColumnLayout {
                 Layout.fillWidth: true; spacing: 4
                 Label { text: "Scale"; color: Theme.muted }
-                TextField { id: displayScale; placeholderText: "Scale"; Layout.fillWidth: true; Accessible.name: "Lock-in display scale" }
+                InputField { id: displayScale; placeholderText: "Scale"; Layout.fillWidth: true; Accessible.name: "Lock-in display scale" }
             }
             ColumnLayout {
                 Layout.fillWidth: true; spacing: 4
                 Label { text: "Center"; color: Theme.muted }
-                TextField { id: displayCenter; placeholderText: "Center"; Layout.fillWidth: true; Accessible.name: "Lock-in display center" }
+                InputField { id: displayCenter; placeholderText: "Center"; Layout.fillWidth: true; Accessible.name: "Lock-in display center" }
             }
         }
-        Button { text: "Apply display scale"; enabled: section.lockin.displayAvailable && displayScale.text.trim().length > 0 && displayCenter.text.trim().length > 0; onClicked: section.lockin.applyDisplay(Number(displayScale.text), Number(displayCenter.text)) }
+        ActionButton { tone: "primary"; text: "Apply display scale"; enabled: section.lockin.displayAvailable && displayScale.text.trim().length > 0 && displayCenter.text.trim().length > 0; onClicked: section.lockin.applyDisplay(Number(displayScale.text), Number(displayCenter.text)) }
     }
     ColumnLayout {
         Layout.fillWidth: true; spacing: 6
         Rectangle { Layout.fillWidth: true; implicitHeight: 1; color: Theme.border }
         Label { text: "Advanced tools"; font.bold: true; color: Theme.text }
-        Button { id: automaticActions; text: checked ? "Hide automatic actions" : "Automatic actions…"; checkable: true }
+        ActionButton { id: automaticActions; text: checked ? "Hide automatic actions" : "Automatic actions…"; checkable: true }
         Flow {
             visible: automaticActions.checked
             Layout.fillWidth: true; spacing: 6
-            Button { text: "Auto gain"; enabled: section.lockin.autoGainAvailable; onClicked: section.lockin.command("auto_gain") }
-            Button { text: "Auto phase"; enabled: section.lockin.available; onClicked: section.lockin.command("auto_phase") }
-            Button { text: "Auto reserve"; enabled: section.lockin.available; onClicked: section.lockin.command("auto_reserve") }
-            Button { text: "Auto display scale"; visible: section.lockin.supportsDisplay; enabled: section.lockin.displayAvailable; onClicked: section.lockin.command("auto_scale") }
-            Button { text: "Auto offset X"; enabled: section.lockin.available; onClicked: section.lockin.command("auto_offset_x") }
-            Button { text: "Auto offset Y"; enabled: section.lockin.available; onClicked: section.lockin.command("auto_offset_y") }
-            Button { text: "Auto offset R"; enabled: section.lockin.available; onClicked: section.lockin.command("auto_offset_r") }
+            ActionButton { text: "Auto gain"; enabled: section.lockin.autoGainAvailable; onClicked: section.lockin.command("auto_gain") }
+            ActionButton { text: "Auto phase"; enabled: section.lockin.available; onClicked: section.lockin.command("auto_phase") }
+            ActionButton { text: "Auto reserve"; enabled: section.lockin.available; onClicked: section.lockin.command("auto_reserve") }
+            ActionButton { text: "Auto display scale"; visible: section.lockin.supportsDisplay; enabled: section.lockin.displayAvailable; onClicked: section.lockin.command("auto_scale") }
+            ActionButton { text: "Auto offset X"; enabled: section.lockin.available; onClicked: section.lockin.command("auto_offset_x") }
+            ActionButton { text: "Auto offset Y"; enabled: section.lockin.available; onClicked: section.lockin.command("auto_offset_y") }
+            ActionButton { text: "Auto offset R"; enabled: section.lockin.available; onClicked: section.lockin.command("auto_offset_r") }
         }
-        Button { id: diagnostics; text: checked ? "Hide diagnostic readback" : "Show diagnostic readback"; checkable: true }
+        ActionButton { id: diagnostics; text: checked ? "Hide diagnostic readback" : "Show diagnostic readback"; checkable: true }
         Label { visible: diagnostics.checked; text: section.lockin.diagnostics; color: Theme.muted; wrapMode: Text.WrapAnywhere; Layout.fillWidth: true }
     }
 }

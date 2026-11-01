@@ -53,7 +53,7 @@ ColumnLayout {
                                 anchors.fill: parent
                                 RowLayout {
                                     Label { text: "Condition " + (condition.index + 1); Layout.fillWidth: true; color: Theme.muted }
-                                    Button {
+                                    ActionButton {
                                         text: "Remove"; enabled: !form.locked
                                         onClicked: form.target.removeRow(row.modelData.key, condition.index)
                                     }
@@ -71,7 +71,7 @@ ColumnLayout {
                             }
                         }
                     }
-                    Button { text: "Add condition"; enabled: !form.locked; onClicked: form.target.addRow(row.modelData.key) }
+                    ActionButton { text: "Add condition"; enabled: !form.locked; onClicked: form.target.addRow(row.modelData.key) }
                 }
             }
         }

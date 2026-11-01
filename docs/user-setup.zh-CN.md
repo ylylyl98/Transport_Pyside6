@@ -101,8 +101,14 @@ NI 的 GPIB 硬件，其他品牌的 GPIB 接口应使用对应厂商支持的�
 
 ## 3. 配置首次使用会话
 
-点击顶部的 **Instruments**，在面板内的选择器中切换下列页面。同一 Windows
-账户下曾使用过 EXE 或源码版时，程序可能已经载入之前保存的设置。
+点击顶部的 **Instruments**，先选分组，再选页面：**Setup** 包含 Connections、
+Sample & files 和 Signal chain；**Controls** 包含 Manual、Magnet & temperature
+及两台锁相放大器；**Settings** 包含 Runtime settings。每组记住本次运行中
+上次打开的页面。同一 Windows 账户下曾使用过 EXE 或源码版时，程序可能
+已经载入之前保存的设置。
+
+测量模式通过工作区上方的标签切换。窗口较窄时，用 **Previous / Next**
+滚动标签；测量及安全清理期间不能切换模式。
 
 1. **Sample & files：**填写 **Operator**、**Device / sample** 和
    **Data folder**。用 **Browse…** 选择可写的本地目录，例如

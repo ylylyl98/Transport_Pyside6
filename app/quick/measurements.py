@@ -12,14 +12,13 @@ from datetime import datetime
 import math
 import os
 
-from PySide6.QtCore import QObject, Property, Signal, Slot
+from PySide6.QtCore import QObject, Property, Signal, Slot, QTimer
 
 from app.models import LineSweepParams
 from app.constants import V_LIMIT
 from app.experiment_metadata import capture_run_signal_chain
 from app.signal_chain import SignalChainSnapshot, signal_chain_metadata
-from app.measurement_output import dual_gate_filename_parts, gate_scan_filename_parts
-from app.cosweep_output import map_filename_parts
+from app.quick.output_preview import output_spec, preview_output
 from app.run_output import (build_planned_output, unique_planned_output, output_blocking_reason,
                             to_jsonable)
 from app.workers.dual_gate import DualGateWorker
@@ -29,13 +28,18 @@ from app.workers.photocurrent import PhotocurrentWorker
 from app.voltage_resolution import source_resolution_status, validate_voltage_points
 from app.plot_ranges import coordinate_ranges
 from app.utils import _frange_inc
-from app.quick.parameters import MODES, defaults, schema, convert, row_default, build_params, legacy_values, measurement_sections
+from app.gate_transform import derived_to_gates, gates_to_derived
+from app.quick.sampling import SamplingPreview
+from app.quick.sweep_preview import SweepPreview
+from app.quick.parameters import MODES, defaults, schema, convert, row_default, build_params, legacy_values, measurement_sections, label, descriptor
 from app.quick.run_state import MeasurementThread, PreflightThread, WorkerRelay
 
 
 class MeasurementService(QObject):
     changed = Signal()
     fieldsChanged = Signal()
+    uiSectionsChanged = Signal()
+    outputPreviewChanged = Signal()
     modeChanged = Signal()
     recordReady = Signal(object)
     runPrepared = Signal(object)
@@ -62,6 +66,19 @@ class MeasurementService(QObject):
         self._selected_backend = selected_backend_callable or (lambda: "1000")
         self._review_valid_callback = review_valid_callable or (lambda: False)
         self._values = [defaults(i) for i in range(len(MODES))]
+        self._recipe_models = {}
+        self._sweep_preview = SweepPreview(self)
+        self._sweep_preview_visible = False
+        self._sweep_preview_pending = False
+        self._sweep_preview_timer = QTimer(self)
+        self._sweep_preview_timer.setSingleShot(True)
+        self._sweep_preview_timer.setInterval(300)
+        self._sweep_preview_timer.timeout.connect(self._update_sweep_preview)
+        self._sweep_preview.changed.connect(self._sweep_preview_finished)
+        self._sampling = SamplingPreview(self)
+        self._sampling.updated.connect(self._sampling_changed)
+        self._recipe_details_visible = False
+        self._transport_coordinates = "Derived"
         self._selected_rows = [{} for _ in MODES]
         self._field_errors = [{} for _ in MODES]
         self._mode = 0
@@ -94,6 +111,8 @@ class MeasurementService(QObject):
         self._factories = {0: DualGateWorker, 1: LineSweepWorker, 2: CoSweepWorker, 3: PhotocurrentWorker, 4: LineSweepWorker}
         self._factories.update(worker_factories or {})
         self._load_settings()
+        self.fieldsChanged.connect(self.outputPreviewChanged)
+        self.fieldsChanged.connect(self._invalidate_sweep_preview)
         for signal_name in ("status_changed", "operation_changed", "protection_changed"):
             signal = getattr(manager, signal_name, None)
             if signal is not None:
@@ -147,17 +166,133 @@ class MeasurementService(QObject):
             self._fail("Wait for measurement cleanup before changing mode")
             return
         if mode != self._mode:
+            if not self._flush_recipes():
+                return
             self._mode = mode
+            self._recipe_details_visible = False
             self._confirmation = self._confirmation_granted = None
             self._phase, self._message = "idle", "Ready"
             self.modeChanged.emit()
             self.fieldsChanged.emit()
+            self.uiSectionsChanged.emit()
             self.changed.emit()
 
     mode = Property(int, lambda self: self._mode, _set_mode, notify=modeChanged)
     fields = Property("QVariantList", lambda self: schema(self._values[self._mode], self._mode, self._field_errors[self._mode]), notify=fieldsChanged)
-    uiSections = Property("QVariantList", lambda self: measurement_sections(self._values[self._mode], self._mode, self._selected_rows[self._mode], self._field_errors[self._mode]), notify=fieldsChanged)
+    def _ui_sections(self, selected=None):
+        values, mode = self._values[self._mode], self._mode
+        errors = self._field_errors[mode]
+        sections = measurement_sections(values, mode, self._selected_rows[mode] if selected is None else selected, errors,
+                                        transport_coordinates=self._transport_coordinates, sampling=self._sampling.step)
+        visible_keys = {field["key"] for section in sections for field in section["fields"]
+                        if not field.get("rowKey")}
+        recovery = []
+        for (row_key, _row_index, key), message in errors.items():
+            if row_key or key in visible_keys or key not in values or isinstance(values[key], list):
+                continue
+            field = descriptor(key, values[key], mode)
+            field.update(error=message, rowKey="", rowIndex=-1)
+            recovery.append(field)
+        if recovery:
+            sections.append(dict(title="Other invalid parameters", fields=recovery, advanced=True,
+                                 recovery=True, columns=2,
+                                 description="Invalid input was not applied. The last valid value is shown; re-enter a value to correct the error."))
+        return sections
+
+    uiSections = Property("QVariantList", lambda self: self._ui_sections(), notify=uiSectionsChanged)
+    @Property("QVariantMap", notify=fieldsChanged)
+    def filenameField(self):
+        values, mode = self._values[self._mode], self._mode
+        row_key, row_index = "", -1
+        if mode == 4 and values["conditions"]:
+            row_key = "conditions"
+            row_index = min(max(0, self._selected_rows[mode].get(row_key, 0)), len(values[row_key]) - 1)
+            current = values[row_key][row_index]
+        else:
+            current = values
+        field = descriptor("base_name", current["base_name"], mode)
+        field.update(rowKey=row_key, rowIndex=row_index)
+        error = self._field_errors[mode].get((row_key, row_index, "base_name"))
+        if error:
+            field["error"] = error
+        return field
+
+    @Property("QVariantList", notify=fieldsChanged)
+    def validationIssues(self):
+        values, mode = self._values[self._mode], self._mode
+        issues = []
+        for (row_key, row_index, key), message in self._field_errors[mode].items():
+            selected = dict(self._selected_rows[mode])
+            if row_key:
+                selected[row_key] = row_index
+            sections = self._ui_sections(selected)
+            match = next(((section, field) for section in sections for field in section["fields"]
+                          if field["key"] == key and field.get("rowKey", "") == row_key), None)
+            if match:
+                section, field = match
+                title, field_label = section["title"], field["label"]
+            else:
+                # A condition's inactive fields still belong to its recipe table.
+                section = next((item for item in sections if item.get("rowKey") == (row_key or key)), None)
+                title = section["title"] if section else (sections[0]["title"] if sections else "")
+                field_label = label(key)
+            issues.append(dict(section=title, key=key, rowKey=row_key, rowIndex=row_index,
+                               label=field_label, message=message))
+        return issues
+
+    @staticmethod
+    def _convert_input(value, default, key, mode):
+        # Translate Python's type-conversion exception only; retain domain errors.
+        if isinstance(default, (int, float)) and not isinstance(default, bool):
+            try:
+                float(value)
+            except (TypeError, ValueError, OverflowError) as exc:
+                example = "3" if isinstance(default, int) else "1.5"
+                raise ValueError(f"{label(key)}: enter a valid number (for example, {example})") from exc
+        return convert(value, default, key, mode)
+
     summary = Property(str, lambda self: self._summary(), notify=fieldsChanged)
+    @Property("QVariantMap", notify=outputPreviewChanged)
+    def outputPreview(self):
+        try:
+            if self._field_errors[self._mode]:
+                raise ValueError("Correct the highlighted fields to update the output preview")
+            return preview_output(self._values[self._mode], self._mode, self.save, self.get_signal_chain())
+        except (ValueError, TypeError, KeyError, OverflowError) as exc:
+            return {"error": str(exc), "csvNames": [], "csvCount": 0, "folder": "", "metadata": "", "log": "", "note": ""}
+    @Slot("QVariantMap", str, result="QVariantMap")
+    def previewOutputDraft(self, field, draft):
+        """Preview a filename draft without committing it or changing validation state."""
+        empty = {"csvNames": [], "csvCount": 0, "folder": "", "metadata": "", "log": "", "note": ""}
+        try:
+            key = field.get("key", "")
+            row_key = field.get("rowKey", "") or ""
+            row_index = int(field.get("rowIndex", -1))
+            if key != "base_name":
+                raise ValueError("Select the file base name to preview")
+            if row_key and (self._mode != 4 or row_key != "conditions"):
+                raise ValueError("This condition does not have an independent file base name")
+            identity = (row_key, row_index if row_key else -1, key)
+            if any(error_key != identity for error_key in self._field_errors[self._mode]):
+                raise ValueError("Correct other invalid parameters to update the output preview")
+            values = deepcopy(self._values[self._mode])
+            selected = None
+            if row_key:
+                rows = values[row_key]
+                if not 0 <= row_index < len(rows):
+                    raise ValueError("The selected condition no longer exists")
+                selected = row_index
+                rows[row_index][key] = convert(draft, row_default(row_key, self._mode)[key], key, self._mode)
+                scope = f"Condition {row_index + 1}" + (" (disabled)" if not rows[row_index].get("enabled", True) else "")
+            else:
+                values[key] = convert(draft, defaults(self._mode)[key], key, self._mode)
+                scope = "Measurement"
+            result = preview_output(values, self._mode, self.save, self.get_signal_chain(), selected_condition=selected)
+            result["editingScope"] = scope
+            return result
+        except (ValueError, TypeError, KeyError, IndexError, OverflowError) as exc:
+            return {**empty, "error": str(exc), "editingScope": ""}
+
     phase = Property(str, lambda self: self._phase, notify=changed)
     message = Property(str, lambda self: self._message, notify=changed)
     progress = Property(float, lambda self: self._progress, notify=changed)
@@ -277,16 +412,185 @@ class MeasurementService(QObject):
             import json
             self._settings.setValue(f"quick/measurements/{MODES[self._mode][0]}", json.dumps(self._values[self._mode]))
 
+    @Slot(str, result=QObject)
+    def rowModel(self, key):
+        allowed = {2: {"regions"}, 3: {"bias_conditions"}, 4: {"conditions"}, 5: {"conditions"}}
+        if key not in allowed.get(self._mode, set()):
+            return None
+        from app.quick.recipes import RecipeModel
+        identity = (self._mode, key)
+        if identity not in self._recipe_models:
+            self._recipe_models[identity] = RecipeModel(self, *identity)
+        return self._recipe_models[identity]
+
+    def _flush_recipes(self):
+        return all(model.flush() for (mode, _), model in self._recipe_models.items() if mode == self._mode)
+
+    @Slot(bool)
+    def setRecipeDetailsVisible(self, visible):
+        visible = bool(visible) and self._mode == 4
+        if visible != self._recipe_details_visible:
+            self._recipe_details_visible = visible
+            if visible:
+                self.uiSectionsChanged.emit()
+
+    def _recipe_changed(self, refresh_sections=False):
+        self._confirmation_granted = None
+        self._save_settings()
+        self.fieldsChanged.emit()
+        if refresh_sections or (self._mode == 4 and self._recipe_details_visible):
+            self.uiSectionsChanged.emit()
+        self.changed.emit()
+
+    def _sampling_changed(self):
+        self.uiSectionsChanged.emit()
+        for (mode, _), model in self._recipe_models.items():
+            if mode == self._mode:
+                model.notify_all()
+
+    transportCoordinates = Property(str, lambda self: self._transport_coordinates, notify=uiSectionsChanged)
+    sweepPreview = Property(QObject, lambda self: self._sweep_preview, constant=True)
+
+    @Slot(bool)
+    def setSweepPreviewVisible(self, visible):
+        self._sweep_preview_visible = bool(visible)
+        if not visible:
+            self._sweep_preview_timer.stop()
+            self._sweep_preview_pending = False
+        elif self._sweep_preview.stale and not self.active:
+            self._sweep_preview_pending = True
+            self._sweep_preview_timer.start()
+
+    def _invalidate_sweep_preview(self):
+        self._sweep_preview.invalidate()
+        if self._sweep_preview_visible and not self.active:
+            self._sweep_preview_pending = True
+            self._sweep_preview_timer.start()
+
+    def _sweep_preview_finished(self):
+        if self._sweep_preview_pending and not self._sweep_preview.busy and self._sweep_preview_visible and not self.active:
+            self._sweep_preview_timer.start()
+
+    def _update_sweep_preview(self):
+        if not self._sweep_preview_visible or self.active:
+            return
+        if self._sweep_preview.busy:
+            self._sweep_preview_pending = True
+            return
+        self.requestSweepPreview()
+
+    @Slot()
+    def requestSweepPreview(self):
+        if self.active:
+            self._fail("Wait for measurement cleanup before rebuilding the sweep preview")
+            return
+        if self._sweep_preview.busy:
+            if self._sweep_preview_visible:
+                self._sweep_preview_pending = True
+            return
+        self._sweep_preview_timer.stop()
+        self._sweep_preview_pending = False
+        if not self._flush_recipes() or self._field_errors[self._mode]:
+            self._sweep_preview_timer.stop()
+            self._sweep_preview_pending = False
+            self._sweep_preview.reject("Correct the highlighted input fields before previewing the sweep")
+            return
+        values = self._values[self._mode]
+        if self._mode == 4 and values["conditions"]:
+            index = min(max(0, self._selected_rows[4].get("conditions", 0)), len(values["conditions"]) - 1)
+            params = build_params(values["conditions"][index], 4)
+        else:
+            params = self.collect_params()
+        self._sweep_preview_timer.stop()
+        self._sweep_preview_pending = False
+        self._sweep_preview.request(self._mode, params, self.conns)
+
+    @Slot()
+    def useGateRegions(self):
+        if self.active or self._mode != 2:
+            return
+        if not self._flush_recipes():
+            return
+        values = self._values[2]
+        values.update(coordinate_mode="Raw", axis_fast="Vtg", axis_slow="Vbg", vds_stop=values["vds_start"])
+        self._confirmation_granted = None
+        self._save_settings()
+        self.fieldsChanged.emit()
+        self.uiSectionsChanged.emit()
+        self.changed.emit()
+
+    def _set_transport_coordinates(self, value):
+        if self._mode != 5 or value not in ("Raw", "Derived"):
+            raise ValueError("Choose Raw or Derived gate coordinates")
+        if value == self._transport_coordinates:
+            return
+        if not self._flush_recipes():
+            self.uiSectionsChanged.emit()
+            return
+        if self._field_errors[5]:
+            raise ValueError("Correct invalid parameters before changing gate coordinates")
+        values = self._values[5]
+        for row in values["conditions"]:
+            derived_to_gates(row["doping"], row["efield"], values["ratio"], values["ratio_target"])
+        self._transport_coordinates = value
+        model = self._recipe_models.get((5, "conditions"))
+        if model:
+            model.notify_all()
+        self.uiSectionsChanged.emit()
+        self.changed.emit()
+
     @Slot(str, "QVariant")
     def setValue(self, key, value):
         if self.active:
             self._fail("Parameters are locked until cleanup finishes")
             return
         try:
+            if key == "transport_coordinates":
+                self._set_transport_coordinates(str(value))
+                return
             original = defaults(self._mode)
             if key not in original or key.startswith("output_"):
                 raise ValueError("Unknown parameter: " + key)
-            self._values[self._mode][key] = convert(value, original[key], key, self._mode)
+            model = self._recipe_models.get((self._mode, key))
+            converted = self._convert_input(value, original[key], key, self._mode)
+            if self._mode == 2 and key in {"coordinate_mode", "axis_fast", "axis_slow"} and not self._flush_recipes():
+                self.uiSectionsChanged.emit()
+                return
+            replacement_rows = None
+            if self._mode == 5 and key in {"ratio", "ratio_target"}:
+                if not self._flush_recipes():
+                    self.uiSectionsChanged.emit()
+                    return
+                values = self._values[5]
+                if self._transport_coordinates == "Raw":
+                    ratio = converted if key == "ratio" else values["ratio"]
+                    target = converted if key == "ratio_target" else values["ratio_target"]
+                    if abs(ratio) < 1e-12:
+                        raise ValueError("Raw gate input requires a non-zero shared ratio")
+                    replacement_rows = []
+                    for row in values["conditions"]:
+                        vtg, vbg = derived_to_gates(row["doping"], row["efield"], values["ratio"], values["ratio_target"])
+                        doping, efield = gates_to_derived(vtg, vbg, ratio, target)
+                        if not all(math.isfinite(v) for v in (doping, efield)):
+                            raise ValueError("Gate conversion must remain finite")
+                        replacement_rows.append(dict(doping=doping, efield=efield, vtg=vtg, vbg=vbg))
+            if self._mode == 3 and key == "use_vds" and converted != self._values[3][key]:
+                recipe = self._recipe_models.get((3, "bias_conditions"))
+                if recipe is not None and not recipe.flush():
+                    # A QML checkbox may already have toggled visually. Rebuild
+                    # its descriptor so the accepted value is displayed again.
+                    self.uiSectionsChanged.emit()
+                    return
+            if model is not None and not model.flush():
+                return
+            if model is not None:
+                model.reset_rows(converted)
+                self._field_errors[self._mode] = {error_key: message for error_key, message in self._field_errors[self._mode].items() if error_key[0] != key}
+            else:
+                self._values[self._mode][key] = converted
+                if replacement_rows is not None:
+                    for row, updates in zip(self._values[5]["conditions"], replacement_rows):
+                        row.update(updates)
             self._field_errors[self._mode].pop(("", -1, key), None)
             if self._mode == 2 and key == "coordinate_mode":
                 # Coordinate selection must present executable axis choices.
@@ -306,94 +610,156 @@ class MeasurementService(QObject):
             self._confirmation_granted = None
             self._save_settings()
             self.fieldsChanged.emit()
+            self.uiSectionsChanged.emit()
             self.changed.emit()
+            if key in {"use_vds", "ratio", "ratio_target"}:
+                for (mode, _), recipe in self._recipe_models.items():
+                    if mode == self._mode:
+                        recipe.notify_all()
         except (TypeError, ValueError, OverflowError) as exc:
+            if key == "transport_coordinates":
+                self.uiSectionsChanged.emit()
             if key in self._values[self._mode] and not key.startswith("output_"):
                 self._field_errors[self._mode][("", -1, key)] = str(exc)
                 self.fieldsChanged.emit()
+                self.uiSectionsChanged.emit()
             self._fail(str(exc))
 
     @Slot(str, int, str, "QVariant")
     def setRowValue(self, key, row, column, value):
+        self._set_recipe_cell(key, row, column, value)
+
+    def _set_recipe_cell(self, key, row, column, value, *, notify_model=True):
         if self.active:
             self._fail("Parameters are locked until cleanup finishes")
-            return
+            return False
+        if self._mode == 5 and key == "conditions":
+            calculated = {"doping", "efield"} if self._transport_coordinates == "Raw" else {"vtg", "vbg"}
+            if column in calculated or column in {"ratio", "ratio_target"}:
+                self._fail("This coordinate is calculated; edit the selected gate inputs instead")
+                return False
         try:
-            if self._mode == 5 and key == "conditions" and column in {"ratio", "ratio_target", "vtg", "vbg"}:
-                raise ValueError("Gate setpoints use the shared ratio and are calculated from Doping / E-field")
-            rows = deepcopy(self._values[self._mode][key])
+            raw_gate = self._mode == 5 and key == "conditions" and self._transport_coordinates == "Raw"
+            rows = self._values[self._mode][key]
             if not isinstance(rows, list) or not 0 <= row < len(rows):
                 raise ValueError("Invalid condition row")
             default = row_default(key, self._mode)
             if column not in default:
                 raise ValueError("Unknown condition column")
-            rows[row][column] = convert(value, default[column], column, self._mode)
+            converted = self._convert_input(value, default[column], column, self._mode)
+            changes_shape = self._mode == 4 and (column in {"mode", "vds_source"} or
+                (column.startswith("raw_") and column.endswith("_active")))
+            changes_shape = changes_shape or (self._mode == 5 and column == "vds_source")
+            model = self._recipe_models.get((self._mode, key))
+            if notify_model and changes_shape and converted != rows[row][column] and model and not model.flush():
+                model.notify_row(row)
+                if self._mode == 4 and self._recipe_details_visible:
+                    self.uiSectionsChanged.emit()
+                return False
+            if raw_gate and column in {"vtg", "vbg"}:
+                values = self._values[5]
+                vtg, vbg = derived_to_gates(rows[row]["doping"], rows[row]["efield"], values["ratio"], values["ratio_target"])
+                vtg, vbg = (converted, vbg) if column == "vtg" else (vtg, converted)
+                doping, efield = gates_to_derived(vtg, vbg, values["ratio"], values["ratio_target"])
+                if not all(math.isfinite(v) for v in (doping, efield)):
+                    raise ValueError("Gate conversion must remain finite")
+                rows[row].update(vtg=vtg, vbg=vbg, doping=doping, efield=efield)
+            else:
+                rows[row][column] = converted
             self._field_errors[self._mode].pop((key, row, column), None)
-            self.setValue(key, rows)
-        except (KeyError, TypeError, ValueError) as exc:
+            self._field_errors[self._mode].pop(("", -1, key), None)
+            self._recipe_changed()
+            model = self._recipe_models.get((self._mode, key))
+            if model and notify_model:
+                model.notify_row(row)
+            return True
+        except (KeyError, TypeError, ValueError, OverflowError) as exc:
             rows = self._values[self._mode].get(key)
             if isinstance(rows, list) and 0 <= row < len(rows) and column in rows[row]:
                 self._field_errors[self._mode][(key, row, column)] = str(exc)
                 self.fieldsChanged.emit()
+                if self._mode == 4 and self._recipe_details_visible:
+                    self.uiSectionsChanged.emit()
+                model = self._recipe_models.get((self._mode, key))
+                if model:
+                    model.notify_row(row)
+            self._fail(str(exc))
+            return False
+
+    def _recipe_operation(self, key, operation, row=-1):
+        if self.active:
+            self._fail("Parameters are locked until cleanup finishes")
+            return
+        try:
+            rows = self._values[self._mode][key]
+            if not isinstance(rows, list):
+                raise ValueError("Parameter is not a row table")
+            model = self.rowModel(key)
+            was_empty = not rows
+            if model is not None and not model.flush():
+                return
+            if operation != "add" and not 0 <= row < len(rows):
+                raise ValueError("Invalid condition row")
+            if operation != "remove" and len(rows) >= 100:
+                raise ValueError("At most 100 conditions or regions are allowed")
+            if operation == "add":
+                seed = row_default(key, self._mode)
+                if self._mode == 4 and key == "conditions" and not rows:
+                    seed.update({k: deepcopy(v) for k, v in self._values[4].items() if k in seed})
+                if "name" in seed:
+                    names = {r.get("name") for r in rows}
+                    n = len(rows) + 1
+                    while f"Condition {n}" in names:
+                        n += 1
+                    seed["name"] = f"Condition {n}"
+                index = len(rows)
+            elif operation == "duplicate":
+                seed = deepcopy(rows[row])
+                if "name" in seed:
+                    seed["name"] += " copy"
+                index = row + 1
+                self._shift_row_errors(key, index)
+            else:
+                index = row
+                self._shift_row_errors(key, index, removing=True)
+            if operation == "remove":
+                if model: model.remove(index)
+                else: rows.pop(index)
+                selected = max(0, min(index, len(rows)-1))
+            else:
+                if model: model.insert(index, seed)
+                else: rows.insert(index, seed)
+                selected = index
+            self._selected_rows[self._mode][key] = selected
+            if model:
+                model.selectedIndexChanged.emit()
+            self._field_errors[self._mode].pop(("", -1, key), None)
+            self._recipe_changed(refresh_sections=(was_empty != (not rows)))
+        except (KeyError, TypeError, ValueError, OverflowError) as exc:
             self._fail(str(exc))
 
     @Slot(str)
     def addRow(self, key):
-        try:
-            rows = deepcopy(self._values[self._mode][key])
-            if not isinstance(rows, list):
-                raise ValueError("Parameter is not a row table")
-            if self._mode == 4 and key == "conditions" and not rows:
-                seed = row_default(key, 4)
-                seed.update({k: deepcopy(v) for k, v in self._values[4].items() if k in seed})
-                rows.append(seed)
-            else:
-                rows.append(row_default(key, self._mode))
-            if not self.active:
-                self._selected_rows[self._mode][key] = len(rows)-1
-            self.setValue(key, rows)
-        except (KeyError, ValueError) as exc:
-            self._fail(str(exc))
+        self._recipe_operation(key, "add")
 
     @Slot(str, int)
     def removeRow(self, key, row):
-        try:
-            rows = deepcopy(self._values[self._mode][key])
-            if not isinstance(rows, list) or not 0 <= row < len(rows):
-                raise ValueError("Invalid condition row")
-            rows.pop(row)
-            if not self.active:
-                self._shift_row_errors(key, row, removing=True)
-                self._selected_rows[self._mode][key] = max(0, min(row, len(rows)-1))
-            self.setValue(key, rows)
-        except (KeyError, ValueError) as exc:
-            self._fail(str(exc))
+        self._recipe_operation(key, "remove", row)
 
     @Slot(str, int)
     def selectRow(self, key, row):
         rows = self._values[self._mode].get(key)
         if isinstance(rows, list) and 0 <= row < len(rows):
             self._selected_rows[self._mode][key] = row
+            model = self._recipe_models.get((self._mode, key))
+            if model: model.selectedIndexChanged.emit()
             self.fieldsChanged.emit()
+            if self._mode == 4 and self._recipe_details_visible:
+                self.uiSectionsChanged.emit()
 
     @Slot(str, int)
     def duplicateRow(self, key, row):
-        try:
-            rows = deepcopy(self._values[self._mode][key])
-            if not isinstance(rows, list) or not 0 <= row < len(rows):
-                raise ValueError("Invalid condition row")
-            if len(rows) >= 100:
-                raise ValueError("At most 100 conditions or regions are allowed")
-            duplicate = deepcopy(rows[row])
-            if "name" in duplicate:
-                duplicate["name"] += " copy"
-            rows.insert(row+1, duplicate)
-            if not self.active:
-                self._shift_row_errors(key, row+1)
-                self._selected_rows[self._mode][key] = row+1
-            self.setValue(key, rows)
-        except (KeyError, TypeError, ValueError) as exc:
-            self._fail(str(exc))
+        self._recipe_operation(key, "duplicate", row)
 
     def _shift_row_errors(self, key, index, *, removing=False):
         """Keep rejection context attached to its existing recipe after edits."""
@@ -584,16 +950,7 @@ class MeasurementService(QObject):
             self._claimed = []
 
     def _plan(self, params, mode, chain):
-        if mode == 0:
-            parts = dual_gate_filename_parts(params, chain)
-        elif mode in (1, 4):
-            parts = gate_scan_filename_parts(params, chain)
-        elif mode == 2:
-            parts = map_filename_parts(params, chain)
-        else:
-            from app.signal_chain import signal_chain_filename_parts
-            parts = [f"WL{params.wl_start:g}to{params.wl_stop:g}nm", *signal_chain_filename_parts(chain)]
-        measurement = ("map_2d" if params.axis_slow != "None" else "sweep_1d") if mode == 2 else "gate_scan" if mode == 4 else MODES[mode][0]
+        measurement, parts = output_spec(params, mode, chain)
         planned = unique_planned_output(build_planned_output(self.save, measurement, params.base_name, parts))
         reason = output_blocking_reason(planned, self.save)
         if reason:
@@ -611,6 +968,8 @@ class MeasurementService(QObject):
 
     @Slot()
     def start(self):
+        if not self._flush_recipes():
+            return
         if self.active:
             self._fail("A measurement or cleanup is already in progress")
             return

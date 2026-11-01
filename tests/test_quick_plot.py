@@ -22,6 +22,37 @@ from app.quick.plot import (PlotModel, QuickPlot, NumericBuffer, envelope_segmen
 
 
 class PlotGeometryTests(unittest.TestCase):
+    def test_axis_ticks_are_readable_bounded_and_support_integer_indices(self):
+        from app.quick.plot import axis_ticks
+        np.testing.assert_allclose(axis_ticks((-1.06, 1.06)), [-1., -.5, 0., .5, 1.])
+        np.testing.assert_allclose(axis_ticks((1.06, -1.06)), [-1., -.5, 0., .5, 1.])
+        np.testing.assert_allclose(axis_ticks((-6., 206.), integer=True), [0, 50, 100, 150, 200])
+        for limits in ((-1.06, 1.06), (1.06, -1.06), (-6., 206.), (0., 2e-9)):
+            ticks = axis_ticks(limits, max_ticks=6)
+            self.assertLessEqual(len(ticks), 6)
+            self.assertTrue(all(min(limits) <= value <= max(limits) for value in ticks))
+            self.assertEqual(ticks, sorted(ticks))
+
+    def test_preferred_sample_ticks_only_apply_when_they_cover_the_view(self):
+        from app.quick.plot import axis_ticks
+        samples = [0., .25, .5, .75, 1.]
+        self.assertEqual(axis_ticks((-.06, 1.06), max_ticks=6, preferred=samples), samples)
+        self.assertEqual(axis_ticks((1.06, -.06), max_ticks=6, preferred=samples), samples)
+        self.assertEqual(axis_ticks((-2., 2.), max_ticks=6, preferred=samples), axis_ticks((-2., 2.), max_ticks=6))
+        self.assertEqual(axis_ticks((-.06, 1.06), max_ticks=4, preferred=samples), axis_ticks((-.06, 1.06), max_ticks=4))
+
+    def test_tick_labels_remain_unique_for_small_values_and_large_offsets(self):
+        from app.quick.plot import axis_ticks, format_tick
+        for limits in ((-1.1e-9, 1.1e-9), (1_000_000., 1_000_000.01)):
+            with self.subTest(limits=limits):
+                ticks = axis_ticks(limits)
+                self.assertGreaterEqual(len(ticks), 2)
+                step = min(b - a for a, b in zip(ticks, ticks[1:]))
+                labels = [format_tick(value, step) for value in ticks]
+                self.assertEqual(len(labels), len(set(labels)), labels)
+        for value in (-0.0, 0.0):
+            self.assertNotIn('-', format_tick(value, .5))
+
     def test_envelope_retains_extrema_gaps_and_order_without_mutating_data(self):
         x = np.linspace(-4, 7, 1_000_003)
         y = np.sin(x)
@@ -81,6 +112,54 @@ class PlotModelTests(unittest.TestCase):
 
     def tearDown(self):
         self.model._timer.stop()
+
+    def test_endpoint_markers_are_not_duplicated_in_legend(self):
+        self.model.setTraces([
+            dict(x=[0., 1.], y=[0., 1.], label="Sweep"),
+            dict(x=[0.], y=[0.], label="Start", marker="start"),
+            dict(x=[1.], y=[1.], label="Stop / turn", marker="turn"),
+            dict(x=[0.], y=[0.], label="End", marker="end"),
+        ])
+        self.assertEqual(self.model.legendEntries, ["Sweep"])
+        self.assertEqual([(t.label, t.marker) for t in self.model._traces],
+                         [("Sweep", ""), ("Start", "start"), ("Stop / turn", "turn"), ("End", "end")])
+        self.assertEqual(self.model._traces[1].columns['x'].values.tolist(), [0.])
+        self.assertEqual(self.model._traces[2].columns['y'].values.tolist(), [1.])
+
+    def test_preview_ticks_preserve_view_and_do_not_leak_to_live_or_heatmap(self):
+        from app.quick.plot import axis_ticks
+        samples = [0., .25, .5, .75, 1.]
+        self.model.setTraces([dict(x=samples, y=samples)], tickValues={"x": samples, "y": samples})
+        self.model.set_limits('Ids_DC', (-.06, 1.06), (-.06, 1.06))
+        limits = self.model.limits()
+        self.assertEqual(axis_ticks(limits[0], preferred=self.model._tick_values['x']), samples)
+        self.assertEqual(self.model.limits(), limits)
+        self.model.set_limits('Ids_DC', (-2., 2.), (-2., 2.))
+        self.assertEqual(axis_ticks(self.model.limits()[0], preferred=self.model._tick_values['x']),
+                         axis_ticks(self.model.limits()[0]))
+        self.model.beginRun({'x_axis': 'Vtg'})
+        self.assertEqual(self.model._tick_values, {})
+        self.model.setTraces([dict(x=samples, y=samples)], tickValues={"x": samples})
+        self.model.setHeatmap({'x': [0, 1], 'y': [0, 1], 'z': [[1, 2], [3, 4]]})
+        self.assertEqual(self.model._tick_values, {})
+        self.model.setTraces([dict(x=samples, y=samples)], tickValues={"x": samples})
+        self.model.clear()
+        self.assertEqual(self.model._tick_values, {})
+
+    def test_tick_generation_never_changes_plot_limits(self):
+        from app.quick.plot import axis_ticks, format_tick
+        p = self.model
+        p.setTraces([dict(x=[-1., 1.], y=[0., 200.])])
+        p.set_limits('Ids_DC', (-1.06, 1.06), (-6., 206.))
+        expected = p.limits()
+        for integer, bounds in ((False, expected[0]), (True, expected[1])):
+            ticks = axis_ticks(bounds, integer=integer)
+            if len(ticks) >= 2:
+                for value in ticks:
+                    format_tick(value, ticks[1] - ticks[0])
+        self.assertEqual(p.limits(), expected)
+        self.assertEqual(p.captureView()['xlim'], list(expected[0]))
+        self.assertEqual(p.captureView()['ylim'][0], list(expected[1]))
 
     def test_plan_before_first_sample_acquired_policy_readback_and_home(self):
         p = self.model
@@ -233,7 +312,7 @@ class PlotModelTests(unittest.TestCase):
         self.assertEqual(changes.count(), 1)
         captured = p.capturePreferences()
         self.assertNotIn('traces', captured)
-        self.assertLess(len(str(captured)), 250)
+        self.assertLess(len(str(captured)), 360)
         other = PlotModel()
         try:
             other.applyPreferences(captured)
@@ -302,6 +381,41 @@ class NativeQuickPlotTests(unittest.TestCase):
         # Curve painting must not inherit a marker brush and fill the next
         # trace's enclosed polygon.
         self.assertGreater(float(np.all(plot_pixels == 255, axis=2).mean()), .85)
+
+    def test_line_scatter_and_auto_render_distinct_geometry(self):
+        # The center is between the only two data samples and avoids axis grid lines.
+        def render(style):
+            trace = dict(x=[.2, .8], y=[.37, .37], color='#0055ff')
+            if style is not None:
+                trace['style'] = style
+            self.model.setTraces([trace])
+            self.model.set_limits('Ids_DC', (0., 1.), (0., 1.))
+            image = QImage(int(self.item.width()), int(self.item.height()), QImage.Format.Format_ARGB32_Premultiplied)
+            image.fill(Qt.GlobalColor.white)
+            painter = QPainter(image)
+            self.item.paint(painter)
+            painter.end()
+            return image
+
+        def blue_near(image, x, y, radius=3):
+            total = 0
+            for yy in range(round(y)-radius, round(y)+radius+1):
+                for xx in range(round(x)-radius, round(x)+radius+1):
+                    color = image.pixelColor(xx, yy)
+                    total += color.blue() > color.red() + 70 and color.blue() > color.green() + 40
+            return total
+
+        rect = self.item.panels()[0][1]
+        middle_x = rect.left() + .5 * rect.width()
+        point_x = rect.left() + .2 * rect.width()
+        y = rect.bottom() - .37 * rect.height()
+        line, scatter, auto = render('line'), render('scatter'), render(None)
+        self.assertGreater(blue_near(line, middle_x, y), 0, 'line style connects samples')
+        self.assertEqual(blue_near(scatter, middle_x, y), 0, 'scatter style never connects samples')
+        self.assertGreater(blue_near(scatter, point_x, y), 0, 'scatter style draws data points')
+        self.assertGreater(blue_near(auto, middle_x, y), 0, 'default live trace remains connected')
+        self.assertGreater(blue_near(auto, point_x, y, radius=3), blue_near(line, point_x, y, radius=3),
+                           'default short live trace retains point markers')
 
     def test_full_legend_is_created_only_while_plot_options_are_visible(self):
         root = self.view.rootObject()

@@ -58,7 +58,7 @@ def main(argv=None):
     application = QtGui.QGuiApplication.instance() or QtGui.QGuiApplication([sys.argv[0]])
     application.setApplicationName("Transport Quick History")
     application.setOrganizationName("MyLab")
-    application.setApplicationDisplayName("Transport — Measurement History")
+    application.setApplicationDisplayName("Transport — Analysis")
     application.setWindowIcon(QtGui.QIcon(str(Path(__file__).resolve().parents[2] / "assets" / "transport.ico")))
     register_types()
     engine = QtQml.QQmlApplicationEngine()

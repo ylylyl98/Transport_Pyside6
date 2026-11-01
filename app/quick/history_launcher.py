@@ -18,8 +18,9 @@ class HistoryLauncher(QtCore.QObject):
         self.folder_callable, self.offline = folder_callable, offline
         self.process = QtCore.QProcess(self)
         self._stdout, self._stderr = bytearray(), ""
-        self._message = "History opens in an independent read-only process."
+        self._message = "Analysis opens in a separate read-only window."
         self._closing = self._deferred_shutdown = False
+        self._opening = self._launch_failed = self._isolation_failed = False
         self._reloading = self._reload_opening = self._reload_reopen = False
         self._reload_session = None
         self._png_exporter = None
@@ -30,13 +31,23 @@ class HistoryLauncher(QtCore.QObject):
         self.process.readyReadStandardError.connect(self._read_stderr)
         self.process.errorOccurred.connect(self._error)
         self.process.finished.connect(self._finished)
+        self.open_timer = QtCore.QTimer(self)
+        self.open_timer.setSingleShot(True)
+        self.open_timer.setInterval(10000)
+        self.open_timer.timeout.connect(self._opening_slow)
         self.refresh_timer = QtCore.QTimer(self)
         self.refresh_timer.setInterval(500)
         self.refresh_timer.setSingleShot(True)
         self.refresh_timer.timeout.connect(lambda: self._send("refresh"))
 
     message = QtCore.Property(str, lambda s: s._message, notify=changed)
-    busy = QtCore.Property(bool, lambda s: s._reloading or s.process.state() == QtCore.QProcess.ProcessState.Starting, notify=changed)
+    opening = QtCore.Property(bool, lambda s: s._opening, notify=changed)
+    launchFailed = QtCore.Property(bool, lambda s: s._launch_failed, notify=changed)
+    busy = QtCore.Property(bool, lambda s: s._opening or s._reloading or s.process.state() == QtCore.QProcess.ProcessState.Starting, notify=changed)
+
+    def _opening_slow(self):
+        if self._opening and not self._closing:
+            self._set_message("Analysis is still opening. Measurements continue; please wait.")
 
     def _set_message(self, text):
         self._message = text
@@ -44,7 +55,7 @@ class HistoryLauncher(QtCore.QObject):
 
     @QtCore.Slot()
     def open(self):
-        if self._closing or self._reloading:
+        if self._closing or self._reloading or self._opening:
             return
         if self.process.state() != QtCore.QProcess.ProcessState.NotRunning:
             self._send("focus")
@@ -58,10 +69,13 @@ class HistoryLauncher(QtCore.QObject):
         command = worker_command("history", "--folder", str(self.folder_callable()), "--connected")
         self._stdout.clear()
         self._stderr = ""
+        self._opening = True
+        self._launch_failed = self._isolation_failed = False
+        self.open_timer.start()
         self.process.setProgram(command[0])
         self.process.setArguments(command[1:])
         self.process.setWorkingDirectory(str(Path(__file__).resolve().parents[2]))
-        self._set_message("Opening independent Qt Quick history viewer…")
+        self._set_message("Opening Analysis in a separate read-only window…")
         self.process.start()
         self.changed.emit()
 
@@ -145,8 +159,11 @@ class HistoryLauncher(QtCore.QObject):
                 continue
             event = message.get("event")
             if event == "ready":
+                self._opening = False
+                self.open_timer.stop()
                 if message.get("hardware_modules"):
-                    self._set_message("History isolation check failed: acquisition modules were loaded")
+                    self._isolation_failed = self._launch_failed = True
+                    self._set_message("Analysis isolation check failed: acquisition modules were loaded")
                     self._send("close")
                 elif self._reloading and self._reload_opening:
                     if self._reload_session is not None:
@@ -154,7 +171,7 @@ class HistoryLauncher(QtCore.QObject):
                     else:
                         self._viewer_restored()
                 else:
-                    self._set_message("History viewer is open. Measurements continue in Transport.")
+                    self._set_message("Analysis is open in a separate window. Measurements continue.")
             elif event == "reload_requested":
                 self.reload()
             elif event == "reload_session" and self._reloading:
@@ -163,7 +180,7 @@ class HistoryLauncher(QtCore.QObject):
             elif event == "session_loaded" and self._reloading:
                 self._viewer_restored()
             elif event == "session_error" and self._reloading:
-                self._finish_reload(message.get("error", "Cannot restore history session"))
+                self._finish_reload(message.get("error", "Cannot restore analysis session"))
             self.message_received.emit(message)
             # close_ready is emitted only after snapshot serialization has
             # finished. The independent renderer drains accepted jobs itself.
@@ -174,30 +191,45 @@ class HistoryLauncher(QtCore.QObject):
         self._stderr = (self._stderr + bytes(self.process.readAllStandardError()).decode("utf-8", errors="replace"))[-8000:]
 
     def _error(self, *_):
+        self._opening = False
+        self.open_timer.stop()
         if self._closing:
             return
+        self._launch_failed = True
         if self._reloading:
             self._finish_reload(self.process.errorString())
         else:
-            self._set_message("History viewer could not start: " + self.process.errorString())
+            self._set_message("Analysis could not start: " + self.process.errorString())
 
     def _finished(self, code, exit_status=QtCore.QProcess.ExitStatus.NormalExit):
         self._read_stdout()
         self._read_stderr()
+        was_opening = self._opening
+        self._opening = False
+        self.open_timer.stop()
         if self._deferred_shutdown:
             self.shutdown_ready.emit()
         if self._closing:
             return
         if self._reloading:
             if self._reload_opening:
-                self._finish_reload("History viewer could not load updated code. " + self._stderr[-1200:])
+                self._finish_reload("Analysis could not load updated code. " + self._stderr[-1200:])
             else:
                 self._continue_reload()
             return
         normal = code == 0 and exit_status == QtCore.QProcess.ExitStatus.NormalExit
+        if self._isolation_failed:
+            self._set_message("Analysis isolation check failed: acquisition modules were loaded")
+            return
+        self._launch_failed = was_opening or not normal or self._launch_failed
         if normal:
             self._reload_reopen = False
-        self._set_message("History viewer closed. Open it again to continue." if normal else "History viewer stopped: " + self._stderr[-1000:])
+        if was_opening:
+            self._set_message("Analysis closed before it was ready. Try opening it again. " + self._stderr[-1000:])
+        elif normal and not self._launch_failed:
+            self._set_message("Analysis closed. Open it again to continue.")
+        elif not normal:
+            self._set_message("Analysis stopped: " + self._stderr[-1000:])
 
     def prepare_shutdown(self):
         self._reloading = self._reload_opening = False
@@ -213,6 +245,8 @@ class HistoryLauncher(QtCore.QObject):
 
     def shutdown(self):
         self._closing = True
+        self._opening = False
+        self.open_timer.stop()
         self._reloading = self._reload_opening = False
         self.refresh_timer.stop()
         if self.process.state() != QtCore.QProcess.ProcessState.NotRunning:

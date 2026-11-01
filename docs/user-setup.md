@@ -121,9 +121,16 @@ before using it.
 
 ## 3. Configure the first session
 
-Open **Instruments** in the top bar. The selector inside that panel contains the
-pages named below. Existing settings may have been retained from an earlier EXE
-or source installation under the same Windows account.
+Open **Instruments** in the top bar, then choose a group and page. **Setup** contains
+Connections, Sample & files, and Signal chain; **Controls** contains Manual,
+Magnet & temperature, and both lock-ins; **Settings** contains Runtime settings.
+Each group remembers its last page for the current session. Existing settings
+may have been retained from an earlier EXE or source installation under the same
+Windows account.
+
+Select a measurement mode using the tabs above the workspace. In narrow windows,
+use **Previous / Next** to scroll the tabs. Mode switching is locked during
+measurements and safe cleanup.
 
 1. **Sample & files:** set **Operator**, **Device / sample**, and **Data folder**.
    Use **Browse…** to select a writable local data directory, for example

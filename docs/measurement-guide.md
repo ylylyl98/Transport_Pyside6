@@ -21,15 +21,29 @@ Across the modes, the application averages DAQ readings, plots the selected curr
 
 In Quick Gate Scan, **Trajectory** selects **Raw** voltages or **Derived** Doping/E-field coordinates. The Widgets selector uses **Raw Voltages** / **Doping / E-field**. For derived values, the coupling ratio can multiply either `Vbg` (the backward-compatible default) or `Vtg`. The displayed equations, computed voltage preview, generated sweep trajectory, plot axes, CSV columns, and run metadata all use the selected definition.
 
+Quick coordinate inputs use **(V)** with the selected equation shown alongside the range. Doping and E-field are weighted gate voltages, not calibrated carrier density or physical electric field. With `r multiplies Vbg`, `Doping = Vtg + r*Vbg` and `E-field = Vtg - r*Vbg`; selecting Vtg instead applies r to Vtg in both equations. Gate Scan names the held coordinate explicitly and previews the requested physical gate voltages at both endpoints after edits are committed. The preview applies no output; protection remains checked before acquisition. Coordinate labels consistently use purple for Doping, teal for E-field, blue for Vtg, bronze for Vbg and slate for Vds; text and equations remain the primary identifiers.
+
+Sampling controls show **Points / pass** alongside **Step**. Gate Scan keeps one editable point count shared by all active axes and shows each axis's calculated step. Vds Sweep, Map and Photocurrent keep their editable steps and show the resulting point counts. A one-point Gate Scan visits Start only. Summaries report a shorter final interval or an actual endpoint different from Stop when required by the existing worker's endpoint policy. Large summaries calculate in the background. Continuous B-field Sweep uses acquisition delay rather than a prescribed point count.
+
+Use **Preview sweep range** above the parameters, or **Sweep preview** beside **Live data**, to inspect a sweep without applying outputs. The preview commits the focused field and pending condition edits, plans in the background, and uses a separate plot. Return to Live data to see the retained acquired traces. While visible, the preview automatically follows the current page, selected condition and committed edits; rapid changes are combined before rebuilding, and obsolete background results are discarded. **Refresh** remains available for an immediate rebuild. Map previews use Fast axis horizontally and Slow axis vertically; a 1D map keeps the swept coordinate horizontally and shows point order vertically. Vds and wavelength previews likewise use their physical sweep coordinate horizontally. Gate Scan follows its swept coordinate; when several raw axes sweep together, it explicitly uses their shared Step Index. A Start circle and an End square have separate labels, including when both occupy the same position; a forward Stop / turn diamond is shown for return scans. Map previews also show physical gate bounds and rectangle outlines for merged regions. Very large paths explicitly report any display truncation; acquisition still uses the complete plan. B-field Gate Scan previews the selected condition, and continuous B-field Sweep shows only its field range, not a predicted sample count.
+
+For an L-shaped or stepped map, use **2D Map → Additional gate regions → Use Vtg / Vbg regions** if needed. Set the primary Vtg/Vbg ranges for Region 1, then **Add region** for each extra rectangle and edit its start, stop and step inline. This section is beside the map ranges and opens by default. Preview to confirm the combined region and scan order. Overlapping coordinates are measured once; disconnected rectangles are rejected by the existing planner. This supports unions of axis-aligned rectangles, rather than arbitrary polygon vertices.
+
+Plot ticks use readable intervals such as 0.5 V rather than equal subdivisions of the padded view bounds. Point order and Step Index ticks are nonnegative integers. This affects only tick labels and grid lines, not sweep values or zoom limits. Start, End and Stop / turn are labeled at their actual positions and are omitted from the trace legend to avoid duplicate labels.
+
+Preview paths and sample markers are drawn separately: the line may omit redundant straight-line vertices, while the markers use the original planned samples without compression. Sweeps of up to 2,000 points show every sample position per curve; coincident positions overlap. Dense sweeps retain their path and report that sample markers are hidden, rather than displaying an unexplained subset. The summary gives the planned point count and marker policy. Refresh recomputes the current settings; source-code changes to the Python renderer require restarting the application.
+
+Condition On/Off switches sit beside the condition title. Each raw Gate Scan axis has its Sweep switch, Start and Stop on one row. In B-field Sweep, **Fixed gate inputs** selects **Vtg / Vbg** or **Doping / E-field** for all rows. Editing either physical gate keeps the other fixed; switching views changes no setpoints. In the Vtg/Vbg view, changing the shared ratio also preserves the physical gates. Both views save through the existing Doping/E-field model and use the same execution plan and protections. The input-view choice lasts for the current application session.
+
 Live plots default to **Follow Sweep** for the x-axis: Gate Scan follows its selected Doping/E-field or single raw-voltage sweep, while 2D Map follows its fast axis. A manual x-axis override can display Step Index, `Vtg`, `Vbg`, `Vds`, Doping, or E-field; changing this display setting replots already collected points without changing the hardware trajectory.
 
 **X range: Full sweep** is the default live view: the complete execution range is shown before the first point, with a small margin. Gate Scan and 2D Map use the generated trajectory, including derived coordinates, additional regions and round-trip step indices. **Acquired data** fits the X range to recorded points; plots without a known plan also follow recorded points. Y limits follow measured values in either mode. Four-channel views share X limits and scale Y independently. The toolbar provides pan, rectangle zoom and figure saving; incoming points preserve manual X/Y limits. **Reset view** (**Reset** in a compact Quick plot, **Home** in Widgets) restores the selected range policy and automatic Y scaling. Changing the X coordinate resets X zoom, and changing the current channel resets Y zoom. Starting a new run clears the previous plan and zoom while retaining the selected range mode. Readback beyond the planned view is included automatically.
 
-Use **History** to open the separate read-only viewer for saved scans, maps and measured line cuts. This is the **Curve Compare** page in the Widgets frontend. See [History and exports](history-and-export.md).
+Use **Analysis** to open the separate read-only viewer for saved scans, maps and measured line cuts. This is the **Curve Compare** page in the Widgets frontend. See [Analysis and exports](history-and-export.md).
 
 ## Typical measurement workflow
 
-1. Start the application and open **Instruments** in the top command area. Select **Connections & protection** in the instrument panel selector.
+1. Start the application and open **Instruments** in the top command area. Select **Setup → Connections** to open **Connections & protection**.
 2. Select the GPIB/serial/DAQ addresses and the operating mode for each Keithley. Use **Scan resources** to list detected resources. Clear the address fields for unused devices before connecting: **Connect all** attempts configured, nonempty addresses.
 3. Set the save location, operator name, device ID, amplifier gain, and lock-in gain as appropriate for the experiment.
 4. Click **Connect all** and confirm that the required instruments report an OK status.
@@ -48,9 +62,64 @@ For **2D Map**, the **Keithley 2400** source option supports both 2400 and 2401 
 
 The Quick workspace separates **Measurement setup** on the left, **Live data** in the center, and **Instruments** on the right. Open Instruments, then use **Pin** (also available in View) to keep the panel beside the plot; this works at 1920×1080 with 125% scaling. Narrower windows show instruments in a right-hand drawer while keeping the global Stop and measurement actions reachable. Drag the section dividers to resize. **Hide** in the setup header expands the plot area; **View → Show parameters** restores the setup panel. The measurement log has its own panel and Close control; opening it in a narrow window selects Live plot automatically.
 
-Each measurement page groups its trajectory first and folds advanced ramps, output and plot settings; field errors must be corrected before Start. Recipe editors are visually separated from the condition list and actions. B-field Gate Scan edits the selected execution condition, and B-field Sweep displays Vtg/Vbg calculated from its shared coupling ratio.
+Start, Stop, progress and measurement status sit below the plot column, allowing the
+setup and docked instrument panels to use the full workspace height. In narrow windows,
+the same action panel remains below the workspace on both Parameters and Live plot
+pages. Actions wrap when needed; the global **STOP ALL / ZERO VOLTAGES** stays at the top.
+
+In **Live data**, switch directly between **1 plot / 2 plots / 4 plots** above the plot.
+Click the **axis title on the graph itself** (for example **Vds (V)** or **Ids_DC (A)**)
+to open its choices beside the title. Click a choice to apply it immediately. X titles
+select the shared coordinate and X range policy. Each Y title selects that plot's
+signal, keeping the other plots and their ranges. In one plot, the Y-title menu also
+provides **Second Y signal**: choosing a signal adds an overlaid curve; **None** returns
+to a single signal. The same menu chooses **Shared Y axis / Independent left / right
+Y axes**. With independent axes, clicking the right title changes the right signal.
+Titles show a small arrow, support Tab and Space/Enter, and retain a separate keyboard
+focus outline. Escape or a click outside closes the menu. A compact toolbar combines
+the **1 / 2 / 4 plot** shortcuts, view actions, export and status; groups wrap only when
+the available width is insufficient. Two plots share X and keep their Y
+ranges independent; they appear side by side when the plot is wide enough, otherwise
+one above the other. The selectors exclude duplicate signals.
+
+Selections update immediately, including points already acquired, and can be changed
+during a measurement. Overlaid values keep their original scale; independent left/right
+axes are useful when signal magnitudes differ. Pan, rectangle zoom and wheel zoom
+act on both overlaid axes. **Reset view** restores automatic ranges for the current
+layout. Switching back to two or four plots restores that layout's previous zoom;
+returning to one plot restores its single-signal or overlay arrangement. Each measurement
+page remembers its layout and signal pair; existing single/four-plot defaults remain
+compatible. An enabled channel with no finite samples is shown as waiting or empty,
+without zeros or a substituted signal.
+
+Live **Export** preserves both selected signals, axis settings and full-resolution data.
+The PNG shows the selected one/two/four-plot arrangement; its accompanying view can be restored in Analysis.
+Two-plot PNGs stack the panels and label their shared X axis once.
+Changing the display does not alter acquisition CSVs or the automatic acquisition
+export policy. Sweep preview continues to show the planned trajectory independently.
+
+Each measurement page starts with the collapsible File output card, followed by its trajectory; advanced ramps and plot settings stay folded. Field errors must be corrected before Start. Photocurrent, B-field Gate Scan, B-field Sweep and additional map regions share an inline condition editor. Change On/Off, values and sources directly; fields wrap into multiple rows to fit the sidebar, with vertical scrolling and no horizontal scrolling. **Enlarge** provides a larger editor. The setup sidebar defaults to 520 logical pixels and can be dragged up to 720; condition pages use a 420 minimum beside the live plot, and saved widths are retained within these bounds. Narrow windows still show parameters and the plot on separate pages.
+
+Collapsed section headings show their error count. **Locate error** reopens the setup,
+selects the affected condition when needed, and focuses the invalid field. If a map
+axis change hides an invalid parameter, **Other invalid parameters** keeps it editable
+and shows its last accepted value; the rejected input was not applied. Helper text
+and plot instructions follow the font size in **Runtime settings**.
+
+**Add condition / Add region** appends a default row; **Duplicate** copies the selected row immediately after it, and **Remove** deletes the selected row. The new or copied row becomes selected. In B-field Gate Scan, the first Add captures the current complete setup; after removing the last condition the global setup below becomes the active implicit recipe again. **Advanced settings** opens the selected scan's remaining ramp, acquisition and output fields. B-field Sweep keeps its shared coupling ratio and calculated, read-only Vtg/Vbg; map regions have no enable switch. Editing and row actions are locked during acquisition and cleanup.
 
 Long names, paths and numeric lists offer an inline **Expand** action or **Alt+Enter** to view/edit the full text, then Save or **Ctrl+Enter** to apply. Read-only values can also be expanded and copied. Data root has an inline folder chooser (**Alt+B**); visual wrapping preserves the stored value.
+
+The measurement, instrument and history pages share control colors in both themes:
+primary actions and selected tools are blue, stop commands are red, and disabled
+controls are gray. Keyboard focus has a separate outline. The progress bar shows
+a percentage: blue during normal work, green on completion, amber while stopping
+or cleaning up, and red on failure; the phase and status text remain visible.
+
+Buttons, tool buttons, selectors, single-line inputs and navigation tabs share a
+consistent height and vertical alignment, growing with the selected runtime font size.
+Multiline filename editors keep the height needed for their text, and graph-axis title
+buttons retain their compact size beside the graph.
 
 ## Quick-add and field-target syntax
 
@@ -71,6 +140,20 @@ Files are written under:
 The default base directory is `D:\photocurrent\data`; it is configurable under **Instruments → Sample & files**. CSV files include the requested biases, raw DAQ channels, converted current channels, and—when Vds is driven by Keithley—the measured Keithley current. Gate Scan and 2D Map also save `Vds_measured` when an NI DAQ AO channel supplies Vds, so the requested trajectory can be compared with the physical AO monitor. Gate scans additionally include derived `Doping`, `Efield`, and sweep `Direction` columns; photocurrent scans include `Wavelength`.
 
 CSV writes are flushed during acquisition, which helps preserve data already collected if a run is interrupted.
+
+In Qt Quick, the **File output** card at the top of the setup keeps **File base name**
+beside the final CSV filename preview. Typing updates a read-only draft preview;
+press Enter or leave the field to apply the name. **Expand / Alt+Enter** opens a
+larger editor with the preview in the same dialog. Long names wrap, and **Copy**
+copies complete preview filenames. Collapse the card to leave more room for the
+measurement parameters. Plot controls remain under **Plot settings**.
+
+The card shows the CSV count and destination folder; **Details** reveals full
+filename examples, metadata and the run log. In B-field Gate Scan, the card edits
+the selected condition and previews that condition at the first field target,
+while the count includes all enabled jobs. `{timestamp}` and collision suffixes
+are assigned on Start. Previewing does not change accepted parameters, reserve
+filenames or create files or directories.
 
 See [History and exports](history-and-export.md) for comparison, PNG snapshots, accompanying CSV exports and view restoration. Exported analysis CSVs have their own three-row label format; they do not replace the acquisition files.
 

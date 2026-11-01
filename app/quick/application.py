@@ -25,6 +25,7 @@ from app.quick.measurements import MeasurementService
 from app.quick.plot import PlotModel, register_types
 from app.quick.runtime import RuntimeSettings
 from app.drag_drive import dual_enabled
+from app.result_channels import plot_channel_options
 from app.ui.png_export_process import PngExportProcess
 from utils.config import cfg
 
@@ -80,6 +81,9 @@ class ApplicationBackend(QObject):
         for mode, plot in enumerate(self._plots):
             self._load_plot_preferences(mode)
             plot.preferencesChanged.connect(lambda mode=mode: self._save_plot_preferences(mode))
+        self._sync_plot_channels()
+        self._measurement.fieldsChanged.connect(self._sync_plot_channels)
+        self._instruments.signalFieldsChanged.connect(self._sync_plot_channels)
         self._plot = self._plots[self._measurement.mode]
         self._measurement.modeChanged.connect(self._select_plot)
         self._measurement.recordReady.connect(lambda record: self._plot.appendRecord(record))
@@ -99,6 +103,9 @@ class ApplicationBackend(QObject):
         self._history = HistoryLauncher(lambda: device_history_folder(self._instruments.save_root), self, offline=offline)
         self._instruments.sampleFieldsChanged.connect(self._history.folderChanged)
         self._instruments.sampleFieldsChanged.connect(self.changed)
+        for signal in (self._instruments.sampleFieldsChanged, self._instruments.signalFieldsChanged,
+                       self._instruments.calibrationChanged):
+            signal.connect(self._measurement.outputPreviewChanged)
         self._history.shutdown_ready.connect(self._retry_close)
         self._exporter = PngExportProcess(self)
         self._exporter.completed.connect(lambda result: self.report(str(result)))
@@ -180,6 +187,7 @@ class ApplicationBackend(QObject):
         legacy_default = "4-Channel Compare" if flavor == "drag_drive" else self.settings.value(f"plot_mode/{key}", "Single Plot")
         legacy = self.settings.value(f"plot_mode/{key}/{flavor}", legacy_default)
         values.setdefault("fourChannels", legacy == "4-Channel Compare")
+        values.setdefault("channelOrder", None)
         self._loading_plot_preferences = True
         try:
             self._plots[mode].applyPreferences(values)
@@ -190,6 +198,12 @@ class ApplicationBackend(QObject):
         if not self._loading_plot_preferences:
             key, flavor = self._plot_key(mode), self._plot_flavors[mode]
             self.settings.setValue(f"quick/plots/{key}/{flavor}", json.dumps(self._plots[mode].capturePreferences()))
+
+    def _sync_plot_channels(self):
+        for mode, plot in enumerate(self._plots):
+            values = self._measurement._values[mode]
+            source = values.get('vds_source', '')
+            plot.setChannelOptions(plot_channel_options(source, self._instruments.manager.connections.drag_drive_enabled))
 
     def _select_plot(self):
         self._plot = self._plots[self._measurement.mode]
