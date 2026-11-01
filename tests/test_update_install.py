@@ -16,7 +16,7 @@ class InstallHandoffTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix='更新 space ')
         self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name)
+        self.root = Path(self.tmp.name).resolve()
         self.installer = self.root / update_install.INSTALLER_NAME
         self.installer.write_bytes(b'test')
         self.install_dir = self.root / 'Program 路径'
