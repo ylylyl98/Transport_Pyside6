@@ -61,14 +61,23 @@ Transport checks the official GitHub **latest** release in the background about
 In Widgets, use **Tools → Check for updates...** and
 **Tools → Automatically check for updates** instead.
 A newer version appears in a Qt Quick top banner or the Widgets status bar with
-a download link; **Dismiss** hides
+a **Download update** button; **Dismiss** hides
 it for the current session. Checks do not interrupt measurements with a dialog.
 They run only while the application is open; closing Transport stops checks and
 there are no system push notifications. Older releases without this module need
 one manual update before they can show future release reminders.
 
-Use the banner's official Release download link and follow the idle update steps
-below. The application does not automatically download, install, or restart.
+Choose **Download update** to open the nonmodal in-app update window. Downloads
+run in the background with progress, cancellation and retry; the installer is
+saved in the Windows user cache and checked against GitHub's size and SHA-256.
+When idle, choose **Exit and install**. Transport confirms its normal instrument
+and analysis shutdown, then a separate helper waits for the process to exit,
+rechecks the installer and opens the Windows installation wizard using the current
+application folder. The application does not install without this action or restart
+measurements. **Later** keeps the application open; **Release notes** remains an
+optional website link. A release without verified download metadata uses that
+manual fallback. Versions that only open the website need one manual update to
+obtain this window.
 
 Before updating or uninstalling, finish measurements and instrument cleanup, then
 close Transport normally, including history windows and background workers. Do not

@@ -268,6 +268,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _setup_updates(self):
         self.update_service = UpdateService(self)
+        self._update_dialog = None
+        self.update_service.setInstallGuard(lambda: getattr(self, "_png_close_pending", False) or self._runtime_settings_idle())
+        self.update_service.installRequested.connect(self.close)
         self._update_notice_requested = False
         self._dismissed_update_version = ""
         self.tools_menu.addSeparator()
@@ -285,8 +288,8 @@ class MainWindow(QtWidgets.QMainWindow):
         notice_layout.addWidget(self.update_notice_label)
         self.update_download_button = QtWidgets.QPushButton("Download update")
         self.update_download_button.setToolTip(
-            "Open the release page. Stop measurements and close Transport normally before upgrading.")
-        self.update_download_button.clicked.connect(self.update_service.openRelease)
+            "Open the update dialog to download the installer.")
+        self.update_download_button.clicked.connect(self.update_service.openDialog)
         notice_layout.addWidget(self.update_download_button)
         self.update_dismiss_button = QtWidgets.QPushButton("Dismiss")
         self.update_dismiss_button.clicked.connect(self._dismiss_update_notice)
@@ -309,6 +312,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _update_release_status(self):
         service = self.update_service
+        if service.dialogVisible and self._update_dialog is None:
+            from app.ui.update_dialog import UpdateDialog
+            self._update_dialog = UpdateDialog(service, self)
         self.check_updates_action.setEnabled(not service.checking)
         self.auto_updates_action.blockSignals(True)
         self.auto_updates_action.setChecked(service.autoCheck)
@@ -597,22 +603,29 @@ class MainWindow(QtWidgets.QMainWindow):
                 return
 
     def closeEvent(self, event):
+        def cancel_pending_install():
+            service = getattr(self, "update_service", None)
+            if service is not None and getattr(service, "installPending", False):
+                service.cancelInstall("Installation was cancelled because shutdown was not confirmed.")
+
         controller = getattr(self, "bfield_transport_controller", None)
         prepare_lockin = getattr(getattr(self, "lockin_panel", None), "prepare_shutdown", None)
         if callable(prepare_lockin) and not prepare_lockin():
             if controller is not None:
                 controller.cancel_shutdown_preparation()
+            cancel_pending_install()
             event.ignore()
             return
         prepare_drive = getattr(getattr(self, "drive_lockin_panel", None), "prepare_shutdown", None)
         if callable(prepare_drive) and not prepare_drive():
             if controller is not None:
                 controller.cancel_shutdown_preparation()
+            cancel_pending_install()
             event.ignore()
             return
         if self._png_close_pending:
             if self.tab_curve_compare.prepare_shutdown():
-                event.accept()
+                self._finish_update_shutdown(event)
             else:
                 event.ignore()
             return
@@ -633,6 +646,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 # asynchronous pause, persistent-mode, and RATE/limit restore
                 # acknowledgements have completed.  This also covers a
                 # completed Driven run whose heater is still intentionally ON.
+                cancel_pending_install()
                 event.ignore()
                 return
         if getattr(self, "tab_bfield_transport", None) is not None:
@@ -648,6 +662,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "The attoDRY2100 controller could not confirm that field control stopped. "
                 "The application and instrument owners remain available. Use STOP / PAUSE or retry shutdown.",
             )
+            cancel_pending_install()
             event.ignore()
             return
         # Finish fallible hardware cleanup before permanently stopping the
@@ -666,6 +681,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "The outputs were left ON and the instrument sessions were preserved.\n\n"
                 f"{ex}",
             )
+            cancel_pending_install()
             event.ignore()
             return
         safe_2100 = self.magnet2100.shutdown()
@@ -678,23 +694,36 @@ class MainWindow(QtWidgets.QMainWindow):
                 "The attoDRY2100 controller could not confirm a safe shutdown. "
                 "Keep the application open and use STOP / PAUSE or retry shutdown.",
             )
+            cancel_pending_install()
             event.ignore()
             return
         self.magnet1000.shutdown()
         self.lakeshore335.shutdown()
         self.png_coordinator.shutdown()
         self.png_exporter.shutdown()
-        update_service = getattr(self, "update_service", None)
-        if update_service is not None:
-            update_service.close()
         self._png_close_pending = True
         # All hardware owners are now stopped. Keep the remaining export
         # drain from allowing another measurement or connection request.
         self.setEnabled(False)
         if self.tab_curve_compare.prepare_shutdown():
-            event.accept()
+            self._finish_update_shutdown(event)
         else:
             event.ignore()
+
+    def _finish_update_shutdown(self, event):
+        service = getattr(self, "update_service", None)
+        if service is not None and not service.finishShutdown():
+            self.setEnabled(True)
+            if self.centralWidget() is not None:
+                self.centralWidget().setEnabled(False)
+            for dock in self.findChildren(QtWidgets.QDockWidget):
+                dock.setEnabled(False)
+            service.openDialog()
+            event.ignore()
+            return
+        if service is not None:
+            service.close()
+        event.accept()
 
     def _plot_mode_tabs(self):
         return {

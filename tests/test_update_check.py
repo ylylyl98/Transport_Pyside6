@@ -20,7 +20,26 @@ def release(tag='v2026.10.30'):
                              + tag + '/' + updates.INSTALLER_NAME)])
 
 
+def verified_release():
+    payload = release()
+    payload['assets'][0].update(size=1024, digest='sha256:' + 'a' * 64)
+    return payload
+
+
 class UpdateParsingTests(unittest.TestCase):
+    def test_download_requires_matching_tag_size_and_sha256(self):
+        details = updates.release_details(verified_release(), 'v1.0')
+        self.assertEqual(details['installer']['sha256'], 'a' * 64)
+        for change in ({'size': True}, {'size': 0}, {'size': updates.MAX_INSTALLER_BYTES + 1},
+                       {'digest': None}, {'digest': 'sha256:bad'},
+                       {'browser_download_url': verified_release()['assets'][0]['browser_download_url'].replace('v2026.10.30', 'v2026.10.29')}):
+            payload = verified_release()
+            payload['assets'][0].update(change)
+            self.assertIsNone(updates.release_details(payload, 'v1.0')['installer'])
+        payload = verified_release()
+        payload['html_url'] = payload['html_url'].replace('v2026.10.30', 'v2026.10.29')
+        self.assertIsNone(updates.release_details(payload, 'v1.0'))
+
     def test_calendar_semver_and_older_versions(self):
         self.assertEqual(updates.parse_version('v2026.01.09'), (2026, 1, 9, 0))
         self.assertEqual(updates.parse_version('v1.2.3+build.4'), (1, 2, 3, 0))
@@ -179,3 +198,94 @@ class UpdateServiceTests(unittest.TestCase):
         with patch.object(updates.QtGui.QDesktopServices, 'openUrl') as opened:
             self.service.openRelease()
             opened.assert_not_called()
+
+    def test_download_runs_in_background_progress_cancel_and_retry(self):
+        self.service._current = 'v1.0'
+        self.service._receive(verified_release(), '')
+        entered, finished = threading.Event(), threading.Event()
+        def fake_download(**args):
+            entered.set()
+            args['events'].put(dict(type='progress', received=512, total=1024))
+            args['cancel_event'].wait(2)
+            args['events'].put(dict(type='cancelled'))
+            finished.set()
+        with patch.object(self.service, '_eligible', return_value=True), \
+                patch.object(updates, 'download_installer', side_effect=fake_download):
+            started = time.monotonic()
+            self.service.downloadUpdate()
+            self.assertLess(time.monotonic() - started, .5)
+            self.assertTrue(entered.wait(1))
+            self.service._poll_download()
+            self.assertEqual(self.service.downloadProgress, .5)
+            self.assertTrue(self.service.dialogVisible)
+            self.assertFalse(self.service.canDownload)
+            self.service.hideDialog()
+            self.assertEqual(self.service.downloadState, 'downloading')
+            self.service.cancelDownload()
+            self.assertEqual(self.service.downloadState, 'cancelling')
+            self.assertTrue(finished.wait(1))
+            self.service._poll_download()
+            self.assertEqual(self.service.downloadState, 'idle')
+            self.assertTrue(self.service.canDownload)
+        self.assertFalse(self.service._download_poll.isActive())
+
+    def test_verified_download_does_not_install_until_idle_and_shutdown_confirmed(self):
+        self.service._current = 'v1.0'
+        self.service._receive(verified_release(), '')
+        installer = Path(self.temporary.name) / updates.INSTALLER_NAME
+        installer.write_bytes(b'fake installer; never executed')
+        finished = threading.Event()
+        def fake_download(**args):
+            args['events'].put(dict(type='complete', path=str(installer), version=args['version']))
+            finished.set()
+        requested = []
+        self.service.installRequested.connect(lambda: requested.append(True))
+        with patch.object(self.service, '_eligible', return_value=True), \
+                patch.object(updates, 'download_installer', side_effect=fake_download), \
+                patch.object(updates, 'launch_after_exit') as launch:
+            self.service.downloadUpdate()
+            self.assertTrue(finished.wait(1))
+            self.service._poll_download()
+            self.assertEqual(self.service.downloadState, 'ready')
+            self.assertEqual(self.service.downloadProgress, 1.)
+            self.service.setInstallGuard(lambda: False)
+            self.service.installUpdate()
+            self.assertFalse(requested)
+            launch.assert_not_called()
+            self.service.setInstallGuard(lambda: True)
+            self.assertTrue(self.service.canInstall)
+            self.service.installUpdate()
+            self.assertEqual(requested, [True])
+            self.assertTrue(self.service.installPending)
+            launch.assert_not_called()
+            launch.side_effect = OSError('blocked helper')
+            self.assertFalse(self.service.finishShutdown())
+            self.assertFalse(self.service.installPending)
+            self.assertTrue(self.service.canInstall)
+            self.service.installUpdate()
+            launch.side_effect = None
+            self.assertTrue(self.service.finishShutdown())
+            self.assertTrue(self.service.finishShutdown())
+            self.assertEqual(launch.call_count, 2)
+            self.assertEqual(launch.call_args.args[0:2], (str(installer), 'a' * 64))
+
+    def test_close_cancels_download_without_waiting_or_launching_installer(self):
+        self.service._current = 'v1.0'
+        self.service._receive(verified_release(), '')
+        entered, finished = threading.Event(), threading.Event()
+        def fake_download(**args):
+            entered.set()
+            args['cancel_event'].wait(2)
+            args['events'].put(dict(type='cancelled'))
+            finished.set()
+        with patch.object(self.service, '_eligible', return_value=True), \
+                patch.object(updates, 'download_installer', side_effect=fake_download), \
+                patch.object(updates, 'launch_after_exit') as launch:
+            self.service.downloadUpdate()
+            self.assertTrue(entered.wait(1))
+            started = time.monotonic()
+            self.service.close()
+            self.assertLess(time.monotonic() - started, .5)
+            self.assertTrue(finished.wait(1))
+            self.assertFalse(self.service._download_poll.isActive())
+            launch.assert_not_called()

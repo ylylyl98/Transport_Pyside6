@@ -34,8 +34,9 @@ Transport 打开时会在后台检查 GitHub 正式发布，新版本可用时�
 Qt Quick 中通过 **View → Check for updates** 手动检查；可关闭
 **View → Check for updates automatically**。Widgets 中对应的 Tools 菜单项为
 **Check for updates...** 和 **Automatically check for updates**。
-更新需等待测量与清理完成后手动下载、安装，不会自动安装或重启。
-尚无此功能的旧版本需先手动更新一次。关闭程序后停止检查，没有系统推送通知，详见配置指南。
+**Download update** 会打开应用内窗口，支持后台下载、进度、取消和 SHA-256 校验。
+空闲后点击 **Exit and install**，程序正常关闭并打开 Windows 安装向导；不会自行安装或重启测量。
+只有网页下载入口的旧版本需先手动更新一次。关闭程序后停止检查，没有系统推送通知，详见配置指南。
 
 EXE 已包含 Python 和程序所需的 Python 包，使用发布版**无需另装 Python、Git、
 PySide6、NumPy 或 Matplotlib**。仪器系统驱动和可选厂商 SDK 仍需单独安装。

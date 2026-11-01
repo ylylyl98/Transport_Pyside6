@@ -38,10 +38,12 @@ While Transport is open, it checks official GitHub releases in the background an
 shows a banner when a newer version is available. In Qt Quick, use
 **View → Check for updates** to check manually, or disable
 **View → Check for updates automatically**. In Widgets, the corresponding Tools
-items are **Check for updates...** and **Automatically check for updates**. Updates
-are downloaded and installed manually after measurements and cleanup finish;
-there is no automatic installation or restart. Older versions without this
-feature need one manual update first. Closing the app stops checks; there are no
+items are **Check for updates...** and **Automatically check for updates**.
+**Download update** opens an in-app window with background download progress,
+cancellation and SHA-256 verification. Once idle, choose **Exit and install** to
+close Transport normally and open the Windows installer. Installation is never
+started without this action, and measurements are not restarted. Versions with
+only the website download link need one manual update first. Closing the app stops checks; there are no
 system push notifications. See the setup guide for details.
 
 The EXE includes Python and its application packages. You do **not** need to

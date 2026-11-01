@@ -75,6 +75,62 @@ class QuickApplicationTests(unittest.TestCase):
         self.assertIn("zero unconfirmed", self.backend.message)
         self.assertFalse(self.backend._updates._closed)
 
+    def test_install_waits_for_confirmed_hardware_and_analysis_shutdown(self):
+        service = self.backend._updates
+        service._installer_path = 'unused-test-installer.exe'
+        service._download_details = dict(sha256='a' * 64)
+        service._download_state = 'ready'
+        with patch.object(service, '_eligible', return_value=True), \
+                patch('app.update_check.launch_after_exit') as launch, \
+                patch.object(self.backend._history, 'prepare_shutdown', return_value=False):
+            service.installUpdate()
+            self.application.processEvents()
+            self.assertTrue(self.backend._hardware_closed)
+            self.assertFalse(self.backend.closeAccepted)
+            launch.assert_not_called()
+        with patch.object(service, '_eligible', return_value=True), \
+                patch('app.update_check.launch_after_exit') as launch, \
+                patch.object(self.backend._history, 'prepare_shutdown', return_value=True):
+            self.backend._retry_close()
+            self.assertTrue(self.backend.closeAccepted)
+            launch.assert_called_once()
+
+    def test_install_is_cancelled_if_hardware_shutdown_is_rejected(self):
+        service = self.backend._updates
+        service._installer_path = 'unused-test-installer.exe'
+        service._download_details = dict(sha256='a' * 64)
+        service._download_state = 'ready'
+        with patch.object(service, '_eligible', return_value=True), \
+                patch('app.update_check.launch_after_exit') as launch, \
+                patch.object(self.backend._instruments.manager, 'shutdown', side_effect=RuntimeError('zero unconfirmed')):
+            service.installUpdate()
+            self.application.processEvents()
+            self.assertFalse(self.backend.closeAccepted)
+            self.assertFalse(service.installPending)
+            self.assertEqual(service.downloadState, 'ready')
+            launch.assert_not_called()
+
+    def test_helper_start_failure_keeps_hardware_locked_and_allows_retry(self):
+        service = self.backend._updates
+        service._installer_path = 'unused-test-installer.exe'
+        service._download_details = dict(sha256='a' * 64)
+        service._download_state = 'ready'
+        with patch.object(service, '_eligible', return_value=True), \
+                patch('app.update_check.launch_after_exit', side_effect=OSError('blocked helper')):
+            service.installUpdate()
+            self.application.processEvents()
+            self.assertTrue(self.backend._hardware_closed)
+            self.assertTrue(self.backend.closing)
+            self.assertFalse(self.backend.closeAccepted)
+            self.assertFalse(service._closed)
+            self.assertTrue(service.canInstall)
+        with patch.object(service, '_eligible', return_value=True), \
+                patch('app.update_check.launch_after_exit') as launch:
+            service.installUpdate()
+            self.application.processEvents()
+            self.assertTrue(self.backend.closeAccepted)
+            launch.assert_called_once()
+
     def test_update_banner_preserves_stop_controls_and_requires_download_click(self):
         service = self.backend._updates
         service._current = 'v2026.10.28'
@@ -110,7 +166,11 @@ class QuickApplicationTests(unittest.TestCase):
             download = window.findChild(QtCore.QObject, 'downloadUpdate')
             QtTest.QTest.mouseClick(window, QtCore.Qt.MouseButton.LeftButton,
                                    pos=download.mapToScene(QtCore.QPointF(download.width()/2, download.height()/2)).toPoint())
-            opened.assert_called_once_with(QtCore.QUrl(release_url))
+            opened.assert_not_called()
+            self.assertTrue(service.dialogVisible)
+            self.assertTrue(window.findChild(QtCore.QObject, 'updateDialog').property('visible'))
+            service.hideDialog()
+            QtTest.QTest.qWait(50)
             dismiss = window.findChild(QtCore.QObject, 'dismissUpdate')
             QtTest.QTest.mouseClick(window, QtCore.Qt.MouseButton.LeftButton,
                                    pos=dismiss.mapToScene(QtCore.QPointF(dismiss.width()/2, dismiss.height()/2)).toPoint())

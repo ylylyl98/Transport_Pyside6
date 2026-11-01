@@ -71,10 +71,10 @@ class ApplicationBackend(QObject):
             review_valid_callable=self._magnet.review_valid, temperature_provider=self._magnet.measurement_settings,
             temperature_ready_callable=self._magnet.is_ready, context_provider=self._magnet.experiment_context_snapshot,
             settings=self.settings)
-        self._instruments.set_active_provider(lambda: self._measurement.active or self._closing)
-        self._magnet.set_active_provider(lambda: self._measurement.active or self._closing)
+        self._instruments.set_active_provider(lambda: self._measurement.active or self._closing or self._hardware_closed)
+        self._magnet.set_active_provider(lambda: self._measurement.active or self._closing or self._hardware_closed)
         for lockin in (self._lockin, self._drive_lockin):
-            lockin.set_active_provider(lambda: self._measurement.active or self._closing)
+            lockin.set_active_provider(lambda: self._measurement.active or self._closing or self._hardware_closed)
         self._plots = [PlotModel(self) for _ in self._measurement.modes]
         self._plot_flavors = ["drag_drive" if self._instruments.manager.connections.drag_drive_enabled else "ordinary"] * len(self._plots)
         self._loading_plot_preferences = False
@@ -114,6 +114,10 @@ class ApplicationBackend(QObject):
         self._measurement.runCompleted.connect(self._completed)
         if hasattr(self._measurement, "shutdownReady"):
             self._measurement.shutdownReady.connect(self._retry_close)
+        self._updates.setInstallGuard(lambda: not self._closing and (self._hardware_closed or self.is_idle()))
+        self._updates.installRequested.connect(self.requestClose)
+        for source in (self, self._measurement, self._instruments, self._magnet, self._lockin, self._drive_lockin):
+            source.changed.connect(self._updates.refreshInstallState)
 
     instruments = Property(QObject, lambda self: self._instruments, constant=True)
     magnet = Property(QObject, lambda self: self._magnet, constant=True)
@@ -126,7 +130,7 @@ class ApplicationBackend(QObject):
     updates = Property(QObject, lambda self: self._updates, constant=True)
     offline = Property(bool, lambda self: self._offline, constant=True)
     message = Property(str, lambda self: self._message, notify=changed)
-    closing = Property(bool, lambda self: self._closing, notify=changed)
+    closing = Property(bool, lambda self: self._closing or self._hardware_closed, notify=changed)
     closeAccepted = Property(bool, lambda self: self._close_accepted, notify=changed)
     fontSize = Property(int, lambda self: self._font_size, notify=changed)
 
@@ -296,10 +300,16 @@ class ApplicationBackend(QObject):
             return
         if self._closing:
             return
+        if self._hardware_closed:
+            self._closing = True
+            QTimer.singleShot(0, self._retry_close)
+            return
         if self._lockin.busy or self._drive_lockin.busy:
+            self._updates.cancelInstall("Wait for the lock-in operation to finish, then retry installation.")
             self.report("Wait for the lock-in operation to finish before closing")
             return
         if self._instruments._scan_busy or self._instruments.manager._operation_thread is not None:
+            self._updates.cancelInstall("Wait for connection or scanning to finish, then retry installation.")
             self.report("Wait for instrument connection or hardware scanning to finish before closing")
             return
         self._closing = True
@@ -346,12 +356,15 @@ class ApplicationBackend(QObject):
             if not self._history.prepare_shutdown():
                 return
             self.settings.sync()
+            if not self._updates.finishShutdown():
+                raise RuntimeError(self._updates.downloadMessage)
             self._updates.close()
             self._close_accepted = True
             self.changed.emit()
             self.closeReady.emit()
         except Exception as exc:
             self._closing = False
+            self._updates.cancelInstall("Close cancelled: " + str(exc))
             self._magnet.cancelShutdown()
             transport = getattr(self._measurement, "_transport", None)
             if transport is not None:

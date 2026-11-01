@@ -89,6 +89,7 @@ ApplicationWindow {
     }
     Binding { target: Theme; property: "dark"; value: window.backend.dark }
     Binding { target: Theme; property: "basePointSize"; value: window.backend.fontSize }
+    UpdateDialog { updateService: window.backend.updates }
     Shortcut { sequence: "Ctrl+L"; onActivated: window.showLog = !window.showLog }
     Shortcut { sequence: "Ctrl+Alt+H"; onActivated: window.backend.history.open() }
     Shortcut { sequence: "Ctrl+Shift+R"; enabled: window.backend.offline; onActivated: { measurementMode.focusCurrent(); window.backend.rebuildPreview() } }
@@ -371,7 +372,7 @@ ApplicationWindow {
                 ActionButton {
                     objectName: "downloadUpdate"
                     text: "Download update"
-                    onClicked: window.backend.updates.openRelease()
+                    onClicked: window.backend.updates.openDialog()
                 }
                 ActionToolButton {
                     objectName: "dismissUpdate"
