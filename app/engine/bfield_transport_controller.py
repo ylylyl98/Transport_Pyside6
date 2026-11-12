@@ -28,13 +28,16 @@ from app.engine.bfield_transport_sweep import (
     write_series_manifest,
     normalize_cooldown_policy,
     APS100_FIELD_RESOLUTION_T,
+    aps100_transport_field_limit,
 )
 from app.run_output import build_planned_output
 from app.drag_drive import DUAL_COLUMNS, dual_enabled, acquire_current_sample
 from app.signal_chain import signal_chain_metadata
 from app.utils import safe_ramp
 from utils.config import cfg
+from app.engine.aps100_rate_table import field_move_seconds
 from app.engine.transport_tasks import TaskLane
+from app.engine.stepped_transport import SteppedTransportMixin, STEP_COLUMNS
 
 
 def __getattr__(name):
@@ -44,7 +47,7 @@ def __getattr__(name):
     raise AttributeError(name)
 
 
-class BFieldTransportController(QtCore.QObject):
+class BFieldTransportController(SteppedTransportMixin, QtCore.QObject):
     continuation_changed = QtCore.Signal(bool, bool, str)
     state_changed = QtCore.Signal(str, str)
     progress_changed = QtCore.Signal(int, int, str)
@@ -92,6 +95,7 @@ class BFieldTransportController(QtCore.QObject):
         self._owner = "bfield-transport"
         self._claimed = []
         self._exclusive_acquired = False
+        self._config_pending = False
         self._stored_rates = self._stored_limits = None
         self._persistent_confirmation_granted = False
         self._writers = {}
@@ -252,10 +256,17 @@ class BFieldTransportController(QtCore.QObject):
         return cache.get() if cache is not None else getattr(self.magnet, "latest_snapshot", None)
 
     def _begin_monitor_hold(self, reason):
+        if getattr(self, "_reversal_session", False) and not self._cleanup_in_progress:
+            self._fail("Monitoring fault during B reversal workflow: " + str(reason))
+            return
         self._thermal_manual_required = True
         self.continuation_changed.emit(True, False, str(reason))
         if not self._active or self._cleanup_in_progress or self._monitor_hold is not None:
             return
+        if (self._is_stepped() and self.plan.params.magnet_backend == "1000"
+                and "APS100" in str(reason) and getattr(self, "_point_history", {})):
+            self._hysteresis_history_gap = True
+            self._quality_event("history_gap", {"reason": str(reason)})
         now = time.monotonic()
         self._monitor_hold = dict(start=now, reason=str(reason), phase=self._measurement_phase,
                                   leg=self._leg_index, target=self._target, acknowledged=False,
@@ -328,6 +339,10 @@ class BFieldTransportController(QtCore.QObject):
             hold["stamps"] = stamps
         if hold["reads"] < max(1, int(getattr(cfg.mcd, "transport_monitor_recovery_reads", 3))):
             return
+        if self._config_pending:
+            # Fresh readings cannot acknowledge a still-running rate-table
+            # transaction or make its restoration information available.
+            return
         if hold["phase"] == "biasing" and not hold["bias_ready"]:
             return
         self._monitor_hold = None
@@ -341,6 +356,8 @@ class BFieldTransportController(QtCore.QObject):
             "endpoint_hold": "endpoint", "biasing": "bias",
             "configuring": "positioning", "positioning": "positioning",
         }.get(hold["phase"])
+        if hold["phase"].startswith("step_"):
+            self._thermal_resume_action = "step"
         self.state_changed.emit("thermal_hold", "Telemetry recovered; check temperature and continue manually")
 
     def start(self, *, verified_calibration=None):
@@ -353,6 +370,13 @@ class BFieldTransportController(QtCore.QObject):
         try:
             params = self.tab.collect_params()
             self.plan = TransportSweepPlan.from_params(params)
+            self._reversal_preflight()
+            if self._is_stepped():
+                warning = getattr(getattr(self.thermal_safety, "config", cfg.lakeshore335), "sample_warning_temperature_k", None)
+                if warning is not None and params.temperature_target_k + params.temperature_tolerance_k >= float(warning):
+                    raise BFieldTransportSafetyError("Stepped temperature target/tolerance overlaps the sample warning limit")
+                if not hasattr(self.magnet, "operation_finished"):
+                    raise BFieldTransportSafetyError("Stepped transport requires acknowledged APS100 pause operations")
             if hasattr(self.tab, "freeze_output_plan"):
                 self._transport_outputs = self.tab.freeze_output_plan(params)
                 self.tab.validate_transport_output_ready(self._transport_outputs)
@@ -485,7 +509,8 @@ class BFieldTransportController(QtCore.QObject):
                 zip(self.plan.conditions, self._transport_outputs.condition_csv_paths), start=1
             ):
                 self._writers[index] = TransportCsvWriter(
-                    csv_path, condition, extra_columns=DUAL_COLUMNS if dual_enabled(self._signal_chain) else ())
+                    csv_path, condition, extra_columns=(DUAL_COLUMNS if dual_enabled(self._signal_chain) else ())
+                    + (STEP_COLUMNS if self._is_stepped() else ()))
             self._active = True
             self._enable_background_work()
             self._stop_requested = False
@@ -499,6 +524,11 @@ class BFieldTransportController(QtCore.QObject):
                 self.refresh_plot(force=True)
             self._condition_index = 0
             self._leg_index = 0
+            self._initial_overshoot_hold = False
+            self._initial_field_history = {}
+            self._hysteresis_history_gap = False
+            self._initial_direction_locked = False
+            self._initial_step_direction = 0
             self._measurement_phase = "configuring"
             self._pending_target = None
             self._last_telemetry_monotonic = None
@@ -516,8 +546,14 @@ class BFieldTransportController(QtCore.QObject):
             self._leg_timeout_s = 0.0
             self._progress_timeout_s = 0.0
             self.tab.set_sweep_locked(True)
-            self.state_changed.emit("configuring", "Programming APS100 rate and Â±6 T limits")
-            self.magnet.configure_transport(params.rate_t_per_min, 6.0)
+            limit = aps100_transport_field_limit()
+            self.state_changed.emit("configuring", f"Programming APS100 rate and ±{limit:g} T limits")
+            self._config_pending = True
+            try:
+                self.magnet.configure_transport(params.rate_t_per_min, limit)
+            except Exception:
+                self._config_pending = False
+                raise
             return True
         except Exception as exc:
             self.error.emit(str(exc))
@@ -526,6 +562,12 @@ class BFieldTransportController(QtCore.QObject):
 
     def stop(self):
         if self._cleanup_in_progress:
+            if self._cleanup_waiting == "sample_reversal":
+                self._reversal_restore_error = None
+                if getattr(self, "_reversal_pending", None) is None:
+                    self._reversal_action = None
+                self._reversal_cleanup()
+                return
             # A STOP can race the pause/restore acknowledgement of a
             # successful Driven completion.  It must strengthen cleanup, not
             # be ignored because cleanup has already started.
@@ -660,6 +702,10 @@ class BFieldTransportController(QtCore.QObject):
                 if self._transition_pending:
                     self._on_magnet_operation("pause")
                 return
+            if self._is_stepped() and self._measurement_phase == "step_pausing" and name == "pause":
+                if not self._thermal_hold:
+                    self._step_pause_ready()
+                return
             if self._transition_pending and name == "pause":
                 if self.__dict__.get("_sample_pending", 0):
                     self._endpoint_ack_waiting = True
@@ -779,6 +825,9 @@ class BFieldTransportController(QtCore.QObject):
 
     def _on_cleanup_timeout(self):
         if self._cleanup_in_progress:
+            if self._cleanup_waiting == "sample_reversal":
+                self._reversal_cleanup()
+                return
             phase = self._cleanup_waiting or "APS100"
             if phase not in self._cleanup_overdue_phases:
                 self._cleanup_overdue_phases.add(phase)
@@ -804,6 +853,10 @@ class BFieldTransportController(QtCore.QObject):
         return max(1000, int(seconds * 1000))
 
     def _request_restore(self):
+        if self._config_pending:
+            self._cleanup_waiting = "configuration"
+            self._cleanup_timer.start(self._cleanup_watchdog_ms())
+            return
         if self._cleanup_waiting == "restore":
             return
         self._cleanup_waiting = "restore"
@@ -844,7 +897,8 @@ class BFieldTransportController(QtCore.QObject):
             if selected is None:
                 self.thermal_safety.latest_snapshot = None
             continuing = (not for_reentry and not self._thermal_hold and
-                self._measurement_phase in {"positioning", "biasing", "starting_sweep", "sweeping", "endpoint_hold", "monitor_hold"})
+                (self._measurement_phase in {"positioning", "biasing", "starting_sweep", "sweeping", "endpoint_hold", "monitor_hold"}
+                 or self._measurement_phase.startswith("step_")))
             evaluate = getattr(self.thermal_safety, "evaluate_continuation", None) if continuing else None
             decision = (evaluate or self.thermal_safety.evaluate)(selected)
         except Exception as exc:
@@ -861,9 +915,12 @@ class BFieldTransportController(QtCore.QObject):
             # must not pause a sweep whose heater is already on.
             return True, decision
         state = str(getattr(getattr(decision, "state", None), "value", getattr(decision, "state", "")))
-        if state == "MONITOR_FAULT" and any(text in decision.reason for text in (
-            "reading is stale", "snapshot is unavailable", "disconnected or communication is invalid"
-        )):
+        if state == "MONITOR_FAULT" and (
+            getattr(decision, "block_code", None) in {"magnet_field_missing", "magnet_field_stale"}
+            or any(text in decision.reason for text in (
+                "reading is stale", "snapshot is unavailable", "disconnected or communication is invalid"
+            ))
+        ):
             return False, decision
         if state in {"WARNING", "COOLDOWN_HOLD"}:
             return False, decision
@@ -885,7 +942,7 @@ class BFieldTransportController(QtCore.QObject):
         if state in {"WARNING", "TRIPPED", "MONITOR_FAULT", "DISARMED"} or isinstance(detail, str):
             self._thermal_manual_required = True
             normal_wait = False
-        pending = (self._thermal_pause_pending or
+        pending = (self._config_pending or self._thermal_pause_pending or
                    (self._thermal_resume_action == "bias" and getattr(self, "_bias_inflight", False)) or
                    (self._persistent_row_transition and not self._persistent_row_entered) or
                    (self._row_persistent_ready_at is not None and time.monotonic() < self._row_persistent_ready_at))
@@ -893,7 +950,7 @@ class BFieldTransportController(QtCore.QObject):
         self.continuation_changed.emit(not normal_wait, bool(permitted and not pending), reason)
         if not manual and not normal_wait:
             return
-        if self._thermal_pause_pending:
+        if self._config_pending or self._thermal_pause_pending:
             return
         if self._thermal_resume_action == "bias" and getattr(self, "_bias_inflight", False):
             return
@@ -918,6 +975,8 @@ class BFieldTransportController(QtCore.QObject):
             if self._condition_index >= len(self.plan.conditions):
                 self._cleanup("finished")
                 return
+            self._initial_direction_locked = False
+            self._initial_field_history = {}
             self._position_at_start()
         elif self._thermal_resume_action == "positioning":
             self._thermal_resume_action = None
@@ -931,6 +990,12 @@ class BFieldTransportController(QtCore.QObject):
         elif self._thermal_resume_action == "next":
             self._thermal_resume_action = None
             self._next_condition()
+        elif self._thermal_resume_action == "step":
+            self._thermal_resume_action = None
+            if getattr(self, "_initial_overshoot_hold", False):
+                self._position_at_start()
+            else:
+                self._move_step()
         else:
             self.state_changed.emit("resuming", "Lake Shore recovery dwell complete; resuming APS100 sweep")
             self._begin_leg(self._leg_index, self._target)
@@ -955,6 +1020,8 @@ class BFieldTransportController(QtCore.QObject):
         self._telemetry_watchdog.stop()
         if not self._bias_cleanup_done:
             self._cleanup_waiting = "restore_done"
+            return
+        if self._reversal_cleanup():
             return
         if self._storage_lane is not None:
             if not self._storage_finishing:
@@ -1020,16 +1087,39 @@ class BFieldTransportController(QtCore.QObject):
         elif self._cleanup_status == "stopped": self.stopped.emit(self._cleanup_detail or "B-field Transport stopped")
 
     def _on_configured(self, result):
+        self._config_pending = False
         if not self._active:
             return
         if not result.get("success"):
-            self._fail(result.get("error", "APS100 transport configuration failed")); return
+            if self._cleanup_in_progress:
+                message = result.get("error", "APS100 transport configuration failed")
+                self._cleanup_failures.append(message)
+                self._log(message)
+                if self._cleanup_waiting == "configuration":
+                    self._request_restore()
+            else:
+                self._fail(result.get("error", "APS100 transport configuration failed"))
+            return
         self._stored_rates, self._stored_limits = result.get("stored_rates"), result.get("stored_limits")
+        if self._cleanup_in_progress:
+            if self._cleanup_waiting == "configuration":
+                self._request_restore()
+            return
+        effective_rates = result.get("rates", self._stored_rates)
+        self.plan.validation["rate_t_per_min"] = float(self.plan.params.rate_t_per_min)
         fast_rate_a = result.get("stored_fast_rate_a_per_s")
         fast_rate_t = result.get("stored_fast_rate_t_per_min")
+        self.plan.validation["aps100_rates"] = {
+            "normal": effective_rates,
+            "stored_normal": self._stored_rates,
+            "coil_constant_t_per_a": result["coil_constant_t_per_a"],
+            "source": "APS100 RANGE? and RATE? readback",
+        }
         if fast_rate_a is not None:
             self.plan.validation["aps100_rates"] = {
-                "normal": self._stored_rates,
+                "normal": effective_rates,
+                "stored_normal": self._stored_rates,
+                "coil_constant_t_per_a": result["coil_constant_t_per_a"],
                 "fast": {"rate_a_per_s": float(fast_rate_a),
                           "rate_t_per_min": float(fast_rate_t),
                           "source": "APS100 RATE? 5 readback"},
@@ -1048,13 +1138,15 @@ class BFieldTransportController(QtCore.QObject):
         else:
             self._log("APS100 transport configuration verified; Fast Mode readback unavailable on adapter")
         try:
-            validate_voltage_margin(
-                self.plan.params.rate_t_per_min,
-                inductance_h=getattr(cfg.magnet, "inductance_h", None),
-                voltage_limit_v=result.get("voltage_limit_v"),
-            )
+            for _boundary, rate in effective_rates.values():
+                validate_voltage_margin(
+                    rate, inductance_h=getattr(cfg.magnet, "inductance_h", None),
+                    voltage_limit_v=result.get("voltage_limit_v"),
+                    coil_constant=result["coil_constant_t_per_a"],
+                )
         except Exception as exc:
             self._fail(str(exc)); return
+        self._log("APS100 requested maximum " + f"{self.plan.params.rate_t_per_min:g} T/min; actual range rates " + ", ".join(f"{i}: ≤{boundary:g} A at {rate:g} T/min" for i, (boundary, rate) in effective_rates.items()))
         if self._monitor_hold is not None:
             self._monitor_hold["phase"] = "positioning"
             return
@@ -1064,17 +1156,33 @@ class BFieldTransportController(QtCore.QObject):
         self._position_at_start()
 
     def _position_at_start(self):
+        if self._reversal_mode() != "unchanged" and not getattr(self, "_reversal_session", False):
+            try:
+                if self._reversal_start():
+                    return
+            except Exception as exc:
+                self._fail(f"LS335 reversal preflight failed: {exc}")
+                return
+        if self._reversal_before_move():
+            return
+        if self._is_stepped() and self._condition_index > 0:
+            detail = "Preparing next condition: resetting to start; no acquisition during this move"
+            self._log(detail)
+            self._checkpoint_runtime("positioning", detail)
         self._measurement_phase = "positioning"
         self._target = None
         self._checkpoint_runtime("positioning", "Moving APS100 to the first sweep field")
         latest = self._latest_magnet()
         current = float(getattr(latest, "field_t", self.plan.params.start_field_t))
-        expected = abs(current - self.plan.params.start_field_t) / self.plan.params.rate_t_per_min * 60.0
+        expected = self._field_move_seconds(current, self.plan.params.start_field_t)
+        directed = self._is_stepped() and self.plan.params.magnet_backend == "1000"
         self.magnet.safe_move_to_field(
             self.plan.params.start_field_t, final_mode="driven", zero_leads=False,
             persistent_field_confirmed=self._persistent_confirmation_granted,
-            tolerance_t=self._position_tolerance_t(),
-            timeout_s=max(3600.0, expected * 2.0 + 180.0),
+            tolerance_t=(min(self.plan.params.field_tolerance_t, self.plan.params.field_endpoint_tolerance_t) if directed else self._position_tolerance_t()),
+            timeout_s=(self._hysteresis_move_timeout(current, self.plan.params.start_field_t, initial=True) if directed else max(3600.0, expected * 2.0 + 180.0)),
+            **({"monotonic_direction": (self._initial_step_direction if getattr(self, "_initial_direction_locked", False) else 0),
+                "hysteresis_options": self._hysteresis_move_options(initial=True)} if directed else {}),
         )
 
     def _confirm_initial_persistent_field(self, snapshot):
@@ -1100,6 +1208,8 @@ class BFieldTransportController(QtCore.QObject):
         return True
 
     def _start_condition(self):
+        if self._is_stepped():
+            self._reset_step_condition()
         condition = self.plan.conditions[self._condition_index]
         self._log(f"Applying condition {self._condition_index + 1}; bias settle {condition.settle_s:g} s")
         self._measurement_phase = "biasing"
@@ -1123,20 +1233,61 @@ class BFieldTransportController(QtCore.QObject):
         self._checkpoint_runtime("biasing", f"Applying condition {self._condition_index + 1}/{len(self.plan.conditions)}")
 
     def _on_safe_move(self, result):
+        if (self._active and self._cleanup_in_progress and self._is_stepped()
+                and self.plan.params.magnet_backend == "1000" and result.get("field_history")):
+            # The worker's error signal may have started cleanup before its
+            # result arrives. Preserve the failure history before files close.
+            self._quality_event("move_history", dict(history=result["field_history"], success=False,
+                                                     error=result.get("error", "")))
+        step_move = self._is_stepped() and getattr(self, "_step_move_inflight", False)
+        if step_move:
+            self._step_move_inflight = False
+        elif self._active and self._is_stepped() and self.plan.params.magnet_backend == "1000":
+            direction = result.get("monotonic_direction")
+            if direction in (-1, 1):
+                self._initial_step_direction = direction
+                self._initial_direction_locked = True
         if self._active and not self._cleanup_in_progress and result.get("cancelled"):
+            if self._is_stepped() and self.plan.params.magnet_backend == "1000":
+                if not self._accept_move_history(result, initial=not step_move):
+                    return
             reason = result.get("cancellation_reason", "user")
             self._log(f"Positioning interrupted; origin={reason}; phase={self._measurement_phase}")
             if reason == "thermal" and self._thermal_hold:
-                self._thermal_resume_action = "positioning"
+                self._thermal_resume_action = "step" if step_move else "positioning"
                 return
             if reason == "monitor" and self._monitor_hold is not None:
                 return
         if self._monitor_hold is not None or self._cleanup_in_progress:
             return
+        if self._active and self._is_stepped() and self.plan.params.magnet_backend == "1000":
+            if not self._accept_move_history(result, initial=not step_move):
+                return
+        if self._active and result.get("overshoot") and self._is_stepped() and self.plan.params.magnet_backend == "1000":
+            if not step_move:
+                self._initial_step_direction = result.get("monotonic_direction")
+                self._initial_overshoot_hold = True
+                self._reset_step_condition()
+                self._step_direction = self._initial_step_direction
+                self._step_wait_started = time.monotonic()
+                self._step_paused_at = self._step_wait_started
+                self._step_field_stamps = []
+                self._step_field_values = []
+            self._step_overshoot_hold()
+            return
         if not self._active or not result.get("success"):
             if self._active: self._fail(result.get("error", "APS100 driven-mode positioning failed"))
             return
         self._note_heater_activation(result)
+        if not step_move and self._is_stepped() and self.plan.params.magnet_backend == "1000":
+            self._initial_step_direction = result.get("monotonic_direction")
+            self._initial_overshoot_hold = False
+        if step_move:
+            if self._thermal_hold:
+                self._thermal_resume_action = "step"
+            else:
+                self._step_move_ready()
+            return
         self._log("APS100 initial positioning completed")
         if self._thermal_hold:
             self._thermal_resume_action = "positioning"
@@ -1149,6 +1300,9 @@ class BFieldTransportController(QtCore.QObject):
 
     def _begin_leg(self, leg_index, target):
         """Issue one transport leg and arm polling only after acceptance."""
+        if self._is_stepped():
+            self._move_step()
+            return
         if not self._active or self._cleanup_in_progress:
             return
         if self._monitor_hold is not None:
@@ -1279,6 +1433,14 @@ class BFieldTransportController(QtCore.QObject):
             # second pause/thermal transition while cleanup owns the device.
             self._thermal_permission()
             return
+        if (self._is_stepped() and self.plan.params.magnet_backend == "1000"
+                and self._thermal_hold and getattr(self, "_point_history", {})
+                and not self._persistent_row_transition
+                and not getattr(self, "_step_move_inflight", False)):
+            value = getattr(snapshot, "field_t", None)
+            if isinstance(value, (int, float)) and math.isfinite(value):
+                if not self._observe_point_history(snapshot):
+                    return
         if self._monitor_hold is not None:
             self._check_monitor_recovery()
             return
@@ -1290,6 +1452,9 @@ class BFieldTransportController(QtCore.QObject):
                 self._request_thermal_pause()
                 return
             self._fail(thermal_detail)
+            return
+        if self._is_stepped():
+            self._step_tick(snapshot)
             return
         target = self._target
         measured = float(getattr(snapshot, "field_t", 0.0))
@@ -1393,15 +1558,15 @@ class BFieldTransportController(QtCore.QObject):
         # acquisition cadence than the configured poll interval.
         interval = max(float(getattr(cfg.magnet, "poll_interval_s", 0.1)),
                        float(self.plan.params.acquisition_delay_s), 0.01)
-        if now - self._last_acquisition < interval:
+        if not self._is_stepped() and now - self._last_acquisition < interval:
             return
         self._last_acquisition = now
         condition = self.plan.conditions[self._condition_index]
         direction = "forward" if self._leg_index == 0 else "backward"
         row = {"Index": len(self._results), "Timestamp": time.time(), "Elapsed_s": time.monotonic() - self._started_monotonic, "Condition_index": self._condition_index + 1,
                "Condition_name": condition.name, "Direction": direction, "B_measured_T": float(getattr(snapshot, "field_t", 0.0)),
-               "B_target_T": float(self._target), "Sweep_rate_T_per_min": self.plan.params.rate_t_per_min,
-               "Sweep_rate_A_per_s": self.plan.validation["rate_a_per_s"], "Doping": condition.doping, "E-field": condition.efield,
+               "B_target_T": float(self._target), "Sweep_rate_T_per_min": self._current_range_rate(snapshot),
+               "Sweep_rate_A_per_s": (self._current_range_rate(snapshot) / (self.plan.validation["aps100_rates"]["coil_constant_t_per_a"] * 60.0) if self.plan.params.magnet_backend == "1000" and self._current_range_rate(snapshot) is not None else None), "Doping": condition.doping, "E-field": condition.efield,
                "Vtg": condition.vtg, "Vbg": condition.vbg, "Vds": condition.vds}
         row["_monitor_generation"] = self._monitor_generation
         thermal = self._latest_lakeshore()
@@ -1413,7 +1578,11 @@ class BFieldTransportController(QtCore.QObject):
             self._io_lane.submit(lambda: self._read_sample(row, condition), self._sample_ready)
         else:
             try:
-                self._commit_sample(self._read_sample(row, condition))
+                result = self._read_sample(row, condition)
+                if self._is_stepped():
+                    self._step_sample_ready(result)
+                else:
+                    self._commit_sample(result)
             except Exception as exc:
                 self._fail(str(exc))
 
@@ -1442,11 +1611,13 @@ class BFieldTransportController(QtCore.QObject):
                 try:
                     values = smu.acquire() if hasattr(smu, "acquire") else None
                     if isinstance(values, dict) and "current" in values:
-                        row["Keithley_current"] = float(values["current"])
+                        row["Ids_Keithley"] = float(values["current"])
                     elif hasattr(smu, "get_current"):
-                        row["Keithley_current"] = float(smu.get_current())
+                        row["Ids_Keithley"] = float(smu.get_current())
                     else:
-                        row["Keithley_current"] = float(smu.current)
+                        row["Ids_Keithley"] = float(smu.current)
+                    # Keep the historical CSV name as an alias of the same read.
+                    row["Keithley_current"] = row["Ids_Keithley"]
                 except Exception as exc:
                     row["Keithley_read_error"] = str(exc)
         row["Acquisition_finished"] = time.time()
@@ -1457,6 +1628,9 @@ class BFieldTransportController(QtCore.QObject):
         if error is not None:
             if not self._cleanup_in_progress:
                 self._fail(f"Transport acquisition failed: {error}")
+            return
+        if self._is_stepped():
+            self._step_sample_ready(row)
             return
         # A read spanning a monitor hold is not a valid continuous-sweep point.
         if self._monitor_hold is not None or row.get("_monitor_generation") != self._monitor_generation:
@@ -1563,8 +1737,15 @@ class BFieldTransportController(QtCore.QObject):
         if self._condition_index >= len(self.plan.conditions):
             self._cleanup("finished"); return
         if not self.plan.params.round_trip:
+            self._initial_direction_locked = False
+            self._initial_field_history = {}
             self._position_at_start()
             return
+        if self._is_stepped() and self.plan.params.magnet_backend == "1000":
+            self._initial_step_direction = self._step_direction
+            self._initial_direction_locked = True
+            prior = getattr(self, "_point_history", {})
+            self._initial_field_history = dict(prior) if prior.get("direction") == self._step_direction else {}
         self._start_condition()
         if self._io_lane is None:
             self._begin_leg(0, self.plan.params.stop_field_t)
@@ -1589,6 +1770,9 @@ class BFieldTransportController(QtCore.QObject):
             self._heater_active = True
 
     def _request_thermal_pause(self):
+        if getattr(self, "_reversal_session", False) and not self._cleanup_in_progress:
+            self._fail("Lake Shore thermal protection interrupted B reversal workflow")
+            return
         self._thermal_manual_required = True
         self.continuation_changed.emit(True, False, "Protection pause; waiting for temperature and pause acknowledgement")
         snapshot = self._latest_lakeshore()
@@ -1608,6 +1792,8 @@ class BFieldTransportController(QtCore.QObject):
             self._thermal_resume_action = "bias"
         elif phase == "endpoint_hold":
             self._thermal_resume_action = "endpoint"
+        elif phase.startswith("step_"):
+            self._thermal_resume_action = "step"
         else:
             self._thermal_resume_action = None
         self._phase_started = time.monotonic()
@@ -1730,6 +1916,8 @@ class BFieldTransportController(QtCore.QObject):
                 self._fail(detail)
             elif not self._thermal_hold:
                 self._request_thermal_pause()
+            if self._is_stepped():
+                self._step_tick()
 
     def on_lakeshore_disconnected(self):
         if self.thermal_safety is not None:
@@ -1752,6 +1940,8 @@ class BFieldTransportController(QtCore.QObject):
             return
         self._cleanup_in_progress = True
         self._io_cancel.set()
+        if getattr(self, "_reversal_session", False) and getattr(self, "_step_pending_row", None):
+            self._quality_event("reversal_unaccepted_acquisition", dict(row=self._step_pending_row, reason=detail or status))
         self._monitor_hold = None
         self._cleanup_status, self._cleanup_detail = status, detail
         if "thermal" in str(detail).lower() or "lake shore" in str(detail).lower():
@@ -1846,11 +2036,15 @@ class BFieldTransportController(QtCore.QObject):
     def _on_telemetry_watchdog(self):
         if not self._active or self._cleanup_in_progress:
             return
+        if not self._reversal_check_inputs():
+            return
         if self.__dict__.get("_monitor_hold") is not None:
             self._check_monitor_recovery()
             return
         now = time.monotonic()
         phase = self._measurement_phase
+        if self._is_stepped() and self._step_watchdog():
+            return
         if phase in {"configuring", "biasing", "starting_sweep", "endpoint_hold"} or self.__dict__.get("_thermal_pause_pending", False):
             timeout = max(180.0, float(getattr(cfg.magnet, "operation_timeout_s", 180.0)))
             started = getattr(self, "_io_progress_at" if phase == "biasing" else "_phase_started", now)
@@ -1910,7 +2104,9 @@ class BFieldTransportController(QtCore.QObject):
         return max(5.0, poll * 10.0)
 
     def _position_tolerance_t(self):
-        """Scale APS positioning tolerance for short transport spans."""
+        """Use 10 mT for stepped moves; scale continuous-sweep positioning."""
+        if self._is_stepped():
+            return self._step_position_tolerance()
         plan = getattr(self, "plan", None)
         if plan is None:
             return float(cfg.magnet.field_tolerance_t)
@@ -1973,16 +2169,31 @@ class BFieldTransportController(QtCore.QObject):
         # an overshoot must not promote that reading to a terminal sample.
         return bool(stable)
 
+    def _current_range_rate(self, snapshot):
+        if self.plan.params.magnet_backend != "1000" or "aps100_rates" not in self.plan.validation:
+            return None
+        table = self.plan.validation["aps100_rates"]
+        field = getattr(snapshot, "output_field_t", None)
+        if field is None:
+            field = getattr(snapshot, "field_t", None)
+        if field is None:
+            return None
+        current = abs(float(field)) / table["coil_constant_t_per_a"]
+        for boundary, rate in table["normal"].values():
+            if current <= boundary + 1e-9:
+                return rate
+        return None
+
+    def _field_move_seconds(self, start, end):
+        if self.plan.params.magnet_backend == "2100":
+            return 0.0  # SDK controls the ramp; configured timeout remains the floor.
+        table = self.plan.validation["aps100_rates"]
+        return field_move_seconds(start, end, table["normal"], table["coil_constant_t_per_a"])
+
     def _expected_leg_duration_s(self):
-        plan = getattr(self, "plan", None)
-        if plan is None:
-            return 0.0
-        try:
-            rate = float(plan.params.rate_t_per_min)
-            distance = abs(float(plan.params.stop_field_t) - float(plan.params.start_field_t))
-            return distance / rate * 60.0 if rate > 0.0 else 0.0
-        except (TypeError, ValueError, ZeroDivisionError):
-            return 0.0
+        if self.plan is None or (self.plan.params.magnet_backend == "1000" and "aps100_rates" not in self.plan.validation):
+            return 0.0  # No sweep is allowed until table validation succeeds.
+        return self._field_move_seconds(self.plan.params.start_field_t, self.plan.params.stop_field_t)
 
     def _checkpoint_runtime(self, phase, detail=""):
         if not self._checkpoint or self.plan is None:
@@ -1994,6 +2205,8 @@ class BFieldTransportController(QtCore.QObject):
             "leg_index": self._leg_index,
             "target_field_t": self._target,
         }
+        if self._is_stepped():
+            runtime["field_point_index"] = getattr(self, "_step_index", 0) + 1
         now = time.monotonic()
         if self._storage_lane is not None:
             if self._storage_lane.pending > 100 and not self._cleanup_in_progress:

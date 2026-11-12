@@ -537,7 +537,10 @@ class _AttoDRY2100Owner(QObject):
             }
         ):
             return
-        self.busy = True
+        with self.lifecycle_lock:
+            if self.lifecycle.get("exclusive_owner") or self.busy:
+                return
+            self.busy = True
         try:
             snapshot = self.adapter.read_snapshot()
             self.snapshot_updated.emit(snapshot)
@@ -546,7 +549,8 @@ class _AttoDRY2100Owner(QObject):
             # they never perform recovery or mutation from another thread.
             pass
         finally:
-            self.busy = False
+            with self.lifecycle_lock:
+                self.busy = False
 
     @Slot(bool)
     def set_polling_enabled(self, enabled: bool) -> None:
@@ -572,6 +576,8 @@ class AttoDRY2100Controller(QObject):
     # ``success`` is kept separate from the OperationHandle future so a GUI can
     # update safely without attaching callbacks that run on the SDK thread.
     operation_finished = Signal(str, bool, object)
+    exclusive_changed = Signal(bool, str)
+    external_stop_requested = Signal()
 
     _wake = Signal()
     _polling = Signal(bool)
@@ -607,7 +613,7 @@ class AttoDRY2100Controller(QObject):
         self._stop_handle: Optional[OperationHandle] = None
         self._shutdown_prepare_handle: Optional[OperationHandle] = None
         self._shutdown_handle: Optional[OperationHandle] = None
-        self._lifecycle = {"reserved": False, "committed": False}
+        self._lifecycle = {"reserved": False, "committed": False, "exclusive_owner": "", "exclusive_cancelled": False}
         self._state = ControllerState.DISCONNECTED
 
         def default_factory(settings: AttoDRY2100Config):
@@ -730,14 +736,15 @@ class AttoDRY2100Controller(QObject):
             timer.start()
         return request, handle
 
-    def _immediate_failure(self, command: Command, exc: BaseException) -> OperationHandle:
+    def _immediate_failure(self, command: Command, exc: BaseException, *, notify: bool = True) -> OperationHandle:
         request, handle = self._new_request(command, watchdog=False)
         request.set_state(RequestState.FAILED)
         request.client_future.set_exception(exc)
         request.drained_future.set_exception(exc)
         with self._lock:
             self._requests.pop(request.request_id, None)
-        self._immediate_failure_requested.emit(command.name.lower(), exc)
+        if notify:
+            self._immediate_failure_requested.emit(command.name.lower(), exc)
         return handle
 
     def _watchdog_timeout(self, request: _Request) -> None:
@@ -784,10 +791,48 @@ class AttoDRY2100Controller(QObject):
                 ControllerState.DETACHING, ControllerState.DETACHED,
             }
 
-    def _submit_ordinary(self, command: Command, *args) -> OperationHandle:
+    @property
+    def exclusive_owner(self) -> str:
+        with self._lock:
+            return self._lifecycle["exclusive_owner"]
+
+    def acquire_exclusive(self, owner: str) -> bool:
+        owner = str(owner or "").strip()
+        if not owner:
+            return False
+        with self._lock:
+            if (self._lifecycle["exclusive_owner"] or self._owner.busy
+                    or self.has_pending_work or not self._ordinary_allowed()
+                    or self._state in {ControllerState.DISCONNECTED, ControllerState.CONNECTING,
+                                       ControllerState.STOPPING, ControllerState.FAULTED,
+                                       ControllerState.SHUTTING_DOWN, ControllerState.TERMINATED}):
+                return False
+            self._lifecycle["exclusive_owner"] = owner
+            self._lifecycle["exclusive_cancelled"] = False
+        self._polling.emit(False)
+        self.exclusive_changed.emit(True, owner)
+        return True
+
+    def release_exclusive(self, owner: str) -> bool:
+        with self._lock:
+            if not owner or self._lifecycle["exclusive_owner"] != owner:
+                return False
+            if self._owner.busy or any(not r.drained_future.done() for r in self._requests.values()):
+                return False
+            self._lifecycle["exclusive_owner"] = ""
+        self._polling.emit(True)
+        self.exclusive_changed.emit(False, "")
+        return True
+
+    def _submit_ordinary(self, command: Command, *args, owner=None) -> OperationHandle:
         # Serialize admission and insertion with close preflight: a caller
         # must not pass the gate, then enqueue CONNECT/START after cancellation.
         with self._lock:
+            if self._lifecycle["exclusive_owner"] and owner != self._lifecycle["exclusive_owner"]:
+                return self._immediate_failure(command, AttoDRY2100StateError("attoDRY2100 is reserved by an active workflow"), notify=False)
+            if (self._lifecycle["exclusive_owner"] and self._lifecycle["exclusive_cancelled"]
+                    and command in {Command.SETPOINT, Command.START, Command.CONFIGURE_TEMPERATURE}):
+                return self._immediate_failure(command, AttoDRY2100StoppedError("workflow was externally stopped"), notify=False)
             if not self._ordinary_allowed():
                 return self._immediate_failure(
                     command,
@@ -799,6 +844,8 @@ class AttoDRY2100Controller(QObject):
         return handle
 
     def connect_async(self) -> OperationHandle:
+        if self.exclusive_owner:
+            return self._immediate_failure(Command.CONNECT, AttoDRY2100StateError("attoDRY2100 is reserved by an active workflow"), notify=False)
         if self.state is not ControllerState.DISCONNECTED or self.has_pending_work:
             return self._immediate_failure(
                 Command.CONNECT, AttoDRY2100StateError("connect is not currently allowed")
@@ -808,6 +855,8 @@ class AttoDRY2100Controller(QObject):
         return self._submit_ordinary(Command.CONNECT)
 
     def disconnect_async(self) -> OperationHandle:
+        if self.exclusive_owner:
+            return self._immediate_failure(Command.DISCONNECT, AttoDRY2100StateError("attoDRY2100 is reserved by an active workflow"), notify=False)
         if self.has_pending_work:
             return self._immediate_failure(
                 Command.DISCONNECT,
@@ -815,22 +864,25 @@ class AttoDRY2100Controller(QObject):
             )
         return self._submit_ordinary(Command.DISCONNECT)
 
-    def read_snapshot_async(self) -> OperationHandle:
-        return self._submit_ordinary(Command.READ)
+    def read_snapshot_async(self, *, owner=None) -> OperationHandle:
+        return self._submit_ordinary(Command.READ, owner=owner)
 
-    def read_field_async(self) -> OperationHandle:
-        return self._submit_ordinary(Command.READ_FIELD)
+    def read_field_async(self, *, owner=None) -> OperationHandle:
+        return self._submit_ordinary(Command.READ_FIELD, owner=owner)
 
-    def read_sample_temperature_async(self) -> OperationHandle:
-        return self._submit_ordinary(Command.READ_SAMPLE_TEMPERATURE)
+    def read_sample_temperature_async(self, *, owner=None) -> OperationHandle:
+        return self._submit_ordinary(Command.READ_SAMPLE_TEMPERATURE, owner=owner)
 
-    def read_temperature_snapshot_async(self) -> OperationHandle:
-        return self._submit_ordinary(Command.READ_TEMPERATURE)
+    def read_temperature_snapshot_async(self, *, owner=None) -> OperationHandle:
+        return self._submit_ordinary(Command.READ_TEMPERATURE, owner=owner)
 
     def configure_sample_temperature_async(self, target_k: float,
-                                           ramp_rate_k_per_min: float) -> OperationHandle:
-        self._temperature_stop_event.clear()
+                                           ramp_rate_k_per_min: float, *, owner=None) -> OperationHandle:
         with self._lock:
+            if self._lifecycle["exclusive_owner"] and owner != self._lifecycle["exclusive_owner"]:
+                return self._immediate_failure(Command.CONFIGURE_TEMPERATURE, AttoDRY2100StateError("attoDRY2100 is reserved by an active workflow"), notify=False)
+            if self._lifecycle["exclusive_owner"] and self._lifecycle["exclusive_cancelled"]:
+                return self._immediate_failure(Command.CONFIGURE_TEMPERATURE, AttoDRY2100StoppedError("workflow was externally stopped"), notify=False)
             if self._stop_handle is not None:
                 if self._stop_handle.state is not RequestState.SUCCEEDED:
                     return self._immediate_failure(
@@ -839,18 +891,23 @@ class AttoDRY2100Controller(QObject):
                     )
                 self._stop_handle = None
                 self.stop_event.clear()
+            self._temperature_stop_event.clear()
         return self._submit_ordinary(
-            Command.CONFIGURE_TEMPERATURE, target_k, ramp_rate_k_per_min
+            Command.CONFIGURE_TEMPERATURE, target_k, ramp_rate_k_per_min, owner=owner
         )
 
-    def stop_sample_temperature_control_async(self) -> OperationHandle:
-        return self._submit_ordinary(Command.STOP_TEMPERATURE)
+    def stop_sample_temperature_control_async(self, *, owner=None) -> OperationHandle:
+        return self._submit_ordinary(Command.STOP_TEMPERATURE, owner=owner)
 
     def verify_continuous_completion_async(self, target_t: float, gate_t: float) -> OperationHandle:
         return self._submit_ordinary(Command.VERIFY_COMPLETION, target_t, gate_t)
 
-    def set_h_setpoint_async(self, target_t: float) -> OperationHandle:
+    def set_h_setpoint_async(self, target_t: float, *, owner=None) -> OperationHandle:
         with self._lock:
+            if self._lifecycle["exclusive_owner"] and owner != self._lifecycle["exclusive_owner"]:
+                return self._immediate_failure(Command.SETPOINT, AttoDRY2100StateError("attoDRY2100 is reserved by an active workflow"), notify=False)
+            if self._lifecycle["exclusive_owner"] and self._lifecycle["exclusive_cancelled"]:
+                return self._immediate_failure(Command.SETPOINT, AttoDRY2100StoppedError("workflow was externally stopped"), notify=False)
             if self._stop_handle is not None:
                 if self._stop_handle.state is not RequestState.SUCCEEDED:
                     return self._immediate_failure(
@@ -859,13 +916,18 @@ class AttoDRY2100Controller(QObject):
                     )
                 self._stop_handle = None
                 self.stop_event.clear()
-        return self._submit_ordinary(Command.SETPOINT, target_t)
+        return self._submit_ordinary(Command.SETPOINT, target_t, owner=owner)
 
-    def start_field_control_async(self) -> OperationHandle:
-        return self._submit_ordinary(Command.START)
+    def start_field_control_async(self, *, owner=None) -> OperationHandle:
+        return self._submit_ordinary(Command.START, owner=owner)
 
-    def request_stop(self) -> OperationHandle:
+    def request_stop(self, *, owner=None) -> OperationHandle:
         with self._lock:
+            external = bool(self._lifecycle["exclusive_owner"] and owner != self._lifecycle["exclusive_owner"])
+            if external:
+                self._lifecycle["exclusive_cancelled"] = True
+                self.external_stop_requested.emit()
+            self._temperature_stop_event.set()
             if self._state in {ControllerState.DISCONNECTED, ControllerState.DETACHED} and not self._thread.isRunning():
                 return self._immediate_failure(Command.STOP, AttoDRY2100StateError("no active field-control owner"))
             if self._lifecycle.get("committed"):
@@ -902,6 +964,8 @@ class AttoDRY2100Controller(QObject):
         cannot use it as a replacement for fail-safe shutdown.
         """
         with self._lock:
+            if self._lifecycle["exclusive_owner"]:
+                return self._immediate_failure(Command.DETACH_COMPLETED, AttoDRY2100StateError("attoDRY2100 is reserved by an active workflow"), notify=False)
             if self.stop_event.is_set() or self._stop_handle is not None or self._shutdown_handle is not None:
                 return self._immediate_failure(
                     Command.DETACH_COMPLETED,
@@ -935,20 +999,21 @@ class AttoDRY2100Controller(QObject):
         self._wake.emit()
         return handle
 
-    def retry_stop(self) -> OperationHandle:
+    def retry_stop(self, *, owner=None) -> OperationHandle:
         with self._lock:
             if self._stop_handle is None:
-                return self.request_stop()
+                return self.request_stop(owner=owner)
             if self._stop_handle.state not in {RequestState.FAILED, RequestState.CANCELLED}:
                 return self._stop_handle
             self._stop_handle = None
-        return self.request_stop()
+        return self.request_stop(owner=owner)
 
     def set_polling_enabled(self, enabled: bool) -> None:
         self._polling.emit(bool(enabled))
 
     def request_shutdown(self) -> OperationHandle:
         self.stop_event.set()
+        self._temperature_stop_event.set()
         self._mailbox.cancel_queued(
             mutations_only=False,
             exc=AttoDRY2100StoppedError("controller is shutting down"),
@@ -1032,6 +1097,7 @@ class AttoDRY2100Controller(QObject):
             return True
         with self._lock:
             self.stop_event.set()
+            self._temperature_stop_event.set()
             cancelled = self._mailbox.cancel_queued(
                 mutations_only=False,
                 exc=AttoDRY2100StoppedError("application close is preparing field Stop"),

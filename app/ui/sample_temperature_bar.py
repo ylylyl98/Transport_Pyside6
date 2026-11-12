@@ -118,6 +118,9 @@ class SampleTemperatureBar(QtWidgets.QFrame):
         layout.addWidget(self.message)
         controller.snapshot_updated.connect(self.on_snapshot)
         controller.control_result.connect(self._on_control_result)
+        pending_signal = getattr(controller, "input_configuration_pending_changed", None)
+        if pending_signal is not None:
+            pending_signal.connect(self._on_input_configuration_pending)
         controller.error.connect(self._on_error)
         controller.fault.connect(self._on_fault)
         controller.disconnected.connect(self._on_disconnected)
@@ -416,7 +419,14 @@ class SampleTemperatureBar(QtWidgets.QFrame):
             self._last_ready = ready
             self.readiness_changed.emit(ready)
 
+    def _on_input_configuration_pending(self, pending):
+        if pending:
+            self._snapshot = None
+            self._stable_since = None
+        self._update_ready()
+
     def is_ready(self):
+        if getattr(self.controller, "input_configuration_pending", False): return False
         if self._backend != "1000" or not self._wait: return True
         if self._pending_operation or self._control_failed: return False
         if self._controls_seen and self._control_state is None: return False

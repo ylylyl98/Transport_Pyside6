@@ -263,6 +263,7 @@ class AttoDRY2100Adapter:
 
     def read_snapshot(self):
         if not self.connected: raise AttoDRY2100ConnectionError("attoDRY2100 is not connected")
+        started_monotonic = time.monotonic()
         field_t = self.read_field()
         setpoint = self._finite_optional(self._optional("getHSetPoint", self.channel), "setpoint")
         temperature = self._finite_optional(self._optional("getTemperature"), "temperature")
@@ -282,7 +283,7 @@ class AttoDRY2100Adapter:
             )),
             vti_temperature_readback=callable(getattr(self._vti, "getTemperature", None)),
         )
-        return AttoDRY2100Snapshot(field_t=field_t, monotonic_s=time.monotonic(), setpoint_t=setpoint,
+        return AttoDRY2100Snapshot(field_t=field_t, monotonic_s=started_monotonic, setpoint_t=setpoint,
                                    temperature_k=temperature, status=status,
                                    lead_field_t=self._finite_optional(self._optional("getFieldsInLeads", self.channel), "lead field"),
                                    capabilities=capabilities)
@@ -312,6 +313,7 @@ class AttoDRY2100Adapter:
     def read_temperature_snapshot(self) -> AttoDRY2100TemperatureSnapshot:
         if not self.connected:
             raise AttoDRY2100ConnectionError("attoDRY2100 is not connected")
+        started_monotonic = time.monotonic()
         sample_temperature = self.read_sample_temperature()
         sample_setpoint = self._finite_optional(
             self._temperature_call(self._sample, "getSetPoint"), "sample setpoint"
@@ -338,6 +340,7 @@ class AttoDRY2100Adapter:
             self._vti, "getTempControlStatus", required=False
         )
         return AttoDRY2100TemperatureSnapshot(
+            monotonic_s=started_monotonic,
             sample_temperature_k=sample_temperature,
             sample_setpoint_k=sample_setpoint,
             sample_control_active=(sample_control if type(sample_control) is bool else None),
@@ -382,6 +385,9 @@ class AttoDRY2100Adapter:
         ):
             return current
 
+        # A STOP may arrive while the preceding SDK read is blocked.
+        if stop_event is not None and stop_event.is_set():
+            raise AttoDRY2100StoppedError("stop requested")
         self._temperature_call(self._sample, "setSetPoint", target)
         actual_target = self._finite_optional(
             self._temperature_call(self._sample, "getSetPoint"), "sample setpoint"

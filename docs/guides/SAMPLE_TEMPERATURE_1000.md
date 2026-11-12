@@ -5,9 +5,38 @@ Open **Instruments → Magnet**, select **attoDRY1000 (APS100)**, and connect
 Lake Shore 335 sample output independently of the APS100 persistent-switch heater.
 The default channel mapping is sample B and magnet/reservoir A.
 
+## Sensor current reversal (AC excitation)
+
+In **Instruments → Magnet → Sample temperature**, the **LS335 sensor current
+reversal** controls show independent A/B readbacks and explicit ON/OFF buttons.
+Only PTC/NTC RTD inputs support this control. OFF selects DC excitation: temperature
+readout continues, but thermal EMF compensation is lost. It does not turn off the
+sensor, temperature polling, or heater output. The [official Model 335 manual](https://www.lakeshore.com/docs/default-source/product-downloads/335_manual.pdf),
+section 4.4.5 and the `INTYPE` command reference, describes the alternating
+excitation and its possible pickup in sensitive measurements.
+
+The application reads the existing input settings, changes only compensation,
+and verifies sensor type, autorange, units and reversal. A fixed range must also
+match; an autoranging input may select a new range. A/B settings are refreshed
+with control telemetry and stored with run-start context. Unknown, stale or
+unsupported settings are displayed explicitly; connecting or loading a recipe
+never applies a default reversal setting.
+
+Changes require idle measurement workflows and, when APS100 is connected, fresh
+stationary fault-free telemetry. A stationary nonzero field is allowed. A shared
+command reservation prevents a conflicting magnet operation. New measurements
+are blocked until the setting transaction completes; old temperature samples and
+stability windows are invalidated and new readings qualify again. B-field Sweep
+shows the status. Its default **Unchanged** mode never automatically toggles B;
+the APS100 Stepped **Per point** and **Whole sweep** modes can do so explicitly.
+A must already be ON and is never changed automatically. Confirm temperature
+offset and measurement noise on the actual setup before choosing OFF for a run.
+See [Sample B current reversal during APS100 stepped sweeps](../measurement-guide.md#sample-b-current-reversal-during-aps100-stepped-sweeps)
+for the ON qualification windows, OFF acquisition, restoration and interruption rules.
+
 ## APS100 / sample-heater interlock
 
-LS335 temperature commands require a fresh APS100 observation confirming idle,
+LS335 sample-heating commands require a fresh APS100 observation confirming idle,
 fault-free standby, persistent-switch heater OFF, and zero magnet field and power
 supply output. This includes target-only and Keep-range requests: their effect
 depends on the instrument's existing control configuration. Driven operation,
@@ -161,3 +190,116 @@ Command definitions were checked against the
 sections 4.5.1.7.7, 5.3 and 6.4.1 (INTYPE?, HTRSET?, SETP, RAMP, RANGE, HTR? and ZONE?).
 Verification uses fake VISA resources and mock adapters only; real instrument
 timing and heating have not been tested.
+
+## Stepped B-field Sweep
+
+APS100 Stepped mode uses **directional approach → confirmed pause → independent
+field and temperature qualification → extra delay → measure → post-read verification**.
+The nominal targets schedule sampling; accepted samples use the instrument field
+readback as their x coordinate. A stable offset does not require manual Continue.
+These are current-derived readbacks, not independent measurements of the sample's
+true field. Remanence, calibration error and unobserved transients remain possible.
+
+The software uses up to two stages: approximately 80% of the remaining distance,
+then the final target at 20% of the per-run band rates (limited by APS100 resolution).
+It does not reproduce PPMS firmware or use oscillating approach. A small overshoot
+within the acceptance envelope is paused and qualified without reversing. A stalled
+move can also qualify if the confirmed stationary readback is within acceptance.
+
+The separately editable commissioning defaults are:
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| Approach stopping tolerance | ±0.2 mT (±2 Oe) | Fine motion stopping threshold; capped by endpoint acceptance |
+| Point acceptance | ±0.5 mT (±5 Oe) | Allowed nominal-target offset at interior samples |
+| Endpoint acceptance | ±0.2 mT (±2 Oe) | Start, turn and final endpoint acceptance; also bounds the scan envelope |
+| Maximum history reversal | 0.2 mT (2 Oe) | Largest detected backtracking from the directional extreme |
+| Maximum field window span | 0.2 mT (2 Oe) | Independent field-stability peak-to-peak limit |
+| Maximum field drift | 0.1 mT/s (1 Oe/s) | Absolute fitted drift during the field window |
+| Maximum actual point gap | 0 (automatic) | Zero uses twice the largest planned interval; an explicit gap must cover that interval |
+| Field stability window / extra delay | 2 s / 1 s | At least three fresh readings; delay starts after both field and temperature qualify |
+| Field qualification / no-progress timeout | 60 s / 15 s | Separate from the temperature wait; no-progress time is extended for rates too slow to move one readback quantum |
+
+Set these values for the smallest feature that must be resolved. They are not field
+accuracy specifications. The first point is qualified in the preparation direction;
+later points follow the measured branch. Passed interior nominal targets are logged
+and skipped, never revisited or filled with duplicate readings. The turning point is
+never silently skipped. A measured gap over the configured limit terminates the run
+with a coverage-failure record instead of silently interpolating missing features.
+
+History includes acquired observations before, during and after motion, after pause,
+and through qualification/acquisition. Min/max field and maximum reverse excursion
+are retained across retries and protection interruptions. Detected history reversal,
+endpoint-envelope violation, unacceptable stationary offset, or qualification timeout
+ends the run through normal protective cleanup. Existing data remain saved and the
+event log/checkpoint records the reason; invalid acquisitions are retained as labeled
+unaccepted events rather than inserted into the valid measurement CSV. Protection
+holds still use their existing manual recovery. A known APS100 telemetry gap leaves
+the magnetic history unverified and prevents resuming the same measured branch.
+
+Motion timeouts are based on distance and verified rates, including the slow tail,
+with separate preparation overhead; there is no one-hour minimum. Field and
+temperature readiness have independent budgets and a total point deadline prevents
+alternating readiness from keeping a point alive indefinitely. Automatic
+same-direction correction uses the remaining field budget, not a fresh timeout.
+
+APS100 persistent-switch current matching and supply-lead zero completion also
+default to 10 mT, configured separately by `magnet.current_match_tolerance_t`
+and `magnet.lead_zero_tolerance_t`. Current thresholds are calculated as
+`0.010 / coil_constant_t_per_a` A (about 0.04919 A for 0.20328 T/A).
+Lead zero uses its own threshold, independently of field-target accuracy.
+Heater-state confirmation, dwell, voltage monitoring and repeated verification
+remain required. The LS335 sample-heater zero-field interlock retains its
+separate stricter thresholds. Reconnect the magnet when idle after changing
+these adapter settings; an existing connection keeps its constructed settings.
+Choose **B-field Sweep → Measurement mode → Stepped**, enter Start/Stop and
+Step size in **mT**, then set the fixed Sample target and stability
+criteria. Point counts are calculated and read-only. Targets must align with the
+APS100 0.1 mT resolution; incompatible spacing is rejected rather than silently rounded. A non-dividing
+step appends the exact Stop. A round trip visits the turning point once.
+The preview shows points per pass and per condition, including any shorter final interval.
+Saved step values retain their internal tesla units; remembered point-count recipes
+are converted to the equivalent step when opened.
+
+For each APS100 run, set **Maximum sweep rate (T/min)**. Above this input, the UI
+shows the configured ceiling and current request in **Oe/s** (0.12 T/min = 20 Oe/s).
+Range and voltage limits may further reduce the allowed rate. The application reads and
+validates the existing **RANGE/RATE 0–4** table, rounds the requested maximum down to
+the instrument's 0.1 mA/s resolution, and uses the lower rate in each range. It verifies
+the resulting table and calculates motion timeouts across all crossed ranges, including
+zero crossings. On completion, cancellation or error it attempts to restore and verify
+the original table; a restoration failure is reported. Fast Mode RATE 5 is unchanged.
+Requested and effective rates are saved in metadata; the CSV filename omits rate and
+point-count tags and abbreviates Doping as D.
+Acquisition delay controls continuous sweep sampling; stepped sampling is paced
+by qualification at each point and still uses the selected averaging count.
+
+Every point requires an acknowledged pause, at least three fresh stationary field
+readings spanning the field window, and a fresh temperature window after the pause.
+The additional settling delay starts only after both windows qualify and restarts
+if qualification is lost. The default LS335 telemetry poll
+interval is 0.5 s; the 10 s stability window is an observation duration, not a
+single reading or a fixed delay that automatically permits measurement. Shorter
+windows are less sensitive to slow changes and require experimental validation.
+Stale telemetry, field excursions or invalid temperatures reset qualification.
+Each acquisition is checked against subsequent fresh field and temperature readings;
+an interrupted or unstable acquisition is discarded and requalified. Requested field
+and actual field readbacks are stored separately; a nearby measured field is never
+relabeled as the nominal target. CSV columns include before/after readbacks,
+observed history min/max, reverse excursion, monotonic observation times, actual
+point gap, quality status, crossed nominal point indices and stability metrics.
+History failure cannot be cleared by Continue. A permitted protection recovery
+requalifies the current point while preserving its prior magnetic history. It never accepts a
+different temperature. Existing protection pauses still require manual
+continuation, and Stop retains the normal persistent-mode cleanup.
+
+The target is a measurement criterion: the application does not send a temperature
+setpoint or turn on the sample heater. Existing magnet and sample-heater
+interlocks remain in force. The APS100 persistent-switch heater is a separate device
+and may remain on in driven mode. Passive stabilization while driven is possible
+but depends on the actual thermal load and refrigerator; it is not guaranteed.
+
+The default 4 K target, 0.05 K tolerance, 10 s window, 0.02 K span, 0.01 K/min
+drift and 600 s timeout are starting values requiring validation on the actual
+instrument and sample; sensor lag and measurement self-heating also matter.
+Offline tests do not replace hardware acceptance.

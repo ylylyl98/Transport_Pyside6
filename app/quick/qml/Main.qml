@@ -441,6 +441,7 @@ ApplicationWindow {
                             objectName: "measurementPane"
                             width: parameterScroll.availableWidth - 14
                             measurement: window.backend.measurement
+                            magnet: window.backend.magnet
                             onRevealRequested: item => window.revealSetupItem(item)
                             onSweepPreviewRequested: window.openSweepPreview()
                         }

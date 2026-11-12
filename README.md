@@ -78,7 +78,7 @@ examples, and troubleshooting are in the [setup guide](docs/user-setup.md).
 | **2D Map** | Acquire a 1D trajectory or 2D grid with selectable fast/slow axes in raw or derived coordinates. |
 | **Photocurrent** | Sweep SP-2300 wavelength for enabled gate-bias recipe conditions. |
 | **B-field Gate Scan** | Repeat gate scans at a sequence of APS100 magnetic-field targets. |
-| **B-field Sweep** | Sweep APS100 field between endpoints for fixed bias conditions, with optional round trips. |
+| **B-field Sweep** | Sweep APS100 continuously, or measure prescribed field points with temperature stability checks on APS100 / attoDRY2100; supports fixed bias conditions and round trips. |
 
 Live plots support channel selection and a four-channel view. **History** opens
 an independent viewer for saved curves, maps, measured line cuts, normalization,

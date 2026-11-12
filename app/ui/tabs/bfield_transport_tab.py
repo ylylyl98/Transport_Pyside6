@@ -1,6 +1,6 @@
-"""Continuous B-field transport sweep editor.
+"""Continuous and stepped B-field transport sweep editor.
 
-This tab intentionally has its own recipe and rate controls.  Gate Scan's
+This tab intentionally has its own fixed-bias recipe.  Gate Scan's
 trajectory editor remains available for its original workflow; transport rows
 are fixed Doping/E-field operating points held while APS100 traverses B.
 """
@@ -8,6 +8,7 @@ are fixed Doping/E-field operating points held while APS100 traverses B.
 from __future__ import annotations
 
 from copy import deepcopy
+from app.condition_names import unique_condition_name
 import json
 import math
 import os
@@ -19,22 +20,22 @@ from PySide6 import QtCore, QtWidgets
 from app.engine.bfield_transport_sweep import (
     COIL_CONSTANT_T_PER_A,
     MAX_DRIVEN_FIELD_T,
+    aps100_transport_field_limit,
     MAX_RATE_A_PER_S,
     MAX_RATE_T_PER_MIN,
     COOLDOWN_POLICIES,
     COOLDOWN_POLICY_LABELS,
     FINAL_MODE_LABELS,
-    estimate_transport_times,
     build_transport_output_paths,
     normalize_cooldown_policy,
     parse_condition_series,
     transport_output_summary_parts,
     BFieldTransportSafetyError,
-    rate_t_per_min_to_a_per_s,
-    validate_setup,
+    validate_stepped_params,
 )
 from app.gate_transform import derived_to_gates, gates_to_derived
 from app.gate_transform import RATIO_TARGET_VBG, RATIO_TARGET_VTG, ratio_formula_text, normalize_ratio_target
+from app.models import BFIELD_HYSTERESIS_LABELS, BFIELD_MT_FIELDS
 from app.models import BFieldTransportCondition, BFieldTransportParams, Connections, SaveRoot
 from app.run_output import build_planned_output
 from app.result_channels import plot_channel_options, compare_channel_options
@@ -64,6 +65,7 @@ class BFieldTransportTab(BaseMeasurementTab):
         self._transport_output_paths = None
         self._locked = False
         self._execution_controller = None
+        self._magnet_backend = "1000"
         super().__init__("START B-FIELD SWEEP", "B-field (T)", "Ids (A)", ["g1", "g2", "g3", "daq"])
         self.plot_choice = 'Ids_DC'
         self._update_plot_axis_choices()
@@ -119,12 +121,16 @@ class BFieldTransportTab(BaseMeasurementTab):
         self.restoration_banner.setStyleSheet("background:#fff0ed;color:#9c2016;padding:8px;font-weight:600;border:1px solid #c94936;")
         self.restoration_banner.hide()
         ctl_layout.addWidget(self.restoration_banner)
+        self.ls_current_reversal_label = QtWidgets.QLabel("LS335 current reversal: unknown")
+        self.ls_current_reversal_label.setWordWrap(True)
+        ctl_layout.addWidget(self.ls_current_reversal_label)
         ctl_layout.addWidget(SectionHeader("1. Sweep range"))
         group = QtWidgets.QGroupBox("Driven-mode sweep")
         form = QtWidgets.QFormLayout(group)
+        self._sweep_form = form
         style_form_layout(form)
-        self.sp_start = self._spin(-0.5, -MAX_DRIVEN_FIELD_T, MAX_DRIVEN_FIELD_T)
-        self.sp_stop = self._spin(0.5, -MAX_DRIVEN_FIELD_T, MAX_DRIVEN_FIELD_T)
+        self.sp_start = self._spin(-0.5, -aps100_transport_field_limit(), aps100_transport_field_limit())
+        self.sp_stop = self._spin(0.5, -aps100_transport_field_limit(), aps100_transport_field_limit())
         self.sp_rate = self._spin(0.1, 1e-6, MAX_RATE_T_PER_MIN, 6)
         self.sp_rate_a = QtWidgets.QLabel()
         self.sp_rate_t_s = QtWidgets.QLabel()
@@ -132,17 +138,78 @@ class BFieldTransportTab(BaseMeasurementTab):
         self.chk_round_trip.setChecked(True)
         form.addRow("Start (T):", self.sp_start)
         form.addRow("Stop (T):", self.sp_stop)
-        form.addRow("Sweep rate (T/min):", self.sp_rate)
-        form.addRow("APS100 rate:", self.sp_rate_a)
-        form.addRow("Field rate:", self.sp_rate_t_s)
-        form.addRow("", self.chk_round_trip)
-        self.lbl_rate_limit = QtWidgets.QLabel(
-            f"Hard limit: {MAX_RATE_T_PER_MIN:.8f} T/min ({MAX_RATE_A_PER_S:.5f} A/s); "
-            f"driven field envelope ±{MAX_DRIVEN_FIELD_T:g} T"
-        )
+        self.lbl_rate_limit = QtWidgets.QLabel()
         self.lbl_rate_limit.setWordWrap(True)
         self.lbl_rate_limit.setProperty("role", "hint")
         form.addRow("", self.lbl_rate_limit)
+        form.addRow("Maximum sweep rate (T/min):", self.sp_rate)
+        form.addRow("APS100 rate:", self.sp_rate_a)
+        form.addRow("Field rate:", self.sp_rate_t_s)
+        for widget in (self.sp_rate, self.sp_rate_a, self.sp_rate_t_s):
+            form.setRowVisible(widget, True)
+        form.addRow("", self.chk_round_trip)
+        self.cbo_measurement_mode = SafeComboBox()
+        self.cbo_measurement_mode.addItem("Continuous", "continuous")
+        self.cbo_measurement_mode.addItem("Stepped", "stepped")
+        self.cbo_field_spacing = SafeComboBox()
+        self.cbo_field_spacing.addItem("Point count", "points")
+        self.cbo_field_spacing.addItem("Step size", "step")
+        self.cbo_field_spacing.setCurrentIndex(1)
+        self.sp_field_points = SafeSpinBox()
+        self.sp_field_points.setRange(2, 10000)
+        self.sp_field_points.setValue(11)
+        self.sp_field_points.setReadOnly(True)
+        self.sp_field_points.setButtonSymbols(QtWidgets.QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.sp_field_step = self._spin(100, 0.001, 12000, 6)
+        self.sp_field_tolerance = self._spin(self.params.field_tolerance_t * 1000, 0.1, 1000, 4)
+        self.sp_field_stability = self._spin(self.params.field_stability_s, 0.1, 86400, 2)
+        self.sp_field_settle = self._spin(self.params.field_settle_s, 0, 86400, 2)
+        self._hysteresis_extra = {}
+        for key in BFIELD_HYSTERESIS_LABELS:
+            if key in {"field_tolerance_t", "field_stability_s", "field_settle_s"}:
+                continue
+            scale = 1000 if key in BFIELD_MT_FIELDS else 1
+            self._hysteresis_extra[key] = self._spin(getattr(self.params, key) * scale,
+                0 if key == "field_max_gap_t" else 0.0001, 86400, 4)
+        self._hysteresis_inputs = (self.sp_field_tolerance, self.sp_field_stability, self.sp_field_settle, *self._hysteresis_extra.values())
+        self.sp_field_tolerance.setToolTip("Fine approach stopping threshold. Stationary points use separate point and endpoint acceptance limits; no backwards correction.")
+        self.sp_field_stability.setToolTip("Require fresh stationary readings satisfying the independent span and drift limits throughout this window.")
+        self.sp_field_settle.setToolTip("Additional delay after field and temperature qualify. Any loss of stability restarts the delay.")
+        self.cbo_sample_reversal = SafeComboBox()
+        for label, value in (("Unchanged", "unchanged"), ("Per point", "per_point"), ("Whole sweep", "whole_sweep")):
+            self.cbo_sample_reversal.addItem(label, value)
+        self.sp_sample_reversal_settle = self._spin(2.0, 0, 86400, 3)
+        explanation = ("Per point: B ON to qualify temperature, OFF and wait, acquire, then ON and requalify. "
+                       "Whole sweep: B OFF throughout. Wait is configured, not a verified transient. "
+                       "Sample target stability remains required. A remains ON; magnet safety remains active.")
+        for widget in (self.cbo_sample_reversal, self.sp_sample_reversal_settle):
+            widget.setToolTip(explanation)
+        self.sp_temperature_target = self._spin(4.0, 0.001, 300, 4)
+        self.sp_temperature_tolerance = self._spin(0.05, 0.000001, 300, 6)
+        self.sp_temperature_window = self._spin(10, 0.01, 86400, 2)
+        self.sp_temperature_span = self._spin(0.02, 0.000001, 300, 6)
+        self.sp_temperature_drift = self._spin(0.01, 0.000001, 300, 6)
+        self.sp_temperature_timeout = self._spin(600, 0.01, 86400, 2)
+        self._step_inputs = (self.cbo_measurement_mode, self.cbo_field_spacing, self.sp_field_points,
+            self.sp_field_step, *self._hysteresis_inputs, self.cbo_sample_reversal, self.sp_sample_reversal_settle, self.sp_temperature_target, self.sp_temperature_tolerance,
+            self.sp_temperature_window, self.sp_temperature_span, self.sp_temperature_drift, self.sp_temperature_timeout)
+        for label, widget in (("Measurement mode:", self.cbo_measurement_mode), ("Spacing:", self.cbo_field_spacing),
+            ("Points / pass (calculated):", self.sp_field_points), ("Step size (mT):", self.sp_field_step),
+            ("Approach stopping tolerance (±mT):", self.sp_field_tolerance),
+            ("Field stability window (s):", self.sp_field_stability),
+            ("Delay after stability (s):", self.sp_field_settle),
+            *((BFIELD_HYSTERESIS_LABELS[k] + ":", w) for k, w in self._hysteresis_extra.items()),
+            ("Sample B current reversal:", self.cbo_sample_reversal),
+            ("Reversal settling wait (s):", self.sp_sample_reversal_settle),
+            ("Sample target (K):", self.sp_temperature_target), ("Target tolerance (K):", self.sp_temperature_tolerance),
+            ("Stability window (s):", self.sp_temperature_window), ("Maximum window span (K):", self.sp_temperature_span),
+            ("Maximum absolute drift (K/min):", self.sp_temperature_drift), ("Wait timeout (s):", self.sp_temperature_timeout)):
+            form.addRow(label, widget)
+        form.setRowVisible(self.cbo_field_spacing, False)
+        hint = QtWidgets.QLabel("Stepped: one fixed sample target; passive waiting only. Values require hardware commissioning. Timeout pauses the run.")
+        self._step_hint = hint
+        hint.setWordWrap(True)
+        form.addRow("", hint)
         self.cbo_cooldown_policy = SafeComboBox()
         for policy in COOLDOWN_POLICIES:
             self.cbo_cooldown_policy.addItem(COOLDOWN_POLICY_LABELS[policy], policy)
@@ -338,6 +405,9 @@ class BFieldTransportTab(BaseMeasurementTab):
         ctl_layout.addWidget(self.lbl_connection_hint)
         self.status_panel = StatusPanel(["aps100", "g1", "g2", "g3", "daq"])
         ctl_layout.addWidget(self.status_panel)
+        for widget in self._step_inputs:
+            signal = widget.currentIndexChanged if isinstance(widget, QtWidgets.QComboBox) else widget.valueChanged
+            signal.connect(self._refresh_rate_preview)
         self.sp_start.valueChanged.connect(self._refresh_rate_preview)
         self.sp_stop.valueChanged.connect(self._refresh_rate_preview)
         self.sp_rate.valueChanged.connect(self._refresh_rate_preview)
@@ -354,8 +424,17 @@ class BFieldTransportTab(BaseMeasurementTab):
     def _load_settings(self):
         settings = get_app_settings()
         settings.beginGroup(self.SETTINGS_PREFIX)
+        for key, widget in (("measurement_mode", self.cbo_measurement_mode), ("sample_reversal_mode", self.cbo_sample_reversal)):
+            widget.setCurrentIndex(max(0, widget.findData(str(settings.value(key, getattr(self.params, key))))))
+        for key, widget in self._step_numeric_inputs():
+            value = settings.value(key, getattr(self.params, key))
+            widget.setValue(int(value) if key == "field_points" else float(value) * (1000 if key in BFIELD_MT_FIELDS else 1))
         self.sp_start.setValue(float(settings.value("start_field_t", self.params.start_field_t)))
         self.sp_stop.setValue(float(settings.value("stop_field_t", self.params.stop_field_t)))
+        if str(settings.value("field_spacing", self.params.field_spacing)) == "points":
+            count = int(settings.value("field_points", self.params.field_points))
+            if count >= 2:
+                self.sp_field_step.setValue(abs(self.sp_stop.value() - self.sp_start.value()) * 1000 / (count - 1))
         self.sp_rate.setValue(float(settings.value("rate_t_per_min", self.params.rate_t_per_min)))
         has_global_ratio = settings.contains("ratio")
         if has_global_ratio:
@@ -401,9 +480,26 @@ class BFieldTransportTab(BaseMeasurementTab):
                 pass
         settings.endGroup()
 
+    def _step_numeric_inputs(self):
+        return (("sample_reversal_settle_s", self.sp_sample_reversal_settle), ("field_points", self.sp_field_points), ("field_step_t", self.sp_field_step),
+            ("field_tolerance_t", self.sp_field_tolerance), ("field_stability_s", self.sp_field_stability),
+            ("field_settle_s", self.sp_field_settle), *self._hysteresis_extra.items(),
+            ("temperature_target_k", self.sp_temperature_target), ("temperature_tolerance_k", self.sp_temperature_tolerance),
+            ("temperature_window_s", self.sp_temperature_window), ("temperature_span_k", self.sp_temperature_span),
+            ("temperature_drift_k_per_min", self.sp_temperature_drift), ("temperature_timeout_s", self.sp_temperature_timeout))
+
+    def _step_values(self):
+        return {"measurement_mode": self.cbo_measurement_mode.currentData(),
+                "sample_reversal_mode": self.cbo_sample_reversal.currentData(),
+                "field_spacing": "step",
+                **{key: widget.value() / 1000 if key in BFIELD_MT_FIELDS else widget.value()
+                   for key, widget in self._step_numeric_inputs()}}
+
     def _save_settings(self):
         settings = get_app_settings()
         settings.beginGroup(self.SETTINGS_PREFIX)
+        for key, value in self._step_values().items():
+            settings.setValue(key, value)
         settings.setValue("start_field_t", self.sp_start.value())
         settings.setValue("stop_field_t", self.sp_stop.value())
         settings.setValue("rate_t_per_min", self.sp_rate.value())
@@ -664,7 +760,8 @@ class BFieldTransportTab(BaseMeasurementTab):
         if row < 0:
             return
         self.conditions.insert(row + 1, deepcopy(self.conditions[row]))
-        self.conditions[row + 1].name += " copy"
+        self.conditions[row + 1].name = unique_condition_name(
+            (condition.name for condition in self.conditions), self.conditions[row].name)
         self._refresh_conditions()
         self.condition_table.selectRow(row + 1)
 
@@ -685,44 +782,59 @@ class BFieldTransportTab(BaseMeasurementTab):
         self.condition_table.selectRow(target)
 
     def _refresh_rate_preview(self, *_args):
+        from app.engine.bfield_transport_sweep import effective_rate_limit_t_per_min
         try:
-            value = rate_t_per_min_to_a_per_s(self.sp_rate.value())
-            self.sp_rate_a.setText(f"{value:.7f} A/s")
-            self.sp_rate_t_s.setText(f"{self.sp_rate.value() / 60.0:.8f} T/s")
-            validate_setup(self.sp_start.value(), self.sp_stop.value(), self.sp_rate.value())
+            limit = effective_rate_limit_t_per_min()
+            limit_text = f"{limit * 10000 / 60:g} Oe/s ({limit:g} T/min)"
+        except (ValueError, TypeError):
+            limit_text = "unavailable; check magnet configuration"
+        self.lbl_rate_limit.setText(
+            f"Configured maximum: {limit_text}. "
+            f"Current request: {self.sp_rate.value() * 10000 / 60:g} Oe/s. "
+            "Stored range/voltage limits and final approach may be slower.")
+        hysteresis = self._magnet_backend == "1000" and self.cbo_measurement_mode.currentData() == "stepped"
+        for widget in self._hysteresis_inputs:
+            self._sweep_form.setRowVisible(widget, hysteresis)
+        self._sweep_form.labelForField(self.sp_temperature_timeout).setText(
+            "Temperature qualification timeout (s):" if hysteresis else "Wait timeout (s):")
+        self._step_hint.setText(
+            "Stepped: directional approach → stable field and temperature → extra delay → measure. "
+            "Stable offsets use readback fields; history, endpoint or gap violations end the run. Gap 0 = twice the largest planned interval. Sample heater stays OFF."
+            if self._magnet_backend == "1000" else
+            "Stepped: SDK sets and enables the sample temperature target; SDK manages the field ramp.")
+        try:
+            from app.engine.bfield_transport_sweep import TransportSweepPlan
+            TransportSweepPlan.from_params(self._preview_params())
+            step_detail = ""
+            if self.cbo_measurement_mode.currentData() == "stepped":
+                points = validate_stepped_params(self._preview_params())
+                blocker = QtCore.QSignalBlocker(self.sp_field_points)
+                self.sp_field_points.setValue(len(points))
+                del blocker
+                total = len(points) * (2 if self.chk_round_trip.isChecked() else 1) - (1 if self.chk_round_trip.isChecked() else 0)
+                step_detail = f"{len(points)} points / pass; {total} points / condition; "
+                if hysteresis:
+                    step_detail += (f"field ±{self.sp_field_tolerance.value():g} mT for {self.sp_field_stability.value():g} s; "
+                                    f"extra delay {self.sp_field_settle.value():g} s; ")
+                last_step = abs(points[-1] - points[-2]) * 1000
+                if last_step < self.sp_field_step.value() - 1e-9:
+                    step_detail += f"final interval {last_step:g} mT (shorter); "
             planned = build_planned_output(
                 self.save, "bfield_transport", self.ed_base.text().strip() or "bfield_transport",
                 run_id="preview", create_dir=False,
             )
             enabled = sum(1 for condition in self.conditions if condition.enabled)
             self.lbl_preview.setText(
-                "Ready: " + ("round trip" if self.chk_round_trip.isChecked() else "one-way")
+                "Ready: " + step_detail + ("round trip" if self.chk_round_trip.isChecked() else "one-way")
                 + f" {self.sp_start.value():+.4g} → {self.sp_stop.value():+.4g} T; "
-                + f"{enabled} enabled condition(s); final mode: "
-                + f"{FINAL_MODE_LABELS['driven']}; "
+                + f"{enabled} enabled condition(s); "
+                + ("APS100 maximum rate; stored ranges may be slower; " if self._magnet_backend == "1000" else "SDK-managed ramp; ")
                 + f"output preview: {planned.output_dir}"
             )
             self.lbl_preview.setProperty("role", "hint")
-            enabled_conditions = [condition for condition in self.conditions if condition.enabled]
-            estimate = estimate_transport_times(
-                self.sp_start.value(), self.sp_stop.value(), self.sp_rate.value(), len(enabled_conditions),
-                round_trip=self.chk_round_trip.isChecked(),
-                bias_settle_s=max((condition.settle_s for condition in enabled_conditions), default=0.5),
-                cooldown_policy=self.cbo_cooldown_policy.currentData() or "adaptive",
-                heater_cool_s=getattr(cfg.magnet, "heater_cool_s", None),
-                recovery_dwell_s=getattr(cfg.lakeshore335, "required_stable_recovery_dwell_s", None),
-                heater_warm_s=getattr(cfg.magnet, "heater_warm_s", None),
-            )
-            thermal = (
-                f"; fixed thermal overhead {estimate['fixed_thermal_extra_s']:.1f} s"
-                + (f"; field return/positioning {estimate['field_positioning_extra_s']:.1f} s" if estimate["field_positioning_extra_s"] else "")
-                + (" + variable/unknown recovery" if estimate["thermal_recovery_variable"] else "")
-            ) if (self.cbo_cooldown_policy.currentData() == "persistent_each_row" and len(enabled_conditions) > 1) else (
-                "; adaptive thermal recovery is variable/extra" if estimate["thermal_recovery_variable"] else ""
-            )
             self.lbl_time_estimate.setText(
-                f"Estimate: {estimate['sweep_s_per_row']:.1f} s sweep/row; "
-                f"{estimate['batch_s']:.1f} s deterministic batch{thermal}."
+                "Temperature waiting is variable. " + ("Field timing is calculated from the instrument's rate table at Start."
+                if self._magnet_backend == "1000" else "Field ramp timing is managed by the SDK.")
             )
         except Exception as exc:
             self.lbl_preview.setText(f"Invalid sweep: {exc}")
@@ -742,16 +854,18 @@ class BFieldTransportTab(BaseMeasurementTab):
             ratio=float(self.sp_ratio.value()),
             ratio_target=normalize_ratio_target(self.cbo_ratio_target.currentData() or RATIO_TARGET_VBG),
             cooldown_policy=normalize_cooldown_policy(self.cbo_cooldown_policy.currentData() or "adaptive"),
-            final_mode="driven",
+            final_mode="driven", magnet_backend=self._magnet_backend,
             acquisition_delay_s=self.sp_delay.value(), averages=self.sp_averages.value(),
             conditions=deepcopy(self.conditions),
+            **self._step_values(),
         )
         self._save_settings()
         return deepcopy(self.params)
 
     def validate_setup(self):
         params = self.collect_params()
-        result = validate_setup(params.start_field_t, params.stop_field_t, params.rate_t_per_min)
+        from app.engine.bfield_transport_sweep import TransportSweepPlan
+        result = dict(TransportSweepPlan.from_params(params).validation)
         if not any(condition.enabled for condition in params.conditions):
             raise BFieldTransportSafetyError("Enable at least one fixed transport condition")
         return result
@@ -768,7 +882,8 @@ class BFieldTransportTab(BaseMeasurementTab):
             rate_t_per_min=self.sp_rate.value(),
             round_trip=self.chk_round_trip.isChecked(),
             conditions=conditions,
-            final_mode="driven",
+            **self._step_values(),
+            final_mode="driven", magnet_backend=self._magnet_backend,
         )
 
     def freeze_output_plan(self, params=None):
@@ -857,7 +972,7 @@ class BFieldTransportTab(BaseMeasurementTab):
 
     def set_sweep_locked(self, locked: bool):
         self._locked = bool(locked)
-        for widget in (self.sp_start, self.sp_stop, self.sp_rate, self.chk_round_trip, self.condition_table,
+        for widget in (*self._step_inputs, self.sp_start, self.sp_stop, self.sp_rate, self.chk_round_trip, self.condition_table,
                        self.cbo_condition_add_mode, self.ed_condition_add_first,
                        self.ed_condition_add_second, self.ed_condition_add_vds, self.btn_condition_add_preview,
                        self.btn_condition_update, self.btn_condition_duplicate,
@@ -930,6 +1045,17 @@ class BFieldTransportTab(BaseMeasurementTab):
             blockers.append("connect " + ", ".join(missing))
         controller = self._execution_controller
         magnet = getattr(controller, "magnet", None) if controller is not None else None
+        if self._magnet_backend == "2100":
+            state = getattr(getattr(magnet, "state", None), "name", "")
+            if state not in ("IDLE", "ARMED", "ACTIVE"):
+                blockers.append("connect attoDRY2100 SDK")
+            if getattr(magnet, "has_pending_work", False) or getattr(magnet, "exclusive_owner", None):
+                blockers.append("wait for attoDRY2100 operation")
+            if self.cbo_measurement_mode.currentData() != "stepped":
+                blockers.append("select stepped measurement")
+            self.run_panel.set_start_available(not blockers)
+            self.lbl_connection_hint.setText("Not ready: " + "; ".join(blockers) + "." if blockers else "Hardware ready for B-field transport.")
+            return
         if magnet is None or not bool(getattr(magnet, "is_connected", False)):
             blockers.append("connect APS100")
         else:
@@ -975,7 +1101,7 @@ class BFieldTransportTab(BaseMeasurementTab):
             return bool(self._execution_controller.start())
         self.set_sweep_locked(True)
         self.lbl_preview.setText(
-            f"Validated: {validation['rate_a_per_s']:.7f} A/s; "
+            ("Validated: APS100 maximum rate; stored ranges may be slower; " if self._magnet_backend == "1000" else "Validated: SDK-managed ramp; ") +
             "transport controller is ready to execute the frozen recipe."
         )
         return True
@@ -986,6 +1112,30 @@ class BFieldTransportTab(BaseMeasurementTab):
             return
         self.set_sweep_locked(False)
         self.lbl_preview.setText("Transport sweep stopped; recipe remains available for restart.")
+
+    def set_ls_current_reversal_summary(self, text):
+        self.ls_current_reversal_label.setText(str(text))
+
+    def set_magnet_backend(self, backend):
+        self._magnet_backend = str(backend)
+        aps = self._magnet_backend == "1000"
+        self.ls_current_reversal_label.setVisible(aps)
+        if aps:
+            limit = aps100_transport_field_limit()
+        else:
+            from app.devices.attodry2100_adapter import HARD_MAX_FIELD_T
+            configured = getattr(cfg.attodry2100, "maximum_field_t", None)
+            limit = min(float(configured), HARD_MAX_FIELD_T) if configured is not None else HARD_MAX_FIELD_T
+        for spin in (self.sp_start, self.sp_stop):
+            spin.setRange(-limit, limit)
+        for widget in (self.sp_rate, self.sp_rate_a, self.sp_rate_t_s):
+            self._sweep_form.setRowVisible(widget, aps)
+        for widget in (self.lbl_rate_limit, self.cbo_cooldown_policy, self.cbo_final_mode):
+            self._sweep_form.setRowVisible(widget, aps)
+        self._step_hint.setText("Stepped: one fixed sample target; passive waiting only." if aps else
+                                "Stepped: SDK sets and enables the sample temperature target; SDK manages the field ramp.")
+        self._refresh_rate_preview()
+        self.refresh_hardware_readiness()
 
     def set_execution_controller(self, controller):
         self._execution_controller = controller

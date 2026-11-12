@@ -194,10 +194,36 @@ class BFieldTransportParams:
     """Continuous APS100 B-field transport sweep setup."""
 
     base_name: str = "bfield_transport"
+    magnet_backend: str = "1000"
     start_field_t: float = -0.5
     stop_field_t: float = 0.5
     rate_t_per_min: float = 0.1
     round_trip: bool = True
+    measurement_mode: str = "continuous"
+    sample_reversal_mode: str = "unchanged"
+    sample_reversal_settle_s: float = 2.0
+    field_spacing: str = "step"
+    field_points: int = 11
+    field_step_t: float = 0.1
+    # APS100 stepped hysteresis: field qualification is separate from
+    # temperature qualification and the additional pre-measurement delay.
+    field_tolerance_t: float = 0.0002
+    field_stability_s: float = 2.0
+    field_settle_s: float = 1.0
+    field_acceptance_t: float = 0.0005
+    field_endpoint_tolerance_t: float = 0.0002
+    field_reversal_t: float = 0.0002
+    field_span_t: float = 0.0002
+    field_drift_t_per_s: float = 0.0001
+    field_max_gap_t: float = 0.0  # zero: twice the largest planned interval
+    field_timeout_s: float = 60.0
+    field_no_progress_s: float = 15.0
+    temperature_target_k: float = 4.0
+    temperature_tolerance_k: float = 0.05
+    temperature_window_s: float = 10.0
+    temperature_span_k: float = 0.02
+    temperature_drift_k_per_min: float = 0.01
+    temperature_timeout_s: float = 600.0
     # ``adaptive`` keeps the APS driven between rows whenever thermal
     # permission is safe; the other policies are explicit operator choices.
     cooldown_policy: str = "adaptive"
@@ -212,6 +238,22 @@ class BFieldTransportParams:
     ratio: float = 1.0
     ratio_target: str = "Vbg"
 
+
+# Friendly aliases used by integrations that call the workflow a B-field
+BFIELD_HYSTERESIS_LABELS = {
+    "field_tolerance_t": "Approach stopping tolerance (±mT)",
+    "field_acceptance_t": "Point acceptance (±mT)",
+    "field_endpoint_tolerance_t": "Endpoint acceptance (±mT)",
+    "field_reversal_t": "Maximum history reversal (mT)",
+    "field_span_t": "Maximum field window span (mT)",
+    "field_drift_t_per_s": "Maximum field drift (mT/s)",
+    "field_max_gap_t": "Maximum actual point gap (mT; 0 = auto)",
+    "field_stability_s": "Field stability window (s)",
+    "field_settle_s": "Delay after stability (s)",
+    "field_timeout_s": "Field qualification timeout (s)",
+    "field_no_progress_s": "No-progress timeout (s)",
+}
+BFIELD_MT_FIELDS = {"field_step_t", *(k for k in BFIELD_HYSTERESIS_LABELS if k.endswith("_t") or k == "field_drift_t_per_s")}
 
 # Friendly aliases used by integrations that call the workflow a B-field
 # sweep rather than a transport sweep.

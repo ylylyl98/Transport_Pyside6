@@ -66,7 +66,7 @@ class ApplicationBackend(QObject):
         self._instruments.context_provider = self._magnet.experiment_context_snapshot
         self._measurement = MeasurementService(self._instruments.manager, self._instruments.save_root,
             self._instruments.get_rates, self._instruments.signal_chain_snapshot, self,
-            magnet1000=self._magnet.magnet1000, thermal_safety=self._magnet.thermal_safety,
+            magnet1000=self._magnet.magnet1000, magnet2100=self._magnet.magnet2100, thermal_safety=self._magnet.thermal_safety,
             lakeshore_controller=self._magnet.lakeshore335, selected_backend_callable=self._magnet.selected_backend,
             review_valid_callable=self._magnet.review_valid, temperature_provider=self._magnet.measurement_settings,
             temperature_ready_callable=self._magnet.is_ready, context_provider=self._magnet.experiment_context_snapshot,
@@ -90,6 +90,7 @@ class ApplicationBackend(QObject):
         self._measurement.runPrepared.connect(self._begin_plot)
         self._measurement.changed.connect(self._on_measurement_changed)
         self._magnet.readinessChanged.connect(lambda *_: self._measurement.changed.emit())
+        self._magnet.changed.connect(self._measurement.uiSectionsChanged)
         self._measurement.errorRaised.connect(self.report)
         self._measurement.confirmationRequested.connect(lambda token, title, body: self._confirmation(self._measurement, token, title, body))
         self._magnet.confirmationRequested.connect(lambda token, title, body: self._confirmation(self._magnet, token, title, body))

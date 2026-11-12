@@ -18,9 +18,12 @@ from PySide6.QtCore import QObject, QMetaObject, QThread, QTimer, Qt, Signal, Sl
 from app.devices.aps100_attodry1000_adapter import (
     APS100AttoDry1000Adapter,
     APS100SafetyError,
+    APS100OvershootError,
+    APS100FieldHistoryError,
     APS100OperationCancelled,
     MockAPS100Adapter,
 )
+from app.engine.aps100_rate_table import validate_rate_table
 from utils.config import cfg
 from app.sample_heating_interlock import SampleHeatingInterlock
 
@@ -172,7 +175,8 @@ class _MagnetWorker(QObject):
                 heater_warm_s=cfg.magnet.heater_warm_s,
                 heater_cool_s=cfg.magnet.heater_cool_s,
                 heater_transition_timeout_s=getattr(cfg.magnet, "heater_transition_timeout_s", 30.0),
-                current_match_tolerance_a=cfg.magnet.current_match_tolerance_a,
+                current_match_tolerance_t=cfg.magnet.current_match_tolerance_t,
+                lead_zero_tolerance_t=cfg.magnet.lead_zero_tolerance_t,
             )
             adapter = self.adapter
             identity = adapter.connect()
@@ -363,7 +367,7 @@ class _MagnetWorker(QObject):
             self._protective_operation = False
             self.heating_interlock.end_magnet()
 
-    @Slot(str, float, str, bool, bool, float, float, float, bool)
+    @Slot(str, float, str, bool, bool, float, float, float, bool, object, object)
     def safe_move_to_field(
         self,
         request_id: str,
@@ -375,6 +379,8 @@ class _MagnetWorker(QObject):
         timeout_s: float,
         tolerance_t: float | None = None,
         use_gate_scan_rate: bool = False,
+        monotonic_direction=None,
+        hysteresis_options=None,
     ) -> None:
         if self.adapter is None:
             message = "APS100 is not connected"
@@ -400,14 +406,40 @@ class _MagnetWorker(QObject):
         outcome = "failed"
         failure = ""
         cancellation_reason = None
+        history_error = False
         snapshot = None
         audit_record = None
         gate_scan_rate_plan = None
+        field_history = {}
         reserved = False
         try:
             self.heating_interlock.begin_magnet()
             reserved = True
             starting_snapshot = adapter.read_snapshot()
+            if monotonic_direction == 0:
+                monotonic_direction = 1 if float(target_t) >= float(starting_snapshot.field_t) else -1
+            if hysteresis_options is not None and hysteresis_options.get("preparation"):
+                hysteresis_options = dict(hysteresis_options)
+                hard = float(adapter.maximum_field_t)
+                initial = float(starting_snapshot.field_t)
+                margin = float(hysteresis_options["reversal_t"])
+                if not all(math.isfinite(v) for v in (hard, initial, margin)) or hard <= 0 or margin <= 0 or abs(initial) > hard:
+                    raise APS100SafetyError("Invalid preparation field or hard limit")
+                hysteresis_options["lower_t"] = max(-hard, float(hysteresis_options["lower_t"]))
+                hysteresis_options["upper_t"] = min(hard, float(hysteresis_options["upper_t"]))
+                if monotonic_direction > 0:
+                    hysteresis_options["lower_t"] = max(-hard, min(hysteresis_options["lower_t"], initial - margin))
+                else:
+                    hysteresis_options["upper_t"] = min(hard, max(hysteresis_options["upper_t"], initial + margin))
+            if hysteresis_options is not None:
+                initial = float(starting_snapshot.field_t)
+                direction = int(monotonic_direction)
+                if not math.isfinite(initial) or direction not in (-1, 1):
+                    raise APS100SafetyError("Invalid initial field or hysteresis direction")
+                field_history.update(direction=direction, start_t=initial, end_t=initial,
+                    min_t=initial, max_t=initial, max_reverse_t=0., read_count=1,
+                    started_monotonic_s=float(starting_snapshot.monotonic_s),
+                    finished_monotonic_s=None, complete=False)
             self._thermal_target = float(target_t)
             self._check_thermal(starting_snapshot.status, target=float(target_t),
                                 precharge=starting_snapshot.heater_on is False)
@@ -445,6 +477,9 @@ class _MagnetWorker(QObject):
                             "no measurable field change for 120 s"
                         )
                 self.transition_progress.emit(label, value)
+            direction_kwargs = {} if monotonic_direction is None else {"monotonic_direction": int(monotonic_direction)}
+            if hysteresis_options is not None:
+                direction_kwargs.update(hysteresis_options=dict(hysteresis_options), field_history=field_history)
             snapshot = adapter.safe_move_to_field(
                 float(target_t),
                 final_mode=str(final_mode),
@@ -459,6 +494,7 @@ class _MagnetWorker(QObject):
                 max_magnet_voltage_v=cfg.magnet.persistent_zero_max_magnet_voltage_v,
                 stop_event=self._stop_event,
                 progress=report_progress,
+                **direction_kwargs,
             )
             self.snapshot_updated.emit(snapshot)
             outcome = "completed"
@@ -467,7 +503,10 @@ class _MagnetWorker(QObject):
             )
         except Exception as exc:
             failure = str(exc)
-            if isinstance(exc, APS100OperationCancelled):
+            history_error = isinstance(exc, APS100FieldHistoryError)
+            if isinstance(exc, APS100OvershootError):
+                outcome = "overshoot"
+            elif isinstance(exc, APS100OperationCancelled):
                 outcome = "cancelled"
                 cancellation_reason = exc.reason
                 self.operation_finished.emit("cancelled:safe_move")
@@ -477,6 +516,17 @@ class _MagnetWorker(QObject):
             snapshot = None
             try:
                 snapshot = adapter.read_snapshot()
+                if field_history and snapshot is not None:
+                    value = float(snapshot.field_t)
+                    if math.isfinite(value):
+                        direction = int(field_history["direction"])
+                        prior_extreme = field_history["max_t"] if direction > 0 else field_history["min_t"]
+                        field_history["max_reverse_t"] = max(field_history["max_reverse_t"], direction * (prior_extreme - value))
+                        field_history["min_t"] = min(field_history["min_t"], value)
+                        field_history["max_t"] = max(field_history["max_t"], value)
+                        field_history["end_t"] = value
+                        field_history["read_count"] += 1
+                        field_history["finished_monotonic_s"] = time.monotonic()
             except Exception:
                 pass
         finally:
@@ -501,9 +551,12 @@ class _MagnetWorker(QObject):
                     ),
                     "settle_s": float(settle_s),
                     "timeout_s": float(timeout_s),
+                    "hysteresis_options": hysteresis_options,
                     "vmag_limit_v": cfg.magnet.persistent_zero_max_magnet_voltage_v,
                 },
                 "stored_rates": stored_rates,
+                "field_history": dict(field_history),
+                "history_error": history_error,
                 "gate_scan_rate_plan": gate_scan_rate_plan,
                 "aps_voltage_limit_v": voltage_limit_v,
                 "starting_snapshot": (
@@ -518,6 +571,10 @@ class _MagnetWorker(QObject):
                     "request_id": str(request_id),
                     "success": outcome == "completed",
                     "cancelled": outcome == "cancelled",
+                    "overshoot": outcome == "overshoot",
+                    "monotonic_direction": monotonic_direction,
+                    "field_history": dict(field_history),
+                    "history_error": history_error,
                     "cancellation_reason": audit_record["cancellation_reason"],
                     "target_t": float(target_t),
                     "snapshot": snapshot,
@@ -571,16 +628,44 @@ class _MagnetWorker(QObject):
 
     @Slot(float, float)
     def configure_transport(self, rate_t_per_min: float, max_field_t: float) -> None:
-        """Program APS100 transport RATE/LLIM/ULIM and verify readback."""
+        """Apply a per-run rate ceiling while preserving commissioned range limits."""
         if self.adapter is None:
             self.transport_config_result.emit({"success": False, "error": "APS100 is not connected"})
             return
         rates = None
         limits = None
         mutation_started = False
+        rates_mutated = False
         phase = "capturing current APS100 settings"
+        def heartbeat():
+            # This operation owns the APS worker, so its QTimer cannot run.
+            # Read the instrument here; never renew a cached timestamp.
+            if self._stop_event.is_set():
+                raise APS100OperationCancelled(self._stop_event)
+            if self.thermal_source is not None:
+                self._check_thermal()
+            else:
+                self._check_thermal()
+                field = float(self.adapter.get_field_t())
+                if not math.isfinite(field):
+                    raise APS100SafetyError("Nonfinite APS100 field during transport configuration")
+                self.thermal_field_updated.emit(SimpleNamespace(field_t=field, monotonic_s=time.monotonic()))
+            if self._stop_event.is_set():
+                raise APS100OperationCancelled(self._stop_event)
+        def read_table():
+            table = {}
+            for index in range(5):
+                heartbeat()
+                boundary = float(self.adapter.get_range_a(index))
+                rate_a = float(self.adapter.get_rate_a_per_s(index))
+                table[index] = (boundary, rate_a * self.adapter.coil_constant_t_per_a * 60.0)
+                heartbeat()
+            return table
         try:
-            rates = self.adapter.get_rates()
+            rates = read_table()
+            rates = validate_rate_table(rates, self.adapter.coil_constant_t_per_a, self.adapter.maximum_current_a,
+                                        self.adapter.maximum_rate_a_per_s,
+                                        min(self.adapter.maximum_field_t, self.adapter.maximum_current_a * self.adapter.coil_constant_t_per_a))
             fast_rate_a = None
             fast_rate_t = None
             fast_reader = getattr(self.adapter, "get_fast_rate_a_per_s", None)
@@ -598,9 +683,23 @@ class _MagnetWorker(QObject):
                     raise APS100SafetyError(
                         f"APS100 Fast Mode RATE? 5 is invalid: {fast_rate_t!r} T/min"
                     )
+            requested = float(rate_t_per_min)
+            max_rate = self.adapter.maximum_rate_a_per_s * self.adapter.coil_constant_t_per_a * 60.0
+            if not math.isfinite(requested) or requested <= 0 or requested > max_rate + 1e-12:
+                raise APS100SafetyError(f"Requested rate must be positive and at most {max_rate:g} T/min")
+            # RATE has 0.1 mA/s resolution; round down so hardware rounding
+            # cannot exceed the user or commissioned ceiling.
+            unit = self.adapter.coil_constant_t_per_a * 60.0 * 0.0001
+            ceiling = math.floor((requested / unit) + 1e-10) * unit
+            if ceiling <= 0:
+                raise APS100SafetyError("Requested rate is below APS100 0.1 mA/s resolution")
+            effective = {i: (boundary, min(rate, ceiling)) for i, (boundary, rate) in rates.items()}
+            heartbeat()
             limits = self.adapter.get_limits_t()
+            heartbeat()
             voltage = self.adapter.get_voltage_limit_v()
-            # RATE, LLIM and ULIM are remote-only APS100 commands.  A normal
+            heartbeat()
+            # LLIM and ULIM are remote-only APS100 commands. A normal
             # connection is intentionally read-only, so transport must acquire
             # remote control explicitly before its first mutation.
             phase = "taking APS100 remote control"
@@ -609,13 +708,29 @@ class _MagnetWorker(QObject):
             if self.adapter.get_status().sweep_active:
                 phase = "pausing the active APS100 sweep before configuration"
                 self.adapter.pause()
-            phase = "programming APS100 sweep rates"
-            changed = self.adapter.set_rate_t_per_min(rate_t_per_min, max_abs_field_t=max_field_t)
+            phase = "programming APS100 per-run rate ceiling"
+            rates_mutated = True
+            for index, entry in effective.items():
+                heartbeat()
+                self.adapter.restore_rates({index: entry})
+                heartbeat()
+            actual_rates = validate_rate_table(read_table(), self.adapter.coil_constant_t_per_a,
+                                               self.adapter.maximum_current_a, self.adapter.maximum_rate_a_per_s,
+                                               min(self.adapter.maximum_field_t, self.adapter.maximum_current_a * self.adapter.coil_constant_t_per_a))
+            for i, (boundary, actual) in actual_rates.items():
+                if abs(boundary - effective[i][0]) > 1e-6 or actual > effective[i][1] + 1e-9:
+                    raise APS100SafetyError(f"APS100 RATE {i} readback exceeds requested or commissioned ceiling")
             phase = "programming APS100 field limits"
+            heartbeat()
             actual_limits = self.adapter.set_limits_t(-max_field_t, max_field_t)
+            heartbeat()
+            phase = "refreshing APS100 snapshot after configuration"
+            snapshot = self.adapter.read_snapshot()
+            self.snapshot_updated.emit(snapshot)
             self.transport_config_result.emit({
                 "success": True, "stored_rates": rates, "stored_limits": limits,
-                "voltage_limit_v": voltage, "rates": changed, "limits": actual_limits,
+                "voltage_limit_v": voltage, "rates": actual_rates, "limits": actual_limits,
+                "coil_constant_t_per_a": self.adapter.coil_constant_t_per_a,
                 "stored_fast_rate_a_per_s": fast_rate_a,
                 "stored_fast_rate_t_per_min": fast_rate_t,
                 "rate_units": {"normal": {"current": "A/s", "field": "T/min"},
@@ -623,11 +738,12 @@ class _MagnetWorker(QObject):
             })
         except Exception as exc:
             rollback_failures = []
-            if mutation_started:
+            if rates_mutated:
                 try:
                     self.adapter.restore_rates(rates)
                 except Exception as rollback_exc:
-                    rollback_failures.append(f"RATE rollback failed: {rollback_exc}")
+                    rollback_failures.append(f"rate rollback failed: {rollback_exc}")
+            if mutation_started:
                 try:
                     self.adapter.set_limits_t(*limits)
                 except Exception as rollback_exc:
@@ -669,16 +785,16 @@ class _MagnetWorker(QObject):
             return
         failures = []
         try:
-            if rates is not None and hasattr(self.adapter, "restore_rates"):
-                self.adapter.restore_rates(rates)
-        except Exception as exc:
-            failures.append(f"RATE restoration failed: {exc}")
-        try:
             if limits is not None:
                 self.adapter.set_limits_t(*limits)
         except Exception as exc:
             failures.append(f"limit restoration failed: {exc}")
         readback = None
+        try:
+            if rates is not None:
+                self.adapter.restore_rates(rates)
+        except Exception as exc:
+            failures.append(f"RATE restoration failed: {exc}")
         try:
             readback = self.adapter.get_rates()
         except Exception as exc:
@@ -719,7 +835,7 @@ class MagnetController(QObject):
     _pause_requested = Signal()
     _driven_requested = Signal()
     _persistent_requested = Signal(bool)
-    _safe_move_requested = Signal(str, float, str, bool, bool, float, float, float, bool)
+    _safe_move_requested = Signal(str, float, str, bool, bool, float, float, float, bool, object, object)
     _polling_requested = Signal(bool)
     _transport_config_requested = Signal(float, float)
     _transport_sweep_requested = Signal(float)
@@ -890,6 +1006,8 @@ class MagnetController(QObject):
         timeout_s: float = 3600.0,
         tolerance_t: float | None = None,
         use_gate_scan_rate: bool = False,
+        monotonic_direction: int | None = None,
+        hysteresis_options: dict | None = None,
     ) -> str:
         request_id = uuid.uuid4().hex
         if not cfg.magnet.allow_remote_heater_control:
@@ -928,14 +1046,20 @@ class MagnetController(QObject):
             float(timeout_s),
             float(cfg.magnet.field_tolerance_t if tolerance_t is None else tolerance_t),
             bool(use_gate_scan_rate),
+            monotonic_direction,
+            hysteresis_options,
         )
         return request_id
 
     def acquire_exclusive(self, owner: str) -> bool:
         if not self._exclusive_lock.acquire(blocking=False):
             return False
+        try:
+            self.heating_interlock.reserve_magnet(True, owner=str(owner))
+        except RuntimeError:
+            self._exclusive_lock.release()
+            return False
         self._exclusive_owner = str(owner)
-        self.heating_interlock.reserve_magnet(True)
         self._polling_requested.emit(False)
         self.exclusive_changed.emit(True, self._exclusive_owner)
         return True
@@ -943,8 +1067,8 @@ class MagnetController(QObject):
     def release_exclusive(self, owner: str) -> None:
         if not self._exclusive_lock.locked() or self._exclusive_owner != str(owner):
             return
+        self.heating_interlock.reserve_magnet(False, owner=str(owner))
         self._exclusive_owner = ""
-        self.heating_interlock.reserve_magnet(False)
         self._exclusive_lock.release()
         self._polling_requested.emit(True)
         self.exclusive_changed.emit(False, "")
@@ -961,6 +1085,9 @@ class MagnetController(QObject):
             self._thread.wait(5000)
 
     def configure_transport(self, rate_t_per_min: float, max_field_t: float = 6.0) -> None:
+        # Clear the previous operation before queueing; a STOP after this point
+        # remains latched and is observed between configuration steps.
+        self._worker._stop_event.clear()
         self._transport_config_requested.emit(float(rate_t_per_min), float(max_field_t))
 
     def start_transport_sweep(self, target_t: float) -> None:

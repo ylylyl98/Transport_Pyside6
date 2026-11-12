@@ -174,11 +174,25 @@ def build_sweep_preview(mode, params, connections):
         axes, title = ('Wavelength (nm)', 'Point order'), 'Photocurrent sweep preview'
         summary = f'{len(points):,} wavelengths × {len(conditions)} enabled conditions.'
     elif mode == 5:
-        points = []
-        traces = [_trace([(params.start_field_t, 0), (params.stop_field_t, 1)], 'Field range')]
-        endpoints = [(params.start_field_t, 0), (params.stop_field_t, 1)]
-        axes, title = ('B-field (T)', 'Range endpoint'), 'Continuous field range'
-        summary = 'Continuous field sweep: range only; acquisition point count depends on timing.'
+        if params.measurement_mode == 'stepped':
+            from app.engine.bfield_transport_sweep import validate_stepped_params
+            forward = validate_stepped_params(params)
+            points = forward + (forward[-2::-1] if params.round_trip else ())
+            vertices = [(field, i) for i, field in enumerate(points)]
+            traces = [_trace(vertices, 'Planned points')]
+            if len(points) <= MAX_SCATTER_POINTS:
+                samples.append(_sample_trace(vertices))
+            endpoints = [vertices[0], vertices[-1]]
+            if params.round_trip:
+                turn = vertices[len(forward) - 1]
+            axes, title = ('B-field (T)', 'Point order'), 'Stepped field sweep'
+            summary = f'{len(points):,} points per condition; temperature waiting is variable.'
+        else:
+            points = []
+            traces = [_trace([(params.start_field_t, 0), (params.stop_field_t, 1)], 'Field range')]
+            endpoints = [(params.start_field_t, 0), (params.stop_field_t, 1)]
+            axes, title = ('B-field (T)', 'Range endpoint'), 'Continuous field range'
+            summary = 'Continuous field sweep: range only; acquisition point count depends on timing.'
     else:
         raise ValueError('Unknown measurement mode')
     traces.extend(samples)
@@ -209,7 +223,7 @@ def build_sweep_preview(mode, params, connections):
             if len(values) <= 9:
                 tick_values[axis] = values.tolist()
     return dict(traces=limited, xLabel=axes[0], yLabel=axes[1], title=title, tickValues=tick_values,
-                summary=summary, pointCount=None if mode == 5 else len(points))
+                summary=summary, pointCount=None if mode == 5 and params.measurement_mode == "continuous" else len(points))
 
 
 class _PreviewTask(QRunnable):

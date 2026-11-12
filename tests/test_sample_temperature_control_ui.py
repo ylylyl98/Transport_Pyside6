@@ -49,6 +49,21 @@ def _snapshot(now, *, temperature=10.0, status="0", connected=True,
 
 
 class SampleTemperatureControlUiTests(unittest.TestCase):
+    def test_input_configuration_pending_resets_stability_even_without_wait(self):
+        controller = _FakeLakeShoreController()
+        controller.input_configuration_pending = True
+        bar = SampleTemperatureBar(controller, SimpleNamespace(maximum_reading_age_s=3))
+        bar._snapshot = _snapshot(1)
+        bar._stable_since = 1
+        bar._on_input_configuration_pending(True)
+        self.assertIsNone(bar._snapshot)
+        self.assertIsNone(bar._stable_since)
+        self.assertFalse(bar.is_ready())
+        controller.input_configuration_pending = False
+        bar._on_input_configuration_pending(False)
+        self.assertTrue(bar.is_ready())
+        bar.deleteLater()
+
     def test_primary_button_continuation_keeps_external_gates_and_stop(self):
         panel = RunPanel("Start scan")
         panel.set_running(True)

@@ -50,6 +50,66 @@ class TransportRecoveryTests(unittest.TestCase):
         self.c._on_safe_move(dict(success=False, error="hardware fault"))
         self.assertEqual(self.fixture.failures, ["hardware fault"])
 
+    def test_stale_field_at_configuration_enters_monitor_hold_not_terminal_failure(self):
+        from app.thermal_safety import ThermalSafetyEvaluator
+        from utils.config import LakeShore335Config
+        now = time.monotonic()
+        c = self.c
+        c._measurement_phase = "configuring"
+        c._config_pending = True
+        c.thermal_safety = ThermalSafetyEvaluator(LakeShore335Config(), clock=lambda: now)
+        c.thermal_safety.note_magnet_snapshot(NS(field_t=.1, monotonic_s=now-10))
+        lake = NS(monotonic_s=now, connected=True, communication_valid=True,
+                  sample_temperature_k=3.6, reservoir_temperature_k=3.3,
+                  sample_sensor_status=0, reservoir_sensor_status=0)
+        self.fixture.lake.publish(lake)
+        c.on_lakeshore_snapshot(lake)
+        self.assertEqual(self.fixture.failures, [])
+        self.assertIsNotNone(c._monitor_hold)
+        self.assertIn("APS100", c._monitor_hold["reason"])
+        self.assertEqual(self.fixture.magnet.events, ["pause"])
+
+    def test_invalid_or_out_of_range_field_remains_fatal(self):
+        from app.thermal_safety import ThermalDecision, ThermalState
+        for code in ("magnet_field_invalid", "magnet_field_out_of_range"):
+            decision = ThermalDecision(ThermalState.MONITOR_FAULT, False, code, block_code=code)
+            self.c._measurement_phase = "configuring"
+            with patch.object(self.c.thermal_safety, "evaluate", return_value=decision):
+                permitted, detail = self.c._thermal_permission()
+            self.assertFalse(permitted)
+            self.assertIsInstance(detail, str)
+            self.assertIn("thermal interlock", detail)
+
+    def test_monitor_recovery_cannot_advance_before_configuration_ack(self):
+        c = self.c
+        c._measurement_phase = "configuring"
+        c._config_pending = True
+        c._begin_monitor_hold("APS100 reading is stale")
+        c._on_magnet_operation("pause")
+        for _ in range(4):
+            self.fixture.publish()
+            c._check_monitor_recovery()
+        self.assertIsNotNone(c._monitor_hold)
+        c._config_pending = False
+        self.fixture.publish()
+        c._check_monitor_recovery()
+        self.assertIsNone(c._monitor_hold)
+        self.assertTrue(c._thermal_hold)
+        self.assertEqual(self.fixture.magnet.events, ["pause"])
+
+    def test_manual_continue_cannot_race_configuration_completion(self):
+        c = self.c
+        c._config_pending = True
+        c._thermal_hold = True
+        c._thermal_resume_action = "positioning"
+        with patch.object(c, "_position_at_start") as position:
+            c.continue_after_temperature_check()
+            position.assert_not_called()
+            self.assertTrue(c._thermal_hold)
+            c._config_pending = False
+            c.continue_after_temperature_check()
+            position.assert_called_once()
+
     def test_temperature_recovery_never_resumes_without_manual_action(self):
         c = self.c
         c._measurement_phase = "positioning"
@@ -221,7 +281,7 @@ class TransportRecoveryTests(unittest.TestCase):
     def test_slow_positioning_gets_rate_based_budget(self):
         c = self.c
         c.plan.params.start_field_t = -2.
-        c.plan.params.rate_t_per_min = 0.01
+        c.plan.validation["aps100_rates"] = {"normal": {i: (10. * (i + 1), .01) for i in range(5)}, "coil_constant_t_per_a": .2}
         self.fixture.magnet.telemetry_cache.publish(NS(field_t=2., monotonic_s=time.monotonic()))
         self.fixture.magnet.safe_move_to_field = lambda *a, **k: captured.update(k)
         captured = {}

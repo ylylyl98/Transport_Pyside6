@@ -147,11 +147,11 @@ class MainWindowShutdownRecoveryTests(unittest.TestCase):
         window.magnet2100.connect_async().result(1.0)
         self.app.processEvents()
         self.sdk.fail_close = True
-        window.bfield_transport_controller._shutdown_complete = True
+        window.bfield_transport_controller._engines["1000"]._shutdown_complete = True
         event = QtGui.QCloseEvent()
         with patch("app.ui.main_window.QtWidgets.QMessageBox.critical",
                    side_effect=lambda *_: self.assertFalse(
-                       window.bfield_transport_controller._shutdown_complete)) as message:
+                       window.bfield_transport_controller._engines["1000"]._shutdown_complete)) as message:
             window.closeEvent(event)
         self.assertFalse(event.isAccepted())
         self.assertTrue(window.isEnabled())
@@ -171,11 +171,11 @@ class MainWindowShutdownRecoveryTests(unittest.TestCase):
         gate = RecoverableGate()
         manager.sessions["g1"] = gate
         manager._connected_modes["g1"] = KEITHLEY_MODE_VOLTAGE_2W
-        window.bfield_transport_controller._shutdown_complete = True
+        window.bfield_transport_controller._engines["1000"]._shutdown_complete = True
         event = QtGui.QCloseEvent()
         with patch("app.ui.main_window.QtWidgets.QMessageBox.critical",
                    side_effect=lambda *_: self.assertFalse(
-                       window.bfield_transport_controller._shutdown_complete)) as message:
+                       window.bfield_transport_controller._engines["1000"]._shutdown_complete)) as message:
             window.closeEvent(event)
         self.assertFalse(event.isAccepted())
         self.assertTrue(window.isEnabled())
@@ -249,7 +249,7 @@ class MainWindowShutdownRecoveryTests(unittest.TestCase):
         window.magnet2100.set_h_setpoint_async(.01).result(1.0)
         window.magnet2100.start_field_control_async().result(1.0)
         self.sdk.fail_stop = True
-        window.bfield_transport_controller._shutdown_complete = True
+        window.bfield_transport_controller._engines["1000"]._shutdown_complete = True
         event = QtGui.QCloseEvent()
         with (
             patch.object(window.device_manager, "shutdown") as manager_shutdown,
@@ -261,7 +261,7 @@ class MainWindowShutdownRecoveryTests(unittest.TestCase):
         manager_shutdown.assert_not_called()
         self.assertTrue(self.sdk.field_active)
         self.assertEqual(self.sdk.close_calls, 0)
-        self.assertFalse(window.bfield_transport_controller._shutdown_complete)
+        self.assertFalse(window.bfield_transport_controller._engines["1000"]._shutdown_complete)
         self.assertTrue(window.isEnabled())
         for controller in (window.magnet1000, window.magnet2100, window.lakeshore335):
             self.assertTrue(controller._thread.isRunning())

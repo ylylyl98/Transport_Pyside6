@@ -12,6 +12,16 @@ ColumnLayout {
     property bool compact: false
     readonly property string acceptedValue: spec.value === undefined || spec.value === null ? "" : String(spec.value)
     readonly property bool readOnly: locked || Boolean(spec.readOnly)
+    readonly property string displayValue: {
+        // Format calculated coordinates only; editable values and their drafts retain
+        // their original text and precision even when the form is locked.
+        if (spec.readOnly && ["vtg", "vbg", "doping", "efield"].indexOf(spec.key) >= 0
+                && typeof spec.value === "number" && isFinite(spec.value)) {
+            const rounded = spec.value.toFixed(6).replace(/\.?0+$/, "")
+            return rounded === "" || rounded === "-0" ? "0" : rounded
+        }
+        return acceptedValue
+    }
     spacing: 2
     function commit() { return inputLoader.item && inputLoader.item.applyDraft ? inputLoader.item.applyDraft() : true }
     Component.onDestruction: if (cell.owner && cell.owner.activeEditor === cell) cell.owner.activeEditor = null
@@ -37,7 +47,7 @@ ColumnLayout {
             id: field
             objectName: "recipeCell_" + cell.owner.rowKey + "_" + cell.uid + "_" + cell.spec.key
             // A recycled delegate always reads the draft belonging to this UID.
-            text: { cell.uid; return cell.spec.draft === undefined ? cell.acceptedValue : String(cell.spec.draft) }
+            text: { cell.uid; return cell.spec.readOnly ? cell.displayValue : cell.spec.draft === undefined ? cell.acceptedValue : String(cell.spec.draft) }
             property var editModel: null
             property string editUid: ""
             property string editKey: ""

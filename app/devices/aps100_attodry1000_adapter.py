@@ -29,6 +29,14 @@ class APS100IdentityError(APS100Error):
     """Raised when the connected instrument is not an Attocube APS100."""
 
 
+class APS100FieldHistoryError(APS100Error):
+    """The measured field left its approved range or reversed excessively."""
+
+
+class APS100OvershootError(APS100Error):
+    """A directional move passed its target; reverse movement is forbidden."""
+
+
 class APS100SafetyError(APS100Error):
     """Raised when a requested operation violates a configured guard."""
 
@@ -192,14 +200,16 @@ class APS100AttoDry1000Adapter:
         heater_warm_s: float = 60.0,
         heater_cool_s: float = 120.0,
         heater_transition_timeout_s: float = 30.0,
-        current_match_tolerance_a: float = 0.01,
+        current_match_tolerance_a: Optional[float] = None,
+        current_match_tolerance_t: float = 0.010,
+        lead_zero_tolerance_t: float = 0.010,
         expect_echo: bool = True,
         resource_manager=None,
         visa_resource=None,
         sleep_fn: Callable[[float], None] = time.sleep,
     ) -> None:
-        if coil_constant_t_per_a <= 0:
-            raise ValueError("coil_constant_t_per_a must be positive")
+        if not math.isfinite(float(coil_constant_t_per_a)) or coil_constant_t_per_a <= 0:
+            raise ValueError("coil_constant_t_per_a must be positive and finite")
         self.resource_name = str(resource_name).strip() or DEFAULT_RESOURCE
         self.baud_rate = int(baud_rate)
         self.timeout_ms = int(timeout_ms)
@@ -210,7 +220,13 @@ class APS100AttoDry1000Adapter:
         self.heater_warm_s = float(heater_warm_s)
         self.heater_cool_s = float(heater_cool_s)
         self.heater_transition_timeout_s = max(0.1, float(heater_transition_timeout_s))
-        self.current_match_tolerance_a = float(current_match_tolerance_a)
+        self.current_match_tolerance_a = (float(current_match_tolerance_a) if current_match_tolerance_a is not None
+                                          else float(current_match_tolerance_t) / self.coil_constant_t_per_a)
+        if not math.isfinite(self.current_match_tolerance_a) or self.current_match_tolerance_a <= 0:
+            raise ValueError("current-match tolerance must be positive and finite")
+        self.lead_zero_tolerance_t = float(lead_zero_tolerance_t)
+        if not math.isfinite(self.lead_zero_tolerance_t) or self.lead_zero_tolerance_t <= 0:
+            raise ValueError("lead_zero_tolerance_t must be positive and finite")
         self.expect_echo = bool(expect_echo)
         self._resource_manager = resource_manager
         self._resource = visa_resource
@@ -497,25 +513,31 @@ class APS100AttoDry1000Adapter:
         value is written back.
         """
         restored = {}
+        failures = []
         for index, captured in dict(rates or {}).items():
-            index = int(index)
-            if not isinstance(captured, (tuple, list)) or len(captured) < 2:
-                raise APS100Error(f"Invalid captured APS100 RATE entry for range {index}")
-            expected_range, expected_rate = float(captured[0]), float(captured[1])
-            actual_range = self.get_range_a(index)
-            if abs(actual_range - expected_range) > 1e-6:
-                raise APS100Error(
-                    f"APS100 range {index} boundary changed from {expected_range:g} A to {actual_range:g} A"
-                )
-            rate_a = expected_rate / (self.coil_constant_t_per_a * 60.0)
-            self._write(f"RATE {index} {rate_a:.7f}")
-            actual_rate = self.get_rate_a_per_s(index)
-            if abs(actual_rate - rate_a) > 1.5e-4:
-                raise APS100Error(
-                    f"APS100 RATE {index} restoration verification failed: "
-                    f"requested {rate_a:g}, read {actual_rate:g} A/s"
-                )
-            restored[index] = actual_rate * self.coil_constant_t_per_a * 60.0
+            try:
+                index = int(index)
+                if not isinstance(captured, (tuple, list)) or len(captured) < 2:
+                    raise APS100Error(f"Invalid captured APS100 RATE entry for range {index}")
+                expected_range, expected_rate = float(captured[0]), float(captured[1])
+                actual_range = self.get_range_a(index)
+                if abs(actual_range - expected_range) > 1e-6:
+                    raise APS100Error(
+                        f"APS100 range {index} boundary changed from {expected_range:g} A to {actual_range:g} A"
+                    )
+                rate_a = expected_rate / (self.coil_constant_t_per_a * 60.0)
+                self._write(f"RATE {index} {rate_a:.7f}")
+                actual_rate = self.get_rate_a_per_s(index)
+                if abs(actual_rate - rate_a) > 1e-6:
+                    raise APS100Error(
+                        f"APS100 RATE {index} restoration verification failed: "
+                        f"requested {rate_a:g}, read {actual_rate:g} A/s"
+                    )
+                restored[index] = actual_rate * self.coil_constant_t_per_a * 60.0
+            except Exception as exc:
+                failures.append(f"range {index}: {exc}")
+        if failures:
+            raise APS100Error("; ".join(failures))
         return restored
 
     def _ensure_no_fault(self) -> APS100Status:
@@ -801,7 +823,7 @@ class APS100AttoDry1000Adapter:
     def zero_output(
         self,
         *,
-        tolerance_t: float = 0.002,
+        tolerance_t: Optional[float] = None,
         timeout_s: float = 900.0,
         verify_persistent_switch: bool = False,
         max_magnet_voltage_v: Optional[float] = None,
@@ -810,6 +832,10 @@ class APS100AttoDry1000Adapter:
         transition_progress: Optional[Callable[[str, float], None]] = None,
     ) -> float:
         """Use the APS100 ZERO operation and require its automatic Standby state."""
+        if tolerance_t is None:
+            tolerance_t = self.lead_zero_tolerance_t
+        if not math.isfinite(float(tolerance_t)) or float(tolerance_t) <= 0:
+            raise ValueError("zero tolerance must be positive and finite")
         initial_output = self.get_output_field_t()
         if not math.isfinite(initial_output):
             raise APS100SafetyError("Nonfinite output before ZERO")
@@ -1118,9 +1144,9 @@ class APS100AttoDry1000Adapter:
                 f"Invalid PSHTR? response during persistent cleanup; heater OFF is unconfirmed: {exc}"
             ) from exc
         if heater_state == 0:
-            if zero_leads and abs(self.get_output_field_t()) > 0.002:
+            if zero_leads and abs(self.get_output_field_t()) > self.lead_zero_tolerance_t:
                 self.zero_output(
-                    tolerance_t=0.002,
+                    tolerance_t=self.lead_zero_tolerance_t,
                     timeout_s=timeout_s,
                     transition_progress=progress,
                     verify_persistent_switch=True,
@@ -1168,7 +1194,7 @@ class APS100AttoDry1000Adapter:
         self._raise_if_stopped(stop_event)
         if zero_leads:
             self.zero_output(
-                tolerance_t=0.002,
+                tolerance_t=self.lead_zero_tolerance_t,
                 timeout_s=timeout_s,
                 transition_progress=progress,
                 verify_persistent_switch=True,
@@ -1261,9 +1287,9 @@ class APS100AttoDry1000Adapter:
             if abs(snapshot.field_t - target) > abs(tolerance):
                 reason = f"field {snapshot.field_t:.6g} T; target {target:g} T; tolerance {tolerance:g} T"
             elif mode == "persistent" and zero_leads and (
-                abs(snapshot.output_field_t) > 0.002 or abs(snapshot.output_current_a) > self.current_match_tolerance_a
+                abs(snapshot.output_field_t) > self.lead_zero_tolerance_t or abs(snapshot.output_current_a) > self.lead_zero_tolerance_t / self.coil_constant_t_per_a
             ):
-                reason = f"lead current {snapshot.output_current_a:.6g} A; zero limit {self.current_match_tolerance_a:g} A"
+                reason = f"lead current {snapshot.output_current_a:.6g} A; zero limit {self.lead_zero_tolerance_t / self.coil_constant_t_per_a:g} A"
             consecutive = consecutive + 1 if not reason else 0
             if consecutive >= 2:
                 return snapshot
@@ -1273,6 +1299,252 @@ class APS100AttoDry1000Adapter:
                 break
             self._sleep(0.25)
         raise APS100SafetyError("Measurement not ready after final settling: " + reason)
+
+    def _hysteresis_field_move(self, target, direction, tolerance, timeout, stop_event, progress, options, history):
+        """Run a directed sweep and validate every acquired field observation."""
+        try:
+            acceptance = float(options["acceptance_t"])
+            reversal = float(options["reversal_t"])
+            lower, upper = float(options["lower_t"]), float(options["upper_t"])
+            no_progress = float(options["no_progress_s"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise APS100SafetyError("Invalid hysteresis move options") from exc
+        if (not all(math.isfinite(v) for v in (acceptance, reversal, lower, upper, no_progress))
+                or acceptance < tolerance or reversal <= 0 or no_progress <= 0
+                or lower >= upper or abs(lower) > self.maximum_field_t or abs(upper) > self.maximum_field_t
+                or not lower <= target <= upper or direction not in (-1, 1)):
+            raise APS100SafetyError("Unsafe hysteresis acceptance, history limits, or direction")
+        start = time.monotonic()
+        deadline = start + float(timeout)
+        if not history:
+            history.update(direction=direction, started_monotonic_s=start, finished_monotonic_s=None,
+                           min_t=None, max_t=None, max_reverse_t=0.0, read_count=0,
+                           start_t=None, end_t=None, complete=False)
+        elif history.get("direction") != direction:
+            raise APS100SafetyError("History direction disagrees with requested direction")
+        peak = (None if history.get("min_t") is None else
+                direction * (history["max_t"] if direction > 0 else history["min_t"]))
+        def observe_value(field):
+            nonlocal peak
+            field = float(field)
+            if not math.isfinite(field):
+                raise APS100SafetyError("Nonfinite field history readback")
+            if history["start_t"] is None:
+                history["start_t"] = field
+            history["end_t"] = field
+            history["read_count"] += 1
+            history["min_t"] = field if history["min_t"] is None else min(history["min_t"], field)
+            history["max_t"] = field if history["max_t"] is None else max(history["max_t"], field)
+            oriented = direction * field
+            peak = oriented if peak is None else max(peak, oriented)
+            history["max_reverse_t"] = max(history["max_reverse_t"], peak - oriented)
+            if field < lower - 1e-12 or field > upper + 1e-12:
+                raise APS100FieldHistoryError(f"Field {field:g} T outside approved range [{lower:g}, {upper:g}] T")
+            if history["max_reverse_t"] > reversal + 1e-12:
+                raise APS100FieldHistoryError(f"Field reversed {history['max_reverse_t']:g} T beyond {reversal:g} T")
+            return field
+        def observe():
+            return observe_value(self.get_field_t())
+        def confirm_pause():
+            self.pause()
+            return observe()
+        def accept(field):
+            if abs(field - target) > acceptance + 1e-12:
+                raise APS100SafetyError(f"Field stopped {abs(field-target):g} T from target, outside acceptance {acceptance:g} T")
+            snapshot = self.read_snapshot()
+            observed = observe_value(getattr(snapshot, "field_t", snapshot))
+            if abs(observed - target) > acceptance + 1e-12:
+                raise APS100SafetyError("Paused snapshot is outside field acceptance")
+            return snapshot
+        saved = None
+        changed = False
+        try:
+            current = observe()
+            saved = self.get_rates()
+            distance = direction * (target - current)
+            if distance <= tolerance:
+                return accept(confirm_pause())
+            intermediate = round((current + direction * distance * .8) / .0001) * .0001
+            stages = ([(intermediate, False), (target, True)] if direction * (intermediate-current) > tolerance
+                      and direction * (target-intermediate) > tolerance else [(target, True)])
+            for endpoint, slow in stages:
+                self._raise_if_stopped(stop_event)
+                if time.monotonic() >= deadline:
+                    raise APS100TimeoutError("Directional field move timed out before stage")
+                self._ensure_no_fault()
+                if slow:
+                    unit = self.coil_constant_t_per_a * 60.0 * .0001
+                    reduced = {i: (b, min(r, max(unit, math.floor((r*.2/unit)+1e-10)*unit))) for i, (b,r) in saved.items()}
+                    changed = True
+                    self.restore_rates(reduced)
+                    active_rates = reduced
+                else:
+                    active_rates = saved
+                actual = observe()
+                output = float(self.get_output_field_t())
+                if not math.isfinite(output):
+                    raise APS100SafetyError("Nonfinite output field before sweep")
+                if direction * (target - actual) <= tolerance:
+                    return accept(confirm_pause())
+                if direction * (endpoint - actual) <= tolerance:
+                    continue
+                if direction * (endpoint - output) < -tolerance:
+                    raise APS100FieldHistoryError("Output crossed the directional stage target")
+                expected = "UP" if direction > 0 else "DOWN"
+                selected = self._set_directional_target(endpoint, actual)
+                fresh = observe()
+                output = float(self.get_output_field_t())
+                if not math.isfinite(output):
+                    raise APS100SafetyError("Nonfinite output field before sweep")
+                if direction * (target - fresh) <= tolerance:
+                    return accept(confirm_pause())
+                if direction * (endpoint - fresh) <= tolerance:
+                    continue
+                if selected != expected or direction * (endpoint - output) < -tolerance:
+                    raise APS100FieldHistoryError("Output crossed the directional stage before command")
+                self._raise_if_stopped(stop_event)
+                self._ensure_no_fault()
+                if time.monotonic() >= deadline:
+                    raise APS100TimeoutError("Directional field move timed out before sweep command")
+                self._write(f"SWEEP {expected} SLOW")
+                last_progress_at = time.monotonic()
+                best = direction * fresh
+                while True:
+                    self._raise_if_stopped(stop_event)
+                    self._ensure_no_fault()
+                    actual = observe()
+                    now = time.monotonic()
+                    if progress: progress("ramping field", actual)
+                    if direction * (actual-target) >= -tolerance:
+                        return accept(confirm_pause())
+                    if direction * (endpoint-actual) <= tolerance:
+                        confirm_pause()
+                        break
+                    if direction * actual - best >= .0001:
+                        best, last_progress_at = direction * actual, now
+                    # 1 Oe is 0.0001 T. Use the active band's verified field rate.
+                    current_a = abs(actual) / self.coil_constant_t_per_a
+                    band_rate = next((r for b,r in active_rates.values() if current_a <= b + 1e-9), None)
+                    if band_rate is None or band_rate <= 0:
+                        raise APS100SafetyError("No valid active APS100 rate for field")
+                    budget = max(no_progress, .0001 * 60.0 / band_rate * 1.5)
+                    if now >= deadline:
+                        raise APS100TimeoutError("Directional field move timed out")
+                    if now - last_progress_at >= budget:
+                        return accept(confirm_pause())
+                    self._sleep(.1)
+            return accept(confirm_pause())
+        except Exception:
+            # Every history violation and all ordinary failures first request a
+            # confirmed pause; inability to confirm remains an ordinary failure.
+            self.pause()
+            try:
+                observe()
+            except APS100FieldHistoryError:
+                pass
+            raise
+        finally:
+            try:
+                if changed:
+                    self.restore_rates(saved)
+            finally:
+                try:
+                    observe()
+                    history["complete"] = True
+                finally:
+                    history["finished_monotonic_s"] = time.monotonic()
+
+    def _monotonic_field_move(self, target, direction, tolerance, timeout, stop_event, progress):
+        """Directed, two-stage sweep with a strict deadline and per-run rate restoration."""
+        direction = int(direction)
+        if direction not in (-1, 0, 1):
+            raise APS100SafetyError("Invalid monotonic direction")
+        current = self.get_field_t()
+        if not math.isfinite(current):
+            raise APS100SafetyError("Nonfinite field before directional sweep")
+        direction = direction or (1 if target >= current else -1)
+        deadline = time.monotonic() + float(timeout)
+        saved = self.get_rates()
+        changed = False
+        try:
+            distance = direction * (target - current)
+            if distance < -tolerance:
+                raise APS100OvershootError(f"Directional target {target:g} T exceeded at {current:g} T")
+            if distance <= tolerance:
+                self.pause()
+                return self.read_snapshot()
+            # First part uses the verified per-run table; the final part uses
+            # 20% rates (never above the per-run band rate), quantized down.
+            intermediate = current + direction * distance * .8
+            intermediate = round(intermediate / .0001) * .0001
+            if direction * (intermediate - current) > tolerance and direction * (target - intermediate) > tolerance:
+                stages = [(intermediate, False), (target, True)]
+            else:
+                stages = [(target, True)]
+            for endpoint, slow in stages:
+                if time.monotonic() >= deadline:
+                    raise APS100TimeoutError("Directional field move timed out before stage")
+                self._raise_if_stopped(stop_event)
+                self._ensure_no_fault()
+                if slow:
+                    unit = self.coil_constant_t_per_a * 60.0 * .0001
+                    reduced = {i: (b, min(r, max(unit, math.floor((r * .2 / unit) + 1e-10) * unit))) for i, (b, r) in saved.items()}
+                    changed = True
+                    self.restore_rates(reduced)
+                # Re-read on the device worker immediately before choosing the
+                # limit and again before SWEEP. Never issue the opposite sweep.
+                actual = self.get_field_t()
+                output = self.get_output_field_t()
+                if not math.isfinite(actual) or not math.isfinite(output):
+                    raise APS100SafetyError("Nonfinite field readback before directional sweep")
+                if direction * (target - actual) < -tolerance or direction * (target - output) < -tolerance:
+                    raise APS100OvershootError(f"Directional target {target:g} T exceeded at {actual:g} T")
+                if direction * (endpoint - actual) <= tolerance:
+                    continue
+                if direction * (endpoint - output) < -tolerance:
+                    raise APS100OvershootError("Output passed the directional stage target")
+                expected = "UP" if direction > 0 else "DOWN"
+                selected = self._set_directional_target(endpoint, actual)
+                fresh = self.get_field_t()
+                output = self.get_output_field_t()
+                if not math.isfinite(fresh) or not math.isfinite(output):
+                    raise APS100SafetyError("Nonfinite field readback before sweep command")
+                if selected != expected or direction * (endpoint - fresh) < -tolerance or direction * (endpoint - output) < -tolerance:
+                    raise APS100OvershootError("Field passed the directional stage before the sweep command")
+                self._raise_if_stopped(stop_event)
+                self._ensure_no_fault()
+                if time.monotonic() >= deadline:
+                    raise APS100TimeoutError("Directional field move timed out before sweep command")
+                self._write(f"SWEEP {expected} SLOW")
+                while True:
+                    self._raise_if_stopped(stop_event)
+                    self._ensure_no_fault()
+                    actual = self.get_field_t()
+                    if not math.isfinite(actual):
+                        raise APS100SafetyError("Nonfinite field during directional sweep")
+                    if progress: progress("ramping field", actual)
+                    if direction * (actual - target) > tolerance:
+                        self.pause()
+                        raise APS100OvershootError(f"Directional target {target:g} T exceeded at {actual:g} T")
+                    if direction * (endpoint - actual) <= tolerance:
+                        self.pause()
+                        break
+                    if time.monotonic() >= deadline:
+                        self.pause(confirm=False)
+                        raise APS100TimeoutError("Directional field move timed out")
+                    self._sleep(.1)
+            return self.read_snapshot()
+        except APS100OvershootError:
+            # Manual hold is only safe after the hardware acknowledges pause.
+            # A failed confirmation propagates as an ordinary failure instead.
+            self.pause()
+            raise
+        except Exception:
+            self.pause(confirm=False)
+            raise
+        finally:
+            if changed:
+                self.restore_rates(saved)
 
     def safe_move_to_field(
         self,
@@ -1287,6 +1559,9 @@ class APS100AttoDry1000Adapter:
         max_magnet_voltage_v: Optional[float] = None,
         stop_event=None,
         progress: Optional[Callable[[str, float], None]] = None,
+        monotonic_direction: Optional[int] = None,
+        hysteresis_options: Optional[dict] = None,
+        field_history: Optional[dict] = None,
     ) -> MagnetSnapshot:
         """Move from either magnet mode to a target and verified final mode."""
         target = self._validate_field(target_t)
@@ -1317,9 +1592,9 @@ class APS100AttoDry1000Adapter:
         if not heater_on and mode == "persistent" and abs(field_t - target) <= abs(
             float(tolerance_t)
         ):
-            if zero_leads and abs(output_t) > abs(float(tolerance_t)):
+            if zero_leads and abs(output_t) > self.lead_zero_tolerance_t:
                 self.zero_output(
-                    tolerance_t=tolerance_t,
+                    tolerance_t=self.lead_zero_tolerance_t,
                     timeout_s=timeout_s,
                     verify_persistent_switch=True,
                     transition_progress=progress,
@@ -1348,6 +1623,15 @@ class APS100AttoDry1000Adapter:
             )
 
         self._raise_if_stopped(stop_event)
+        if monotonic_direction is not None:
+            if mode != "driven":
+                raise APS100SafetyError("Directional approach requires driven mode")
+            if hysteresis_options is not None:
+                direction = int(monotonic_direction)
+                if direction == 0:
+                    direction = 1 if target >= self.get_field_t() else -1
+                return self._hysteresis_field_move(target, direction, abs(float(tolerance_t)), timeout_s, stop_event, progress, hysteresis_options, field_history if field_history is not None else {})
+            return self._monotonic_field_move(target, monotonic_direction, abs(float(tolerance_t)), timeout_s, stop_event, progress)
         if abs(self.get_field_t() - target) > abs(float(tolerance_t)):
             field_progress = (
                 (lambda value: progress("ramping field", value))
@@ -1446,16 +1730,28 @@ class MockAPS100Adapter:
         heater_warm_s: float = 0.01,
         heater_cool_s: float = 0.01,
         time_scale: float = 600.0,
+        current_match_tolerance_a: Optional[float] = None,
+        current_match_tolerance_t: float = 0.010,
+        lead_zero_tolerance_t: float = 0.010,
         **_kwargs,
     ) -> None:
         self.resource_name = resource_name
         self.coil_constant_t_per_a = coil_constant_t_per_a
         self.maximum_field_t = maximum_field_t
+        self.maximum_current_a = float(_kwargs.get("maximum_current_a", 44.27))
         self.maximum_rate_a_per_s = maximum_rate_a_per_s
         self.heater_warm_s = heater_warm_s
         self.heater_cool_s = heater_cool_s
         self._time_scale = max(1.0, float(time_scale))
-        self.current_match_tolerance_a = 0.01
+        if not math.isfinite(float(coil_constant_t_per_a)) or coil_constant_t_per_a <= 0:
+            raise ValueError("coil_constant_t_per_a must be positive and finite")
+        self.current_match_tolerance_a = (float(current_match_tolerance_a) if current_match_tolerance_a is not None
+                                          else float(current_match_tolerance_t) / self.coil_constant_t_per_a)
+        if not math.isfinite(self.current_match_tolerance_a) or self.current_match_tolerance_a <= 0:
+            raise ValueError("current-match tolerance must be positive and finite")
+        self.lead_zero_tolerance_t = float(lead_zero_tolerance_t)
+        if not math.isfinite(self.lead_zero_tolerance_t) or self.lead_zero_tolerance_t <= 0:
+            raise ValueError("lead_zero_tolerance_t must be positive and finite")
         self._identity: Optional[APS100Identity] = None
         self._field_t = 0.0
         self._output_t = 0.0
@@ -1681,7 +1977,7 @@ class MockAPS100Adapter:
     def zero_output(
         self,
         *,
-        tolerance_t=0.002,
+        tolerance_t=None,
         verify_persistent_switch=False,
         max_magnet_voltage_v=None,
         stop_event=None,
@@ -1690,6 +1986,12 @@ class MockAPS100Adapter:
     ):
         if stop_event is not None and stop_event.is_set():
             raise APS100OperationCancelled(stop_event)
+        if tolerance_t is None:
+            tolerance_t = self.lead_zero_tolerance_t
+        if not math.isfinite(float(tolerance_t)) or float(tolerance_t) <= 0:
+            raise ValueError("zero tolerance must be positive and finite")
+        if abs(self._output_t) <= abs(float(tolerance_t)):
+            return self._output_t
         if verify_persistent_switch:
             if max_magnet_voltage_v is None or float(max_magnet_voltage_v) <= 0:
                 raise APS100SafetyError(
@@ -1746,8 +2048,9 @@ class MockAPS100Adapter:
         self._heater = False
         if progress:
             progress("heater cooling", 0.0)
-        if zero_leads and abs(self._output_t) > 0.002:
+        if zero_leads and abs(self._output_t) > self.lead_zero_tolerance_t:
             self.zero_output(
+                tolerance_t=self.lead_zero_tolerance_t,
                 verify_persistent_switch=True,
                 max_magnet_voltage_v=max_magnet_voltage_v,
                 progress=(
@@ -1769,6 +2072,9 @@ class MockAPS100Adapter:
         max_magnet_voltage_v=None,
         stop_event=None,
         progress=None,
+        monotonic_direction=None,
+        hysteresis_options=None,
+        field_history=None,
     ):
         del settle_s
         self.take_remote()
@@ -1785,8 +2091,9 @@ class MockAPS100Adapter:
             and mode == "persistent"
             and abs(self._field_t - target_t) <= tolerance_t
         ):
-            if zero_leads and abs(self._output_t) > tolerance_t:
+            if zero_leads and abs(self._output_t) > self.lead_zero_tolerance_t:
                 self.zero_output(
+                    tolerance_t=self.lead_zero_tolerance_t,
                     verify_persistent_switch=True,
                     max_magnet_voltage_v=max_magnet_voltage_v,
                     progress=(
@@ -1801,13 +2108,63 @@ class MockAPS100Adapter:
                     "Confirm the APS100 stored persistent field and polarity before matching"
                 )
             self.enter_driven_mode(progress=progress)
+        if hysteresis_options is not None:
+            history = field_history if field_history is not None else {}
+            current = self.get_field_t()
+            direction = int(monotonic_direction or (1 if target_t >= current else -1))
+            started = time.monotonic()
+            if not history:
+                history.update(direction=direction, start_t=current, end_t=current, min_t=current, max_t=current,
+                               max_reverse_t=0., read_count=1, started_monotonic_s=started,
+                               finished_monotonic_s=None, complete=False)
+            peak = direction * (history["max_t"] if direction > 0 else history["min_t"])
+            def observe(value):
+                nonlocal peak
+                value = float(value)
+                history["end_t"] = value
+                history["min_t"] = min(history["min_t"], value)
+                history["max_t"] = max(history["max_t"], value)
+                history["read_count"] += 1
+                peak = max(peak, direction * value)
+                history["max_reverse_t"] = max(history["max_reverse_t"], peak - direction * value)
+                if (not hysteresis_options["lower_t"] <= value <= hysteresis_options["upper_t"]
+                        or history["max_reverse_t"] > hysteresis_options["reversal_t"]):
+                    raise APS100FieldHistoryError("Mock field history violated limits")
+                if progress: progress("ramping field", value)
+            try:
+                observe(current)
+                if direction * (target_t-current) > tolerance_t:
+                    self.move_to_field(target_t, tolerance_t=tolerance_t, timeout_s=timeout_s,
+                                       stop_event=stop_event, progress=observe)
+                self.pause()
+                observe(self.get_field_t())
+                if abs(history["end_t"] - target_t) > hysteresis_options["acceptance_t"]:
+                    raise APS100SafetyError("Mock directional field outside acceptance")
+                return self.read_snapshot()
+            except Exception:
+                self.pause()
+                raise
+            finally:
+                try:
+                    observe(self.get_field_t())
+                    history["complete"] = True
+                finally:
+                    history["finished_monotonic_s"] = time.monotonic()
+        if monotonic_direction is not None:
+            current = self.get_field_t()
+            direction = int(monotonic_direction) or (1 if target_t >= current else -1)
+            if direction not in (-1, 1):
+                raise APS100SafetyError("Invalid monotonic direction")
+            if direction * (current - target_t) > abs(float(tolerance_t)):
+                self.pause()
+                raise APS100OvershootError("Directional target already exceeded")
         if abs(self.get_field_t() - target_t) > abs(float(tolerance_t)):
             field_progress = (
                 (lambda value: progress("ramping field", value))
                 if progress is not None else None
             )
             if abs(target_t) <= tolerance_t:
-                self.zero_output(stop_event=stop_event, progress=field_progress)
+                self.zero_output(tolerance_t=tolerance_t, stop_event=stop_event, progress=field_progress)
             else:
                 self.move_to_field(
                     target_t,

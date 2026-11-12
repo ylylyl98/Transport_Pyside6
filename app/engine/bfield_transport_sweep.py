@@ -26,7 +26,7 @@ from utils.config import cfg
 
 
 COIL_CONSTANT_T_PER_A = 0.20328
-MAX_DRIVEN_FIELD_T = 6.0
+MAX_DRIVEN_FIELD_T = 8.0
 MAX_RATE_A_PER_S = 0.03430
 MAX_RATE_T_PER_MIN = MAX_RATE_A_PER_S * COIL_CONSTANT_T_PER_A * 60.0
 DEFAULT_VOLTAGE_MARGIN_V = 1.0
@@ -88,9 +88,9 @@ def transport_output_summary_parts(
     parts = [
         f"B{params.start_field_t:g}to{params.stop_field_t:g}T",
         direction,
-        f"{params.rate_t_per_min:g}Tpermin",
-        f"{enabled_count}cond",
     ]
+    if params.measurement_mode == "stepped":
+        parts.append(f"T{params.temperature_target_k:g}K")
     if signal_chain is not None:
         parts.extend(signal_chain_filename_parts(signal_chain))
     return parts
@@ -129,7 +129,7 @@ def build_transport_output_paths(
             os.path.join(
                 planned.output_dir,
                 f"{planned.display_stem}_C{index:02d}_{condition_name}"
-                f"_Doping{condition.doping:g}_E{condition.efield:g}_Vds{condition.vds:g}V"
+                f"_D{condition.doping:g}_E{condition.efield:g}_Vds{condition.vds:g}V"
                 f"_r{condition.ratio_target}{condition.ratio:g}_{planned.run_id}.csv",
             )
         )
@@ -290,8 +290,24 @@ def effective_rate_limit_t_per_min(
     return min(hard, rate_a_per_s_to_t_per_min(voltage_cap_a, coil_constant))
 
 
-def validate_field_bounds(start_field_t: float, stop_field_t: float, *, max_field_t: float = MAX_DRIVEN_FIELD_T) -> tuple[float, float]:
-    start, stop, limit = float(start_field_t), float(stop_field_t), float(max_field_t)
+def aps100_transport_field_limit() -> float:
+    """Commissioned transport envelope, bounded by the physical hard limits."""
+    current, coil = float(cfg.magnet.maximum_current_a), float(cfg.magnet.coil_constant_t_per_a)
+    if not all(math.isfinite(value) and value > 0 for value in (current, coil)):
+        raise BFieldTransportSafetyError("APS100 current limit and coil constant must be finite and positive")
+    limits = (MAX_DRIVEN_FIELD_T, float(cfg.magnet.safe_control_max_field_t),
+              float(cfg.magnet.maximum_field_t),
+              current * coil)
+    if not all(math.isfinite(value) and value > 0 for value in limits):
+        raise BFieldTransportSafetyError("APS100 field limit configuration must be finite and positive")
+    return min(limits)
+
+
+def validate_field_bounds(start_field_t: float, stop_field_t: float, *, max_field_t: float | None = None) -> tuple[float, float]:
+    start, stop = float(start_field_t), float(stop_field_t)
+    if max_field_t is not None and (not math.isfinite(float(max_field_t)) or float(max_field_t) <= 0):
+        raise BFieldTransportSafetyError("B-field limit must be finite and positive")
+    limit = min(aps100_transport_field_limit(), float(max_field_t)) if max_field_t is not None else aps100_transport_field_limit()
     if not all(math.isfinite(v) for v in (start, stop, limit)):
         raise BFieldTransportSafetyError("B-field bounds must be finite")
     if limit <= 0 or abs(start) > limit + 1e-12 or abs(stop) > limit + 1e-12:
@@ -311,7 +327,7 @@ def validate_setup(
     stop_field_t: float,
     rate_t_per_min: float,
     *,
-    max_field_t: float = MAX_DRIVEN_FIELD_T,
+    max_field_t: float | None = None,
     max_rate_a_per_s: float | None = None,
     coil_constant: float | None = None,
     inductance_h: float | None = None,
@@ -335,9 +351,104 @@ def validate_setup(
         "rate_t_per_min": float(rate_t_per_min),
         "rate_a_per_s": rate_a,
         "predicted_voltage_v": voltage,
-        "max_field_t": float(max_field_t),
+        "max_field_t": min(aps100_transport_field_limit(), float(max_field_t)) if max_field_t is not None else aps100_transport_field_limit(),
         "max_rate_a_per_s": configured_max,
     }
+
+
+MAX_STEPPED_POINTS = 10000
+
+
+def build_stepped_targets(params: BFieldTransportParams) -> tuple[float, ...]:
+    """Generate one ordered pass, including both endpoints, at instrument resolution."""
+    sdk = params.magnet_backend == "2100"
+    start, stop = (validate_2100_fields(params) if sdk else
+                   validate_field_bounds(params.start_field_t, params.stop_field_t))
+    resolution = 1e-12 if sdk else APS100_FIELD_RESOLUTION_T
+    resolution_name = "numerical field resolution" if sdk else "APS100 resolution"
+    span = abs(stop - start)
+    direction = 1 if stop > start else -1
+    if params.field_spacing == "points":
+        n = params.field_points
+        if isinstance(n, bool) or not isinstance(n, int) or not 2 <= n <= MAX_STEPPED_POINTS:
+            raise BFieldTransportSafetyError(f"Field point count must be 2–{MAX_STEPPED_POINTS}")
+        if span / (n - 1) < resolution - (0 if sdk else 1e-12):
+            raise BFieldTransportSafetyError(f"Field spacing is below {resolution_name}")
+        targets = [start + (stop - start) * i / (n - 1) for i in range(n - 1)]
+    elif params.field_spacing == "step":
+        step = float(params.field_step_t)
+        if not math.isfinite(step) or step < resolution:
+            raise BFieldTransportSafetyError(f"Field step must be finite and at least {resolution_name}")
+        quotient = span / step
+        count = round(quotient) if math.isclose(quotient, round(quotient), rel_tol=1e-12, abs_tol=1e-12) else math.ceil(quotient)
+        if count + 1 > MAX_STEPPED_POINTS:
+            raise BFieldTransportSafetyError(f"Field point count exceeds {MAX_STEPPED_POINTS}")
+        targets = [start + direction * step * i for i in range(count)]
+        # Avoid near-duplicate terminal points from floating point rounding.
+        if len(targets) > 1 and abs(stop - targets[-1]) < resolution - (0 if sdk else 1e-12):
+            raise BFieldTransportSafetyError(f"Last field interval is below {resolution_name}")
+    else:
+        raise BFieldTransportSafetyError("Field spacing must be points or step")
+    targets.append(stop)
+    if not sdk and any(abs(value / APS100_FIELD_RESOLUTION_T - round(value / APS100_FIELD_RESOLUTION_T)) > 1e-7
+           for value in targets):
+        raise BFieldTransportSafetyError(
+            "Stepped field targets must align to APS100 0.0001 T resolution; adjust start, stop or spacing")
+    return tuple(targets)
+
+
+def validate_2100_fields(params):
+    from app.devices.attodry2100_adapter import HARD_MAX_FIELD_T
+    try:
+        maximum = min(float(cfg.attodry2100.maximum_field_t), HARD_MAX_FIELD_T)
+        start, stop = float(params.start_field_t), float(params.stop_field_t)
+    except (TypeError, ValueError) as exc:
+        raise BFieldTransportSafetyError("2100 field limits must be commissioned") from exc
+    if (not all(math.isfinite(v) for v in (maximum, start, stop)) or maximum <= 0
+            or max(abs(start), abs(stop)) > maximum or abs(start - stop) < 1e-12):
+        raise BFieldTransportSafetyError("2100 requires distinct finite fields within its commissioned limits")
+    return start, stop
+
+
+def validate_stepped_params(params: BFieldTransportParams) -> tuple[float, ...]:
+    targets = build_stepped_targets(params)
+    for key in ("temperature_target_k", "temperature_tolerance_k", "temperature_window_s",
+                "temperature_span_k", "temperature_drift_k_per_min", "temperature_timeout_s"):
+        value = float(getattr(params, key))
+        if not math.isfinite(value) or value <= 0:
+            raise BFieldTransportSafetyError(f"{key} must be positive and finite")
+    if params.temperature_timeout_s < params.temperature_window_s:
+        raise BFieldTransportSafetyError("Temperature timeout must cover the stability window")
+    if params.magnet_backend == "1000":
+        tol = float(params.field_tolerance_t)
+        dwell = float(params.field_stability_s)
+        settle = float(params.field_settle_s)
+        if not math.isfinite(tol) or tol < APS100_FIELD_RESOLUTION_T:
+            raise BFieldTransportSafetyError("Approach tolerance must be at least 0.1 mT")
+        for key in ("field_acceptance_t", "field_endpoint_tolerance_t", "field_reversal_t", "field_span_t"):
+            value = float(getattr(params, key))
+            if not math.isfinite(value) or value < APS100_FIELD_RESOLUTION_T:
+                raise BFieldTransportSafetyError(f"{key} must be finite and at least 0.1 mT")
+        if tol > params.field_acceptance_t:
+            raise BFieldTransportSafetyError("Approach tolerance cannot exceed point acceptance")
+        if params.field_endpoint_tolerance_t > params.field_acceptance_t:
+            raise BFieldTransportSafetyError("Endpoint acceptance cannot exceed point acceptance")
+        for key in ("field_drift_t_per_s", "field_timeout_s", "field_no_progress_s"):
+            value = float(getattr(params, key))
+            if not math.isfinite(value) or value <= 0:
+                raise BFieldTransportSafetyError(f"{key} must be positive and finite")
+        gap = float(params.field_max_gap_t)
+        if not math.isfinite(gap) or gap < 0:
+            raise BFieldTransportSafetyError("Maximum actual field gap must be nonnegative and finite")
+        if gap and gap + 1e-12 < max(abs(b-a) for a, b in zip(targets, targets[1:])):
+            raise BFieldTransportSafetyError("Maximum actual field gap must cover the largest planned interval")
+        if not math.isfinite(dwell) or dwell <= 0 or not math.isfinite(settle) or settle < 0:
+            raise BFieldTransportSafetyError("Field stability must be positive and settle time nonnegative")
+        if params.field_timeout_s < dwell + settle:
+            raise BFieldTransportSafetyError("Field timeout must cover field stability plus settle time")
+        if params.temperature_timeout_s < params.temperature_window_s + settle:
+            raise BFieldTransportSafetyError("Temperature timeout must cover its stability window plus settle time")
+    return targets
 
 
 def build_trajectory(start_field_t: float, stop_field_t: float, round_trip: bool = True) -> tuple[tuple[float, str], ...]:
@@ -402,7 +513,7 @@ class TransportCsvWriter:
         "Index", "Timestamp", "Elapsed_s", "Condition_index", "Condition_name", "Direction",
         "B_measured_T", "B_target_T", "Sweep_rate_T_per_min", "Sweep_rate_A_per_s",
         "Doping", "E-field", "Vtg", "Vbg", "Vds", "Vds_measured",
-        "raw_X", "raw_Y", "raw_DC", "Ids_X", "Ids_Y", "Ids_DC", "Keithley_current",
+        "raw_X", "raw_Y", "raw_DC", "Ids_X", "Ids_Y", "Ids_DC", "Ids_Keithley", "Keithley_current",
         "Sample_temperature_K", "Reservoir_temperature_K",
         "Acquisition_started", "Acquisition_finished", "Keithley_read_error",
     )
@@ -436,6 +547,8 @@ class TransportCsvWriter:
 def write_series_manifest(path: str, *, params: BFieldTransportParams, validation: Mapping, status: str = "running", results: Iterable[Mapping] = (), cleanup_failures: Iterable[str] = (), runtime: Mapping | None = None) -> None:
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     params_payload = asdict(params)
+    if params.magnet_backend == "2100":
+        params_payload.pop("rate_t_per_min", None)
     for condition_payload in params_payload.get("conditions", []):
         condition_payload.pop("ratio", None)
         condition_payload.pop("ratio_target", None)
@@ -457,6 +570,14 @@ def write_series_manifest(path: str, *, params: BFieldTransportParams, validatio
     }
     if runtime is not None:
         payload["runtime"] = dict(runtime)
+    if params.magnet_backend == "1000" and params.measurement_mode == "stepped":
+        payload["hysteresis_policy"] = {
+            "version": 1, "quality_failure_action": "stop_and_preserve",
+            "field_axis": "instrument_current_derived_readback_not_calibrated_sample_field",
+            "history_scope": "acquired_readbacks_only_unobserved_transients_not_excluded",
+            "crossed_nominal_targets": "logged_and_skipped_without_reversal",
+            "automatic_gap_limit": "twice_largest_planned_interval_when_zero",
+        }
     temporary = path + ".tmp"
     with open(temporary, "w", encoding="utf-8") as handle:
         json.dump(promote_experiment_metadata(payload), handle, indent=2, default=str)
@@ -475,14 +596,50 @@ class TransportSweepPlan:
 
     @classmethod
     def from_params(cls, params: BFieldTransportParams, **validation_kwargs):
+        unsupported = set(validation_kwargs) - {"max_field_t"}
+        if unsupported:
+            raise TypeError(f"Unsupported plan validation options: {sorted(unsupported)}; instrument rate limits come from readback")
+        if params.sample_reversal_mode not in {"unchanged", "per_point", "whole_sweep"}:
+            raise BFieldTransportSafetyError("Unknown sample current reversal mode")
+        try:
+            settle = float(params.sample_reversal_settle_s)
+        except (TypeError, ValueError) as exc:
+            raise BFieldTransportSafetyError("Sample reversal settling time must be finite and nonnegative") from exc
+        if not math.isfinite(settle) or settle < 0:
+            raise BFieldTransportSafetyError("Sample reversal settling time must be finite and nonnegative")
+        if params.sample_reversal_mode != "unchanged" and (params.magnet_backend != "1000" or params.measurement_mode != "stepped"):
+            raise BFieldTransportSafetyError("Automatic sample reversal requires APS100 stepped measurement")
+        if params.magnet_backend not in {"1000", "2100"}:
+            raise BFieldTransportSafetyError("Unknown magnet backend")
+        if params.magnet_backend == "2100":
+            if params.measurement_mode != "stepped":
+                raise BFieldTransportSafetyError("2100 B-field Sweep requires Stepped mode")
+            start, stop = validate_2100_fields(params)
+            params.field_points = len(validate_stepped_params(params))
+            if not 1.8 <= params.temperature_target_k <= 300.0:
+                raise BFieldTransportSafetyError("2100 sample target must be within 1.8–300 K")
+            conditions = enabled_conditions(params.conditions, ratio=params.ratio, ratio_target=params.ratio_target)
+            legs = [(start, "start"), (stop, "forward")]
+            if params.round_trip:
+                legs.append((start, "backward"))
+            return cls(params, {"backend": "2100", "rate_control": "SDK-managed; no ramp table writes",
+                               "rate_a_per_s": None, "temperature_control": "active SDK sample control",
+                               "completion": "field Stop acknowledged; sample temperature control retained"},
+                       conditions, tuple(legs))
         params.cooldown_policy = normalize_cooldown_policy(params.cooldown_policy)
         # Successful transport completion always keeps the heater on, including
         # recipes saved before this policy. Failure cleanup remains Persistent.
         params.final_mode = "driven"
-        validation = validate_setup(
-            params.start_field_t, params.stop_field_t, params.rate_t_per_min,
-            **validation_kwargs,
-        )
+        start, stop = validate_field_bounds(params.start_field_t, params.stop_field_t,
+                                            max_field_t=validation_kwargs.get("max_field_t"))
+        rate_t_per_min_to_a_per_s(params.rate_t_per_min)
+        validation = {"start_field_t": start, "stop_field_t": stop,
+                      "rate_control": "requested ceiling capped by stored APS100 RANGE/RATE table",
+                      "rate_a_per_s": None, "rate_t_per_min": None}
+        if params.measurement_mode not in {"continuous", "stepped"}:
+            raise BFieldTransportSafetyError("Measurement mode must be continuous or stepped")
+        if params.measurement_mode == "stepped":
+            params.field_points = len(validate_stepped_params(params))
         conditions = enabled_conditions(params.conditions, ratio=params.ratio, ratio_target=params.ratio_target)
         return cls(
             params=params,
@@ -534,9 +691,12 @@ class BFieldTransportSweep:
 
     def run(self, *, persistent_field_confirmed: bool = False) -> list[dict]:
         params = self.plan.params
+        if params.measurement_mode == "stepped":
+            raise BFieldTransportSafetyError("Stepped transport requires the acknowledged Qt controller")
         final_mode = "driven"
         started = False
         captured_rates = captured_limits = None
+        rates_mutated = False
         status = "stopped"
         original_error = None
         try:
@@ -547,16 +707,40 @@ class BFieldTransportSweep:
                 captured_rates = self.adapter.get_rates()
             if hasattr(self.adapter, "get_limits_t"):
                 captured_limits = self.adapter.get_limits_t()
-            if hasattr(self.adapter, "set_rate_t_per_min"):
-                changed = self.adapter.set_rate_t_per_min(
-                    params.rate_t_per_min, max_abs_field_t=MAX_DRIVEN_FIELD_T
-                )
-                if not changed:
-                    raise BFieldTransportSafetyError("APS100 did not report any verified RATE settings")
+            from app.engine.aps100_rate_table import validate_rate_table
+            if captured_rates is None:
+                raise BFieldTransportSafetyError("APS100 rate table readback is required")
+            table = validate_rate_table(captured_rates, self.adapter.coil_constant_t_per_a,
+                                        self.adapter.maximum_current_a, self.adapter.maximum_rate_a_per_s,
+                                        min(self.adapter.maximum_field_t, self.adapter.maximum_current_a * self.adapter.coil_constant_t_per_a))
+            requested = float(params.rate_t_per_min)
+            if requested / (self.adapter.coil_constant_t_per_a * 60.0) > self.adapter.maximum_rate_a_per_s + 1e-12:
+                raise BFieldTransportSafetyError("Requested rate exceeds commissioned maximum")
+            unit = self.adapter.coil_constant_t_per_a * 60.0 * 0.0001
+            ceiling = math.floor((requested / unit) + 1e-10) * unit
+            if ceiling <= 0:
+                raise BFieldTransportSafetyError("Requested rate is below APS100 0.1 mA/s resolution")
+            effective = {i: (boundary, min(rate, ceiling)) for i, (boundary, rate) in table.items()}
+            rates_mutated = True
+            self.adapter.restore_rates(effective)
+            actual = validate_rate_table(self.adapter.get_rates(), self.adapter.coil_constant_t_per_a,
+                                         self.adapter.maximum_current_a, self.adapter.maximum_rate_a_per_s,
+                                         min(self.adapter.maximum_field_t, self.adapter.maximum_current_a * self.adapter.coil_constant_t_per_a))
+            for i, (boundary, rate) in actual.items():
+                if abs(boundary - effective[i][0]) > 1e-6 or rate > effective[i][1] + 1e-9:
+                    raise BFieldTransportSafetyError(f"APS100 RATE {i} readback exceeds ceiling")
+            table = actual
+            self.plan.validation["aps100_rates"] = {"normal": table, "stored_normal": captured_rates, "coil_constant_t_per_a": self.adapter.coil_constant_t_per_a}
+            self.plan.validation["rate_t_per_min"] = requested
+            for boundary, rate in table.values():
+                validate_voltage_margin(rate, inductance_h=getattr(cfg.magnet, "inductance_h", None), voltage_limit_v=self.adapter.get_voltage_limit_v(), coil_constant=self.adapter.coil_constant_t_per_a)
             if hasattr(self.adapter, "set_limits_t"):
-                actual_limits = self.adapter.set_limits_t(-MAX_DRIVEN_FIELD_T, MAX_DRIVEN_FIELD_T)
-                if abs(float(actual_limits[0]) + MAX_DRIVEN_FIELD_T) > 2e-4 or abs(float(actual_limits[1]) - MAX_DRIVEN_FIELD_T) > 2e-4:
-                    raise BFieldTransportSafetyError("APS100 field-limit readback does not match the ±6 T transport envelope")
+                limit = min(aps100_transport_field_limit(), float(self.adapter.maximum_field_t),
+                            float(self.adapter.maximum_current_a) * float(self.adapter.coil_constant_t_per_a))
+                validate_field_bounds(params.start_field_t, params.stop_field_t, max_field_t=limit)
+                actual_limits = self.adapter.set_limits_t(-limit, limit)
+                if abs(float(actual_limits[0]) + limit) > 2e-4 or abs(float(actual_limits[1]) - limit) > 2e-4:
+                    raise BFieldTransportSafetyError(f"APS100 field-limit readback does not match the ±{limit:g} T transport envelope")
             if self.output_dir:
                 os.makedirs(self.output_dir, exist_ok=True)
                 self._manifest_path = os.path.join(self.output_dir, self.output_stem + "_series_manifest.json")
@@ -574,9 +758,13 @@ class BFieldTransportSweep:
                 # invocation as the start of hardware ownership so every
                 # failure path still attempts conservative persistent cleanup.
                 started = True
+                from app.engine.aps100_rate_table import field_move_seconds
+                current = float(getattr(self.adapter.read_snapshot(), "field_t"))
+                expected = field_move_seconds(current, params.start_field_t, table, self.adapter.coil_constant_t_per_a)
                 move(
                     params.start_field_t, final_mode="driven", zero_leads=False,
                     persistent_field_confirmed=bool(persistent_field_confirmed),
+                    timeout_s=max(3600.0, expected * 2.0 + 180.0),
                 )
             else:
                 started = True
@@ -589,14 +777,18 @@ class BFieldTransportSweep:
                         snapshot = self.adapter.read_snapshot() if hasattr(self.adapter, "read_snapshot") else None
                         self._sample_snapshot(condition_index, condition, direction, target, snapshot)
                     else:
+                        current = float(getattr(self.adapter.read_snapshot(), "field_t"))
                         self.adapter.start_sweep_to(target)
                         def progress(_value):
                             self._stop_if_requested()
                             live = self.adapter.read_snapshot() if hasattr(self.adapter, "read_snapshot") else _value
                             self._check_live_safety(live)
                             self._sample_snapshot(condition_index, condition, direction, target, live)
+                        from app.engine.aps100_rate_table import field_move_seconds
+                        expected = field_move_seconds(current, target, table, self.adapter.coil_constant_t_per_a)
                         snapshot = self.adapter.wait_for_field(
                             target, stop_event=None, progress=progress,
+                            timeout_s=max(3600.0, expected * 2.0 + 180.0),
                         )
                         if hasattr(self.adapter, "read_snapshot"):
                             snapshot = self.adapter.read_snapshot()
@@ -650,16 +842,16 @@ class BFieldTransportSweep:
                     persistent(zero_leads=True)
                 except Exception as exc:
                     self.cleanup_failures.append(f"persistent cleanup failed: {exc}")
-            if captured_rates is not None and hasattr(self.adapter, "restore_rates"):
-                try:
-                    self.adapter.restore_rates(captured_rates)
-                except Exception as exc:
-                    self.cleanup_failures.append(f"RATE restoration failed: {exc}")
             if captured_limits is not None and hasattr(self.adapter, "set_limits_t"):
                 try:
                     self.adapter.set_limits_t(*captured_limits)
                 except Exception as exc:
                     self.cleanup_failures.append(f"limit restoration failed: {exc}")
+            if rates_mutated:
+                try:
+                    self.adapter.restore_rates(captured_rates)
+                except Exception as exc:
+                    self.cleanup_failures.append(f"RATE restoration failed: {exc}")
             self.restoration = {
                 "rates": captured_rates,
                 "limits": captured_limits,

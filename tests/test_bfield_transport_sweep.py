@@ -15,7 +15,7 @@ from app.engine.bfield_transport_sweep import (
     COIL_CONSTANT_T_PER_A,
     MAX_RATE_T_PER_MIN,
     TransportCsvWriter,
-    build_trajectory,
+    build_trajectory, build_stepped_targets, validate_stepped_params,
     enabled_conditions,
     rate_t_per_min_to_a_per_s,
     validate_setup,
@@ -34,12 +34,86 @@ from app.signal_chain import SignalChainSnapshot
 from utils.config import cfg
 
 
+
+class RateTableFixture:
+    coil_constant_t_per_a = 0.2
+    maximum_current_a = 45.0
+    maximum_field_t = 9.0
+    maximum_rate_a_per_s = 0.0343
+    def get_rates(self): return getattr(self, "_fixture_rates", {i: (10.0 * (i + 1), 0.1) for i in range(5)})
+    def restore_rates(self, rates): self._fixture_rates = dict(rates)
+    def get_voltage_limit_v(self): return 3.0
+    def read_snapshot(self): return SimpleNamespace(field_t=0.0)
+
+def add_test_rate_table(plan, rate=0.1):
+    plan.validation["aps100_rates"] = {"normal": {i: (10.0 * (i + 1), rate) for i in range(5)}, "coil_constant_t_per_a": 0.2}
+
 class BFieldTransportSweepTests(unittest.TestCase):
+    def test_synchronous_runner_rejects_stepped_before_touching_adapter(self):
+        params = BFieldTransportParams(measurement_mode="stepped")
+        class NoHardware:
+            def __getattr__(self, name):
+                raise AssertionError("adapter must not be touched")
+        runner = BFieldTransportSweep(NoHardware(), TransportSweepPlan.from_params(params))
+        with self.assertRaisesRegex(BFieldTransportSafetyError, "acknowledged Qt controller"):
+            runner.run()
+
+    def test_stepped_targets_include_endpoints_in_both_directions(self):
+        params = BFieldTransportParams(measurement_mode="stepped", start_field_t=0, stop_field_t=0.3,
+                                      field_spacing="step", field_step_t=0.1)
+        self.assertEqual(len(build_stepped_targets(params)), 4)
+        params.stop_field_t = 0.35
+        self.assertEqual(build_stepped_targets(params)[-1], 0.35)
+        params.start_field_t, params.stop_field_t = 0.35, 0
+        self.assertEqual(build_stepped_targets(params)[-1], 0)
+        params.field_spacing, params.field_points = "points", 3
+        self.assertEqual(build_stepped_targets(params), (0.35, 0.175, 0))
+
+    def test_stepped_plan_rejects_bad_spacing_and_stability(self):
+        params = BFieldTransportParams(measurement_mode="stepped", field_spacing="points", field_points=10001)
+        with self.assertRaises(BFieldTransportSafetyError):
+            TransportSweepPlan.from_params(params)
+        params.field_points = 11
+        params.temperature_window_s = float("nan")
+        with self.assertRaises(BFieldTransportSafetyError):
+            validate_stepped_params(params)
+        params.temperature_window_s, params.temperature_timeout_s = 60, 59
+        with self.assertRaises(BFieldTransportSafetyError):
+            validate_stepped_params(params)
+
     @classmethod
     def setUpClass(cls):
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         from PySide6 import QtWidgets
         cls.app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+
+    def test_stop_during_configuration_waits_for_result_and_restores_without_move(self):
+        class Magnet(QtCore.QObject):
+            transport_config_result = QtCore.Signal(object)
+            safe_move_result = QtCore.Signal(object)
+            transport_sweep_result = QtCore.Signal(object)
+            snapshot_updated = QtCore.Signal(object)
+            fault = QtCore.Signal(str)
+            transport_restore_result = QtCore.Signal(object)
+            def __init__(self):
+                super().__init__(); self.events = []
+            def restore_transport(self, rates, limits): self.events.append(("restore", rates, limits))
+            def safe_move_to_field(self, *args, **kwargs): self.events.append(("move", args))
+        magnet = Magnet()
+        controller = BFieldTransportController(magnet, SimpleNamespace(), SimpleNamespace(), thermal_safety=None)
+        controller._active = True
+        controller._cleanup_in_progress = True
+        controller._cleanup_waiting = "persistent"
+        controller._config_pending = True
+        controller._request_restore()
+        self.assertEqual(controller._cleanup_waiting, "configuration")
+        self.assertEqual(magnet.events, [])
+        rates = {i: (10. * (i + 1), .1) for i in range(5)}
+        controller._on_configured({"success": True, "stored_rates": rates, "stored_limits": (-1., 1.),
+                                   "rates": rates, "coil_constant_t_per_a": .2})
+        self.assertEqual(magnet.events, [("restore", rates, (-1., 1.))])
+        self.assertEqual(controller._cleanup_waiting, "restore")
+        controller._cleanup_timer.stop()
 
     def test_transport_polling_is_restarted_only_after_sweep_acceptance(self):
         class Magnet(QtCore.QObject):
@@ -69,6 +143,7 @@ class BFieldTransportSweepTests(unittest.TestCase):
             magnet, SimpleNamespace(), SimpleNamespace(), thermal_safety=None
         )
         controller.plan = TransportSweepPlan.from_params(BFieldTransportParams())
+        add_test_rate_table(controller.plan)
         controller._active = True
         controller._condition_index = 0
         controller._begin_leg(0, controller.plan.params.stop_field_t)
@@ -474,6 +549,7 @@ class BFieldTransportSweepTests(unittest.TestCase):
         controller.plan = TransportSweepPlan.from_params(BFieldTransportParams(
             start_field_t=-6.0, stop_field_t=6.0, rate_t_per_min=1e-6,
         ))
+        add_test_rate_table(controller.plan, 1e-6)
         controller._active = True
         controller._begin_leg(0, 6.0)
         controller._on_sweep_started({"success": True})
@@ -676,7 +752,7 @@ class BFieldTransportSweepTests(unittest.TestCase):
         )
         signal_chain = SignalChainSnapshot(1000.0, 0.02, 100e-9)
         parts = transport_output_summary_parts(params, signal_chain)
-        self.assertEqual(parts[:4], ["B-0.5to0.5T", "RT", "0.1Tpermin", "2cond"])
+        self.assertEqual(parts[:2], ["B-0.5to0.5T", "RT"])
         self.assertEqual(parts[-3:], ["1kHz", "LIA20mV", "Pre100nA"])
 
         planned = build_planned_output(
@@ -687,9 +763,9 @@ class BFieldTransportSweepTests(unittest.TestCase):
             run_id="run",
         )
         paths = build_transport_output_paths(planned, params.conditions)
-        self.assertIn("B-0.5to0.5T_RT_0.1Tpermin_2cond", planned.stem)
-        self.assertTrue(paths.condition_csv_paths[0].endswith("_C01_Neutral_point_Doping0_E0_Vds0V_rVbg1_run.csv"))
-        self.assertTrue(paths.condition_csv_paths[1].endswith("_C02_High_doping_Doping0_E0_Vds0V_rVbg1_run.csv"))
+        self.assertIn("B-0.5to0.5T_RT", planned.stem)
+        self.assertTrue(paths.condition_csv_paths[0].endswith("_C01_Neutral_point_D0_E0_Vds0V_rVbg1_run.csv"))
+        self.assertTrue(paths.condition_csv_paths[1].endswith("_C02_High_doping_D0_E0_Vds0V_rVbg1_run.csv"))
         self.assertIn(paths.manifest_path, paths.all_paths)
 
     def test_adaptive_is_default_and_policy_estimates_preserve_trajectory(self):
@@ -732,10 +808,10 @@ class BFieldTransportSweepTests(unittest.TestCase):
         with self.assertRaises(BFieldTransportSafetyError):
             validate_setup(-1, 1, MAX_RATE_T_PER_MIN + 1e-4)
 
-    def test_only_sweep_endpoints_are_limited_to_six_t(self):
+    def test_only_sweep_endpoints_are_limited_to_eight_t(self):
         self.assertEqual(validate_setup(-6, 5, 0.1)["stop_field_t"], 5)
         with self.assertRaises(BFieldTransportSafetyError):
-            validate_setup(-6.01, 1, 0.1)
+            validate_setup(-8.01, 1, 0.1)
 
     def test_sub_resolution_transport_span_is_rejected(self):
         with self.assertRaisesRegex(BFieldTransportSafetyError, "APS100 transport resolution"):
@@ -776,7 +852,7 @@ class BFieldTransportSweepTests(unittest.TestCase):
             self.assertEqual(payload["conditions"][0]["name"], "fixed")
 
     def test_multi_condition_runner_holds_each_row_and_cleans_up(self):
-        class Adapter:
+        class Adapter(RateTableFixture):
             def __init__(self):
                 self.events = []
                 self.field = 0.0
@@ -808,10 +884,10 @@ class BFieldTransportSweepTests(unittest.TestCase):
         self.assertEqual(plan.params.final_mode, "driven")
 
     def test_runner_writes_rates_limits_restores_and_acquires_progress(self):
-        class Adapter:
+        class Adapter(RateTableFixture):
             def __init__(self):
                 self.events, self.field = [], 0.0
-                self.rates, self.limits = {0: 0.01}, (-2.0, 2.0)
+                self.rates, self.limits = super().get_rates(), (-2.0, 2.0)
             def get_rates(self): return dict(self.rates)
             def get_limits_t(self): return self.limits
             def set_rate_t_per_min(self, rate, **_kwargs):
@@ -835,14 +911,14 @@ class BFieldTransportSweepTests(unittest.TestCase):
         adapter = Adapter()
         runner = BFieldTransportSweep(adapter, plan, acquire=lambda _c, direction, snapshot: samples.append((direction, snapshot.field_t)))
         runner.run(persistent_field_confirmed=True)
-        self.assertTrue(any(e[0] == "rate" for e in adapter.events))
-        self.assertIn(("limits", -6.0, 6.0), adapter.events)
-        self.assertTrue(any(e[0] == "restore_rates" for e in adapter.events))
+        self.assertFalse(any(e[0] == "rate" for e in adapter.events))
+        self.assertIn(("limits", -8.0, 8.0), adapter.events)
+        self.assertEqual(sum(e[0] == "restore_rates" for e in adapter.events), 2)
         self.assertGreaterEqual(len(samples), 3)  # start plus mid/end progress
-        self.assertEqual(adapter.rates, {0: 0.01})
+        self.assertEqual(adapter.rates, adapter.get_rates())
 
     def test_successful_driven_final_mode_leaves_heater_on(self):
-        class Adapter:
+        class Adapter(RateTableFixture):
             def __init__(self):
                 self.events = []
                 self.field = 0.0
@@ -1042,7 +1118,7 @@ class BFieldTransportSweepTests(unittest.TestCase):
         self.assertEqual(transitions, ["persistent"])
 
     def test_failed_transport_always_uses_persistent_cleanup_even_if_driven_selected(self):
-        class Adapter:
+        class Adapter(RateTableFixture):
             def __init__(self):
                 self.events = []
 
@@ -1083,7 +1159,9 @@ class BFieldTransportSweepTests(unittest.TestCase):
             def release_exclusive(self, owner): self.events.append(("release", owner))
             def configure_transport(self, rate, limit):
                 self.events.append(("configure", rate, limit))
-                self.transport_config_result.emit({"success": True, "stored_rates": {0: .01}, "stored_limits": (-1, 1)})
+                self.transport_config_result.emit({"success": True,
+                    "stored_rates": {i: (10. * (i + 1), .1) for i in range(5)},
+                    "coil_constant_t_per_a": .2, "stored_limits": (-1, 1)})
             def safe_move_to_field(self, target, **_kwargs):
                 self.events.append(("move", target)); self.safe_move_result.emit({"success": True})
             def start_transport_sweep(self, target):
@@ -1135,7 +1213,7 @@ class BFieldTransportSweepTests(unittest.TestCase):
         self.assertEqual(controller._manifest, tab.frozen_paths.manifest_path)
         self.assertEqual(magnet.events[1], ("polling", True))
         self.assertEqual(tuple(writer.path for writer in controller._writers.values()), tab.frozen_paths.condition_csv_paths)
-        self.assertIn(("configure", .1, 6.0), magnet.events)
+        self.assertIn(("configure", .1, 8.0), magnet.events)
         self.assertTrue(controller.active)
         controller.stop()
         self.assertIn("persistent", magnet.events)

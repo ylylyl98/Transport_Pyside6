@@ -209,9 +209,20 @@ class ThermalSafetyEvaluator:
             field_age = getattr(self.config, "maximum_field_reading_age_s", 5.0)
             if not finite(field_age) or field_age <= 0:
                 return self._set(ThermalState.DISARMED, False, "Invalid magnetic field reading age limit", age)
-            if not finite(stamp) or not 0 <= now - stamp <= field_age or temperature_ceiling(field) is None:
+            field_fault = None
+            if field is not None and not finite(field):
+                field_fault = ("APS100 field telemetry contains an invalid field value", "magnet_field_invalid")
+            elif field is not None and temperature_ceiling(field) is None:
+                field_fault = ("APS100 magnetic field is outside the 9 T envelope", "magnet_field_out_of_range")
+            elif field is None or stamp is None:
+                field_fault = ("APS100 field telemetry snapshot is unavailable", "magnet_field_missing")
+            elif not finite(stamp) or stamp < 0 or now - stamp < 0:
+                field_fault = ("APS100 field telemetry timing metadata is invalid", "magnet_field_invalid")
+            elif now - stamp > field_age:
+                field_fault = (f"APS100 field telemetry is stale ({now - stamp:.1f} s old)", "magnet_field_stale")
+            if field_fault is not None:
                 self._stable_since = None
-                return self._set(ThermalState.MONITOR_FAULT, False, "Magnet field telemetry missing, stale or outside 9 T", age)
+                return self._set(ThermalState.MONITOR_FAULT, False, field_fault[0], age, field_fault[1])
             if target_t is not None and temperature_ceiling(target_t) is None:
                 return self._set(ThermalState.MONITOR_FAULT, False, "Invalid target field for temperature envelope", age)
             effective_field = max(abs(field), abs(target_t)) if target_t is not None else abs(field)

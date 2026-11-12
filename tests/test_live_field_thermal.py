@@ -59,6 +59,22 @@ class LiveFieldThermalTests(unittest.TestCase):
         worker.adapter.get_status.return_value = NS(sweep_active=True)
         return worker
 
+    def test_field_monitor_faults_distinguish_recoverable_loss_from_invalid_data(self):
+        now = time.monotonic()
+        cases = (
+            (None, "magnet_field_missing"),
+            (NS(field_t=.1, monotonic_s=now-10), "magnet_field_stale"),
+            (NS(field_t=float('nan'), monotonic_s=now), "magnet_field_invalid"),
+            (NS(field_t=.1, monotonic_s=now+10), "magnet_field_invalid"),
+            (NS(field_t=9.01, monotonic_s=now-10), "magnet_field_out_of_range"),
+        )
+        for magnet, code in cases:
+            with self.subTest(code=code):
+                self.safety.note_magnet_snapshot(magnet)
+                decision = self.safety.evaluate(self.snapshot(), for_continuation=True)
+                self.assertFalse(decision.magnet_permission)
+                self.assertEqual(decision.block_code, code)
+
     def test_persistent_measurement_does_not_require_new_heater_cycle_recovery(self):
         self.config.required_stable_recovery_dwell_s = 0
         self.safety.note_heater_activation()

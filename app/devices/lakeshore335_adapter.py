@@ -233,10 +233,10 @@ class LakeShore335Adapter:
                 raise LakeShore335CommunicationError(f"Lake Shore query {command!r} failed: {exc}") from exc
 
     def _write(self, command: str) -> None:
-        """Write one allowlisted control command; never accept setup commands."""
+        """Write one bounded control or resistive-input configuration command."""
         command = str(command).strip()
         number = r"(?:\d+(?:\.\d*)?|\.\d+)"
-        if not re.fullmatch(rf"(?:SETP [12],{number}|RANGE [12],[0-3]|RAMP [12],[01],{number})", command):
+        if not re.fullmatch(rf"(?:SETP [12],{number}|RANGE [12],[0-3]|RAMP [12],[01],{number}|INTYPE [AB],(?:2,[01],[0-6]|3,[01],[0-8]),[01],[123])", command):
             raise LakeShore335TelemetryError(f"Lake Shore command is not allowed: {command!r}")
         resource = self._require_connected()
         try:
@@ -319,6 +319,57 @@ class LakeShore335Adapter:
             return validate_heater_ranges(bands)
         except ValueError as exc:
             raise LakeShore335ConfigurationError(f"LS335 Zone table: {exc}") from exc
+
+    def read_input_configuration(self, channel: str) -> dict:
+        """Read the Model 335 INTYPE fields without changing any input."""
+        channel = str(channel).strip().upper()
+        if channel not in {"A", "B"}:
+            raise LakeShore335ConfigurationError("Input must be A or B")
+        with self._lock:
+            response = self._query(f"INTYPE? {channel}")
+            fields = [v.strip() for v in response.split(",")]
+            if len(fields) != 5 or any(not re.fullmatch(r"\d+", v) for v in fields):
+                raise LakeShore335ConfigurationError(f"Malformed INTYPE {channel} readback: {response!r}")
+            sensor, autorange, input_range, compensation, units = map(int, fields)
+            max_range = {0: 8, 1: 1, 2: 6, 3: 8, 4: 0}.get(sensor)
+            if (max_range is None or autorange not in (0, 1) or not 0 <= input_range <= max_range
+                    or compensation not in (0, 1) or units not in (1, 2, 3)):
+                raise LakeShore335ConfigurationError(f"Invalid INTYPE {channel} readback: {response!r}")
+            supported = sensor in (2, 3)
+            return {"channel": channel, "sensor_type": sensor, "autorange": bool(autorange),
+                    "range": input_range, "compensation": bool(compensation), "units": units,
+                    "supported": supported, "current_reversal_supported": supported,
+                    "current_reversal": bool(compensation) if supported else None}
+
+    def read_input_configurations(self) -> dict:
+        with self._lock:
+            return {"inputs": {channel: self.read_input_configuration(channel) for channel in ("A", "B")}}
+
+    def set_current_reversal(self, channel: str, enabled: bool) -> dict:
+        """Change only resistive sensor current reversal and verify the readback."""
+        if not isinstance(enabled, bool):
+            raise LakeShore335ConfigurationError("Current reversal must be a boolean")
+        with self._lock:
+            try:
+                before = self.read_input_configuration(channel)
+                if not before["current_reversal_supported"]:
+                    raise LakeShore335ConfigurationError("Current reversal requires a PTC or NTC RTD input")
+                if before["current_reversal"] != enabled:
+                    # A failed write may still have changed hardware. Never
+                    # compare a later sample against the old excitation mode.
+                    self._previous = None
+                    self._write(f"INTYPE {before['channel']},{before['sensor_type']},{int(before['autorange'])},"
+                                f"{before['range']},{int(enabled)},{before['units']}")
+                after = self.read_input_configuration(before["channel"])
+                fixed = ("sensor_type", "autorange", "units")
+                if (any(after[key] != before[key] for key in fixed)
+                        or (not before["autorange"] and after["range"] != before["range"])
+                        or after["current_reversal"] is not enabled):
+                    raise LakeShore335ConfigurationError("INTYPE readback did not verify current reversal and preserved settings")
+                return after
+            except Exception:
+                self._previous = None
+                raise
 
     def _require_kelvin_input(self, channel):
         fields = self._query(f"INTYPE? {channel}").split(",")
@@ -637,6 +688,10 @@ class MockLakeShore335Adapter(LakeShore335Adapter):
         self._require_connected()
         prefix, arguments = command.split(" ", 1)
         output, value = arguments.split(",", 1)
+        if prefix == "INTYPE" and output in {"A", "B"}:
+            self.control_commands.append(command)
+            self._mock_control[f"INTYPE? {output}"] = value
+            return
         if prefix not in {"SETP", "RAMP", "RANGE"} or output not in {"1", "2"}:
             raise LakeShore335TelemetryError(f"Unsupported mock write: {command}")
         self.control_commands.append(command)

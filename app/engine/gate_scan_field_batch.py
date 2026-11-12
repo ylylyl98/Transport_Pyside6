@@ -1231,8 +1231,11 @@ class GateScanFieldBatch(QtCore.QObject):
             raise ValueError(f"stored field {snapshot.field_t:g} T does not match requested {target:g} T")
         if snapshot.heater_on is not False:
             raise ValueError("heater is not OFF")
-        tolerance = max(0.002, float(cfg.magnet.field_tolerance_t))
-        if abs(float(snapshot.output_field_t)) > tolerance or abs(float(snapshot.output_current_a)) > float(cfg.magnet.current_match_tolerance_a):
+        tolerance = float(cfg.magnet.lead_zero_tolerance_t)
+        coil = float(cfg.magnet.coil_constant_t_per_a)
+        if not math.isfinite(tolerance) or tolerance <= 0 or not math.isfinite(coil) or coil <= 0:
+            raise ValueError("invalid lead-zero tolerance or coil constant")
+        if abs(float(snapshot.output_field_t)) > tolerance or abs(float(snapshot.output_current_a)) > tolerance / coil:
             raise ValueError("supply leads are not zero")
         status = snapshot.status
         if getattr(status, "sweep_active", False):

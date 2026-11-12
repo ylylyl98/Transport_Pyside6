@@ -24,6 +24,16 @@ class QuickSweepPreviewTests(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QCoreApplication.instance() or QCoreApplication([])
 
+    def test_stepped_field_preview_matches_planner_and_round_trip(self):
+        from app.models import BFieldTransportParams
+        params = BFieldTransportParams(measurement_mode="stepped", start_field_t=0,
+                                       stop_field_t=1, field_step_t=.5, round_trip=True)
+        result = build_sweep_preview(5, params, Connections())
+        self.assertEqual(result["pointCount"], 5)
+        samples = next(trace for trace in result["traces"] if trace["style"] == "scatter")
+        np.testing.assert_allclose(samples["x"], [0, .5, 1, .5, 0])
+        self.assertIn("variable", result["summary"])
+
     def test_map_preview_preserves_planner_order_and_region_moves(self):
         params = CoParams(axis_fast='Vtg', axis_slow='Vbg', vtg_start=0, vtg_stop=1, vtg_step=.5,
                           vbg_start=0, vbg_stop=1, vbg_step=.5,

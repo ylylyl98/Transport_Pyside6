@@ -12,7 +12,7 @@ from app.app_identity import APP_NAME, configure_qapp, set_windows_app_id
 from app.update_check import UpdateService
 from app.device_manager import DeviceManager
 from app.engine.gate_scan_field_batch import GateScanFieldBatch
-from app.engine.bfield_transport_controller import BFieldTransportController
+from app.engine.bfield_transport_router import BFieldTransportRouter
 from app.settings import get_app_settings
 from controllers.attodry2100_controller import AttoDRY2100Controller
 from controllers.magnet_controller import MagnetController
@@ -181,11 +181,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tab_gate_scan = GateScanTab(self.save_root, self.connections, self.device_manager, get_global_rates_callable=self.conn_dock.get_rates, get_ao_items_callable=self.tab_dual.get_ao_items_if_available, get_signal_chain_callable=self.signal_chain_snapshot)
         self.tab_bfield_gate_scan = BFieldGateScanTab(self.save_root, self.connections, self.device_manager, get_global_rates_callable=self.conn_dock.get_rates, get_ao_items_callable=self.tab_dual.get_ao_items_if_available, get_signal_chain_callable=self.signal_chain_snapshot)
         self.tab_bfield_transport = BFieldTransportTab(self.save_root, self.connections, self.device_manager, get_global_rates_callable=self.conn_dock.get_rates, get_signal_chain_callable=self.signal_chain_snapshot)
-        self.bfield_transport_controller = BFieldTransportController(
-            self.magnet1000, self.tab_bfield_transport, self.device_manager,
+        self.bfield_transport_controller = BFieldTransportRouter(
+            self.magnet1000, self.magnet2100, self.tab_bfield_transport, self.device_manager,
             thermal_safety=self.thermal_safety, parent=self,
+            selected_backend_callable=lambda: self.magnet_panel._backend,
+            review_valid_callable=self.magnet_panel._review_valid,
         )
         self.tab_bfield_transport.set_execution_controller(self.bfield_transport_controller)
+        self.magnet_panel.backend_changed.connect(self.tab_bfield_transport.set_magnet_backend)
+        self.tab_bfield_transport.set_magnet_backend(self.magnet_panel._backend)
+        self.magnet2100.state_changed.connect(self.tab_bfield_transport.refresh_hardware_readiness)
+        self.magnet2100.operation_finished.connect(self.tab_bfield_transport.refresh_hardware_readiness)
+        if hasattr(self.magnet2100, "exclusive_changed"):
+            self.magnet2100.exclusive_changed.connect(self.tab_bfield_transport.refresh_hardware_readiness)
         self.bfield_transport_controller.lakeshore_controller = self.lakeshore335
         # If closing the window has to wait for an APS100 Persistent
         # acknowledgement after a successful Driven transport, retry the
@@ -219,6 +227,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.magnet_panel.backend_changed.connect(self._update_temperature_summary)
         self.sample_temperature_bar.readiness_changed.connect(self._sync_temperature_start_gate)
         self._sync_temperature_start_gate(self.sample_temperature_bar.is_ready())
+        pending_signal = getattr(self.lakeshore335, "input_configuration_pending_changed", None)
+        if pending_signal is not None:
+            pending_signal.connect(self._on_ls_input_pending)
+        self.lakeshore335.control_result.connect(lambda *_: self._update_ls_input_summary())
+        self.lakeshore335.disconnected.connect(self._update_ls_input_summary)
+        self._update_ls_input_summary()
         self.tab_bfield_gate_scan.set_batch_magnet_context(self.magnet_panel._backend)
         self.tabs.addTab(self.tab_dual, "Vds Sweep")
         self.tabs.addTab(self.tab_gate_scan, "Gate Scan")
@@ -263,6 +277,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._temperature_summary_timer.timeout.connect(self._update_temperature_summary)
         self._temperature_summary_timer.start()
         self._update_temperature_summary()
+        self._temperature_summary_timer.timeout.connect(self._update_ls_input_summary)
         restore_workspace(self)
         self.update_service.start()
 
@@ -459,10 +474,30 @@ class MainWindow(QtWidgets.QMainWindow):
             and self.sample_temperature_bar.wait_check.isChecked()
             and not ready
         )
+        pending = bool(getattr(self.lakeshore335, "input_configuration_pending", False))
         for tab in self._measurement_tabs():
             run_panel = getattr(tab, "run_panel", None)
             if run_panel is not None:
                 run_panel.set_start_blocked("sample_temperature", blocked)
+                run_panel.set_start_blocked("ls335_input_configuration", pending)
+
+    def _on_ls_input_pending(self, pending):
+        if pending:
+            self.thermal_safety.latest_snapshot = None
+            self.thermal_safety._stable_since = None
+            self.thermal_safety._measurement_stable_since = None
+            self.thermal_safety.evaluate(None)
+        self._sync_temperature_start_gate(self.sample_temperature_bar.is_ready())
+        self._update_ls_input_summary()
+
+    def _update_ls_input_summary(self, *_):
+        from app.lakeshore_input_state import current_reversal_summary
+        controller = self.lakeshore335
+        self.magnet_panel._update_ls_inputs()
+        self.tab_bfield_transport.set_ls_current_reversal_summary(current_reversal_summary(
+            getattr(controller, "input_configurations", None),
+            getattr(controller, "input_configurations_monotonic_s", None),
+            bool(getattr(controller, "is_connected", False))))
 
     def refresh_models_from_ui(self):
         c, s, _ = self.conn_dock.to_models()
@@ -545,7 +580,9 @@ class MainWindow(QtWidgets.QMainWindow):
         context = {"captured_at": timestamp(), "source": "cached application telemetry",
                    "scope": "run-start conditions; not per-point telemetry",
                    "magnet_backend": getattr(self.magnet_panel, "_backend", None),
-                   "device_states": dict(self.device_manager.states)}
+                   "device_states": dict(self.device_manager.states),
+                   "ls335_input_configurations": deepcopy(getattr(self.lakeshore335, "input_configurations", None)),
+                   "ls335_input_configurations_monotonic_s": getattr(self.lakeshore335, "input_configurations_monotonic_s", None)}
         snapshots = {
             "magnet1000": getattr(self.magnet1000, "latest_snapshot", None),
             "magnet2100": self._experiment_2100_field,

@@ -520,8 +520,11 @@ class KeithleyProtectionIntegrationTests(unittest.TestCase):
         self.assertAlmostEqual(session.curr_comp, 25e-9)
         self.assertIs(manager.sessions["g1"], session)
         self.assertEqual(emitter.events[-1][0:2], ("g1", "ok"))
-        self.assertIn("2.5e-08 A current compliance", emitter.events[-1][2])
-        self.assertIn("applied and verified", emitter.events[-1][2])
+        self.assertEqual(
+            emitter.events[-1][2],
+            "2-wire Voltage Source; +/-7 V maximum; 2.5e-08 A current compliance. "
+            "Requested profile is applied and verified.",
+        )
         self.assertTrue(manager.protection_is_applied("g1"))
 
     def test_failed_saved_profile_keeps_verified_defaults_and_allows_retry(self):

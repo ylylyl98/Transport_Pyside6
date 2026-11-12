@@ -23,6 +23,8 @@ class SampleHeatingInterlock:
         self._sample_command = False
         self._magnet_commands = 0
         self._reserved = False
+        self._reserved_owner = None
+        self._measurement_input_owner = None
 
     @staticmethod
     def _finite(value):
@@ -47,9 +49,14 @@ class SampleHeatingInterlock:
     def invalidate_control(self, *_):
         self.note_control(None)
 
-    def reserve_magnet(self, reserved):
+    def reserve_magnet(self, reserved, *, owner=None):
         with self._lock:
+            if reserved and self._sample_command:
+                raise RuntimeError("LS335 input or sample control in progress")
+            if not reserved and self._measurement_input_owner is not None:
+                raise RuntimeError("Measurement input session must end before releasing APS ownership")
             self._reserved = bool(reserved)
+            self._reserved_owner = str(owner) if reserved and owner is not None else None
             # Require a new observation after a workflow releases ownership.
             self._magnet = None
 
@@ -104,6 +111,67 @@ class SampleHeatingInterlock:
                 raise RuntimeError(reason or "LS335 control command already active")
             self._sample_command = True
             self.invalidate_control()
+
+    def begin_input_configuration(self):
+        """Reserve a sensor setup change against magnet and sample commands."""
+        with self._lock:
+            if self._reserved or self._magnet_commands or self._sample_command:
+                raise RuntimeError("Instrument operation active; input configuration is locked")
+            self._sample_command = True
+            self.invalidate_control()
+
+    def begin_measurement_input_session(self, owner):
+        owner = str(owner)
+        with self._lock:
+            if not owner or not self._reserved or self._reserved_owner != owner:
+                raise RuntimeError("Measurement input session requires matching APS reservation")
+            if self._measurement_input_owner is not None or self._sample_command or self._magnet_commands:
+                raise RuntimeError("Instrument operation active; cannot start input session")
+            self._measurement_input_owner = owner
+
+    def _require_stationary_measurement_owner(self, owner):
+        if (self._measurement_input_owner != str(owner) or not self._reserved
+                or self._reserved_owner != str(owner)):
+            raise RuntimeError("Measurement input session owner mismatch")
+        snapshot = self._magnet
+        if snapshot is None or not self._fresh(getattr(snapshot, "monotonic_s", None),
+                                                cfg.lakeshore335.maximum_field_reading_age_s):
+            raise RuntimeError("Fresh APS100 stationary readback is required for input change")
+        status = getattr(snapshot, "status", None)
+        if (getattr(status, "sweep_active", None) is not False
+                or getattr(status, "faulted", None) is not False
+                or str(getattr(snapshot, "sweep_state", "")).strip().lower() not in {"pause", "paused", "standby", "idle"}):
+            raise RuntimeError("APS100 must be confirmed stationary and fault-free for input change")
+
+    def begin_measurement_input_change(self, owner):
+        with self._lock:
+            self._require_stationary_measurement_owner(owner)
+            if self._sample_command or self._magnet_commands:
+                raise RuntimeError("Instrument operation active; input change is locked")
+            self._sample_command = True
+            self.invalidate_control()
+
+    def check_measurement_input_change(self, owner):
+        with self._lock:
+            self._require_stationary_measurement_owner(owner)
+            if not self._sample_command or self._magnet_commands:
+                raise RuntimeError("Measurement input change lost its reservation")
+
+    def end_measurement_input_session(self, owner):
+        with self._lock:
+            if self._measurement_input_owner != str(owner):
+                raise RuntimeError("Measurement input session owner mismatch")
+            if self._sample_command:
+                raise RuntimeError("Input change still in progress")
+            self._measurement_input_owner = None
+
+    def measurement_input_session_active(self):
+        with self._lock:
+            return self._measurement_input_owner is not None
+
+    def measurement_input_session_owned(self, owner):
+        with self._lock:
+            return self._measurement_input_owner == str(owner)
 
     def end_sample_control(self):
         with self._lock:

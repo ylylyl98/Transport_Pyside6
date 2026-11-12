@@ -18,6 +18,8 @@ from app.ui.widgets.safe_combo import SafeComboBox
 from app.ui.widgets.safe_spinbox import SafeDoubleSpinBox
 
 
+from app.lakeshore_input_state import current_reversal_summary, input_state_fresh, input_change_magnet_block
+
 class MagnetPanel(QtWidgets.QWidget):
     """UI for one selected magnet backend, sharing two application controllers."""
 
@@ -293,6 +295,22 @@ class MagnetPanel(QtWidgets.QWidget):
             ("Last field-envelope comparison", self.lakeshore_envelope),
         ):
             ls_form.addRow(label, value)
+        self.ls_input_summary = QtWidgets.QLabel("LS335 current reversal: unknown")
+        self.ls_input_summary.setWordWrap(True)
+        self.ls_input_summary.setToolTip("OFF (DC) continues temperature readings but loses thermoelectric EMF compensation.")
+        ls_form.addRow("Input current reversal", self.ls_input_summary)
+        self.ls_input_refresh = QtWidgets.QPushButton("Refresh inputs")
+        self.ls_input_refresh.clicked.connect(self._refresh_ls_inputs)
+        ls_form.addRow(self.ls_input_refresh)
+        self.ls_input_buttons = {}
+        for channel in ("A", "B"):
+            row = QtWidgets.QHBoxLayout()
+            for enabled, text in ((True, "ON (alternating)"), (False, "OFF (DC)")):
+                button = QtWidgets.QPushButton(text)
+                button.clicked.connect(lambda _checked=False, ch=channel, value=enabled: self._set_ls_reversal(ch, value))
+                row.addWidget(button)
+                self.ls_input_buttons[(channel, enabled)] = button
+            ls_form.addRow(f"Input {channel}", row)
         ls_buttons = QtWidgets.QHBoxLayout()
         ls_buttons.addWidget(self.lakeshore_connect_button)
         ls_buttons.addWidget(self.lakeshore_disconnect_button)
@@ -361,6 +379,8 @@ class MagnetPanel(QtWidgets.QWidget):
         if hasattr(self.magnet1000, "exclusive_changed"):
             self.magnet1000.exclusive_changed.connect(self._on_aps_exclusive_changed)
 
+        if hasattr(self.magnet2100, "exclusive_changed"):
+            self.magnet2100.exclusive_changed.connect(lambda *_: self._update_buttons())
         self.magnet2100.connected.connect(lambda identity: self._on_connected("2100", identity))
         self.magnet2100.disconnected.connect(lambda: self._on_disconnected("2100"))
         self.magnet2100.snapshot_updated.connect(lambda snapshot: self._on_snapshot("2100", snapshot))
@@ -372,14 +392,71 @@ class MagnetPanel(QtWidgets.QWidget):
             self.lakeshore335.connected.connect(lambda *_: self.lakeshore_connection.setText("Connected"))
             self.lakeshore335.disconnected.connect(lambda: self._on_lakeshore_disconnected())
             self.lakeshore335.snapshot_updated.connect(self._on_lakeshore_snapshot)
+            self.lakeshore335.control_result.connect(self._on_ls_input_result)
+            pending_signal = getattr(self.lakeshore335, "input_configuration_pending_changed", None)
+            if pending_signal is not None:
+                pending_signal.connect(lambda *_: self._update_ls_inputs())
             self.lakeshore335.fault.connect(lambda message: self._on_lakeshore_fault(message))
 
         self._temp_timer = QtCore.QTimer(self)
         self._temp_timer.setInterval(2000)
         self._temp_timer.timeout.connect(self._poll_temperature)
 
+    def _ls_input_block(self):
+        controller = self.lakeshore335
+        if controller is None or not getattr(controller, "is_connected", False):
+            return "Connect LS335 first"
+        if not self._reviewed or self._review_fingerprint != self._configuration_fingerprint():
+            return "Review the configured limits and connection settings first"
+        if getattr(controller, "input_configuration_pending", False):
+            return "Input configuration operation in progress"
+        window = self.window()
+        if callable(getattr(window, "_active_measurement_tabs", None)) and (window._active_measurement_tabs() or window.bfield_transport_controller.active or window.gate_scan_field_batch.active or window.device_manager.is_busy() or window.device_manager.current_in_use()):
+            return "Wait for all measurements to finish"
+        if self._busy_1000 or self._busy_2100 or self._aps_exclusive:
+            return "Wait for the magnet operation to finish"
+        return input_change_magnet_block(self._aps_latest_snapshot, self._connected["1000"])
+
+    def _update_ls_inputs(self):
+        controller = self.lakeshore335
+        inputs = getattr(controller, "input_configurations", None)
+        stamp = getattr(controller, "input_configurations_monotonic_s", None)
+        connected = bool(getattr(controller, "is_connected", False))
+        self.ls_input_summary.setText(current_reversal_summary(inputs, stamp, connected))
+        reason = self._ls_input_block()
+        self.ls_input_refresh.setEnabled(connected and not getattr(controller, "input_configuration_pending", False))
+        for (channel, enabled), button in self.ls_input_buttons.items():
+            state = (inputs or {}).get(channel, {})
+            valid = input_state_fresh(stamp) and state.get("supported") is True and isinstance(state.get("current_reversal"), bool)
+            button.setEnabled(not reason and valid and state.get("current_reversal") != enabled)
+            button.setToolTip(reason or ("Refresh supported input configuration first" if not valid else "OFF (DC) loses thermoelectric EMF compensation; temperature readings continue."))
+
+    def _refresh_ls_inputs(self):
+        try:
+            self.lakeshore335.refresh_input_configurations()
+        except Exception as exc:
+            self._show_error(str(exc))
+        self._update_ls_inputs()
+
+    def _set_ls_reversal(self, channel, enabled):
+        self._update_ls_inputs()
+        if not self.ls_input_buttons[(channel, enabled)].isEnabled():
+            return
+        try:
+            self.lakeshore335.set_current_reversal(channel, enabled)
+        except Exception as exc:
+            self._show_error(str(exc))
+        self._update_ls_inputs()
+
+    def _on_ls_input_result(self, result):
+        if result.get("operation") in {"read_input_configurations", "set_current_reversal"}:
+            if not result.get("ok"):
+                self._show_error(str(result.get("error", "LS335 input configuration failed")))
+            self._update_ls_inputs()
+
     def _on_lakeshore_disconnected(self):
         self.lakeshore_connection.setText("Disconnected")
+        self._update_ls_inputs()
         self.lakeshore_permission.setText("No")
         self.lakeshore_state.setText("MONITOR_FAULT")
 
@@ -488,6 +565,7 @@ class MagnetPanel(QtWidgets.QWidget):
     def _auto_switch_allowed(self):
         if (self._busy_1000 or self._busy_2100 or self._aps_exclusive
                 or self._temp_request_pending
+                or getattr(self.magnet2100, "exclusive_owner", None)
                 or getattr(self.magnet2100, "has_pending_work", False)
                 or getattr(self.sample_temperature_control, "_pending_operation", None)):
             return False
@@ -788,6 +866,7 @@ class MagnetPanel(QtWidgets.QWidget):
         if (
             self._backend == "2100"
             and self._connected["2100"]
+            and not getattr(self.magnet2100, "exclusive_owner", None)
             and bool(getattr(self._last_capabilities, "sample_temperature_readback", False))
         ):
             self.magnet2100.read_temperature_snapshot_async()
@@ -1117,10 +1196,14 @@ class MagnetPanel(QtWidgets.QWidget):
         self.fault_label.setText("Commissioning review required")
 
     def _update_buttons(self):
+        if hasattr(self, "ls_input_buttons"):
+            self._update_ls_inputs()
         connected = self._connected[self._backend]
         busy = self._busy_1000 if self._backend == "1000" else self._busy_2100
         if self._backend == "1000":
             busy = busy or self._aps_exclusive
+        busy = busy or bool(getattr(self.magnet2100, "exclusive_owner", None))
+        self.backend_combo.setEnabled(not busy)
         detecting = bool(self._detect_pending)
         self.detect_system_button.setEnabled(
             not detecting and not self._aps_connect_pending and not self._sdk_connect_pending
@@ -1128,9 +1211,9 @@ class MagnetPanel(QtWidgets.QWidget):
             and self._auto_switch_allowed())
         self.move_button.setEnabled(connected and not busy and not detecting)
         self.refresh_button.setEnabled(
-            connected and self._refresh_pending_backend is None
+            connected and not busy and self._refresh_pending_backend is None
         )
-        self.disconnect_button.setEnabled(connected and not detecting)
+        self.disconnect_button.setEnabled(connected and not busy and not detecting)
         self.connect_button.setEnabled(not connected and not busy and not detecting and not self._sdk_connect_pending)
         if self._backend == "1000":
             self.connect_button.setEnabled(
@@ -1143,8 +1226,8 @@ class MagnetPanel(QtWidgets.QWidget):
             and connected
             and getattr(self._last_capabilities, "sample_temperature_control", False)
         )
-        temp_mutation_allowed = capable and not self._temp_request_pending and not detecting
+        temp_mutation_allowed = capable and not self._temp_request_pending and not detecting and not busy
         self.sample_target.setEnabled(temp_mutation_allowed)
         self.sample_rate.setEnabled(temp_mutation_allowed)
         self.temp_control_button.setEnabled(temp_mutation_allowed)
-        self.temp_stop_button.setEnabled(capable and "stop_temperature" not in self._pending_temperature_operations)
+        self.temp_stop_button.setEnabled(capable and not busy and "stop_temperature" not in self._pending_temperature_operations)

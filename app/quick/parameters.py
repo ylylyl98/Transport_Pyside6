@@ -7,6 +7,7 @@ import math
 import json
 import re
 
+from app.models import BFIELD_HYSTERESIS_LABELS, BFIELD_MT_FIELDS
 from app.models import (DualGateParams, LineSweepParams, CoParams, PhotocurrentParams,
                         PhotocurrentBiasCondition, BFieldTransportParams,
                         BFieldTransportCondition)
@@ -31,9 +32,11 @@ CHOICES = {
     "axis_slow": ["None", "Vtg", "Vbg", "Vds", "Doping", "E-field"],
     "derived_fast_axis": ["Doping", "E-field", "Vds"],
     "derived_slow_axis": ["Doping", "E-field", "Vds"],
+    "sample_reversal_mode": ["unchanged", "per_point", "whole_sweep"],
+    "measurement_mode": ["continuous", "stepped"], "field_spacing": ["points", "step"],
     "cooldown_policy": ["adaptive", "stay_driven", "persistent_each_row"], "final_mode": ["driven"],
 }
-HIDDEN = {"output_csv_path", "output_metadata_path", "output_log_path", "plot_x_resolved"}
+HIDDEN = {"output_csv_path", "output_metadata_path", "output_log_path", "plot_x_resolved", "magnet_backend", "field_spacing"}
 REGION_DEFAULT = {f"{axis}_{part}": value for axis in ("vtg", "vbg")
                   for part, value in (("start", 0.), ("stop", 1.), ("step", .1))}
 
@@ -48,12 +51,23 @@ def defaults(index):
 
 
 def label(key):
+    if key in BFIELD_HYSTERESIS_LABELS:
+        return BFIELD_HYSTERESIS_LABELS[key]
     special = {"n_sample": "Averages", "n_points": "Number of points", "delay": "Acquisition delay (s)",
                "vg_ramp": "Gate ramp step (V)", "vds_ramp": "Vds ramp step (V)",
                "fields_t": "B-field targets (T)", "resume_checkpoint": "Resume checkpoint path",
                "wl_start": "Start (nm)", "wl_stop": "Stop (nm)", "wl_step": "Step (nm)",
                "start_field_t": "Start (T)", "stop_field_t": "Stop (T)",
-               "rate_t_per_min": "Sweep rate (T/min)", "settle_s": "Settle time (s)",
+               "sample_reversal_mode": "Sample B current reversal", "sample_reversal_settle_s": "Reversal settling wait (s)",
+               "measurement_mode": "Measurement mode", "field_spacing": "Field spacing",
+               "field_points": "Points / pass (calculated)", "field_step_t": "Step size (mT)",
+               "field_tolerance_t": "Field tolerance (±mT)",
+               "field_stability_s": "Field stability window (s)",
+               "field_settle_s": "Delay after stability (s)",
+               "temperature_target_k": "Sample target (K)", "temperature_tolerance_k": "Target tolerance (K)",
+               "temperature_window_s": "Stability window (s)", "temperature_span_k": "Maximum window span (K)",
+               "temperature_drift_k_per_min": "Maximum absolute drift (K/min)", "temperature_timeout_s": "Wait timeout (s)",
+               "rate_t_per_min": "Maximum sweep rate (T/min)", "settle_s": "Settle time (s)",
                "acquisition_delay_s": "Acquisition delay (s)", "averages": "Averages",
                "derived_ratio": "Coupling ratio r", "ratio": "Coupling ratio r",
                "ratio_target": "r multiplies", "derived_ratio_target": "r multiplies",
@@ -93,6 +107,8 @@ def descriptor(key, value, mode):
              "Magnet" if key in {"fields_t", "resume_checkpoint", "start_field_t", "stop_field_t", "rate_t_per_min", "round_trip", "cooldown_policy", "final_mode"} else
              "Trajectory and biases")
     result = {"key": key, "label": label(key), "value": deepcopy(value), "group": group}
+    if mode == 5 and key in BFIELD_MT_FIELDS:
+        result["value"] = float(value) * 1000.
     coordinate_key = key.removeprefix("raw_").removeprefix("derived_")
     for prefix, coordinate in (("doping", "Doping"), ("efield", "E-field"), ("vtg", "Vtg"), ("vbg", "Vbg"), ("vds", "Vds")):
         if coordinate_key == prefix or coordinate_key.startswith(prefix + "_"):
@@ -115,11 +131,43 @@ def descriptor(key, value, mode):
         result["kind"] = "text"
     if key == "final_mode":
         result["readOnly"] = True
+    if mode == 5 and key == "field_points":
+        result["readOnly"] = True
     return result
+
+
+def normalize_transport_spacing(values):
+    """Migrate remembered point-count recipes to the equivalent step in tesla."""
+    if values.get("field_spacing") == "points":
+        n = values.get("field_points", 0)
+        if isinstance(n, int) and n >= 2:
+            values["field_step_t"] = abs(values["stop_field_t"] - values["start_field_t"]) / (n - 1)
+    values["field_spacing"] = "step"
+
+
+def transport_sampling_summary(values, backend="1000"):
+    from app.engine.bfield_transport_sweep import build_stepped_targets
+    params = BFieldTransportParams(
+        start_field_t=values["start_field_t"], stop_field_t=values["stop_field_t"],
+        field_spacing="step", field_step_t=values["field_step_t"], magnet_backend=backend)
+    targets = build_stepped_targets(params)
+    count = len(targets)
+    total = 2 * count - 1 if values.get("round_trip") else count
+    detail = f"{count} points / pass; {total} points / condition. Start and Stop included."
+    last_step = abs(targets[-1] - targets[-2])
+    if last_step < params.field_step_t - 1e-12:
+        detail += f" Final interval: {last_step * 1000:g} mT (shorter)."
+    return count, detail
 
 
 def schema(values, mode, errors=None):
     errors = errors or {}
+    if mode == 5:
+        values = deepcopy(values)
+        try:
+            values["field_points"] = transport_sampling_summary(values, values.get("magnet_backend", "1000"))[0]
+        except ValueError:
+            values["field_points"] = 0
     result = []
     for key, value in values.items():
         if key in HIDDEN:
@@ -134,6 +182,9 @@ def schema(values, mode, errors=None):
                 item["visible"] = values["mode"] == "Derived" or key in ("derived_ratio", "derived_ratio_target")
         if key == "ao_channel":
             item["visible"] = values.get("vds_source") == "NI DAQ AO"
+        if mode == 5 and key in BFIELD_HYSTERESIS_LABELS:
+            item["visible"] = (values.get("measurement_mode") == "stepped"
+                               and values.get("magnet_backend", "1000") == "1000")
         if mode == 2:
             derived = values.get("coordinate_mode") == "Derived"
             if key.startswith(("doping_", "efield_", "derived_")):
@@ -149,7 +200,7 @@ def schema(values, mode, errors=None):
     return sorted(result, key=lambda item: groups[item["group"]])
 
 
-def measurement_sections(values, mode, selected=None, errors=None, *, transport_coordinates="Derived", sampling=step_sampling):
+def measurement_sections(values, mode, selected=None, errors=None, *, transport_coordinates="Derived", sampling=step_sampling, magnet_backend="1000"):
     """Compact, task-specific views of the existing acquisition parameters.
 
     Row routing is explicit, so a condition editor never edits ignored global
@@ -319,8 +370,53 @@ def measurement_sections(values, mode, selected=None, errors=None, *, transport_
             section["fields"] = [field(k) for k in ("enabled", "vtg", "vbg", "vds", "settle_s") if k != "vds" or values["use_vds"]]
             row_key, row_index, current = "", -1, values
     else:
-        add("Magnetic field trajectory", ["start_field_t", "stop_field_t", "rate_t_per_min", "round_trip"],
-            description="Continuous sweep. Acquisition delay sets the sampling interval; the point count depends on sweep time and instrument timing.")
+        field_limit_text = ""
+        if magnet_backend == "1000":
+            from app.engine.bfield_transport_sweep import aps100_transport_field_limit
+            try:
+                field_limit_text = f"Start/Stop limit: ±{aps100_transport_field_limit():g} T. "
+            except (TypeError, ValueError):
+                field_limit_text = "Field limit unavailable; check magnet configuration. "
+        add("Magnetic field trajectory", ["measurement_mode", "start_field_t", "stop_field_t", "round_trip"],
+            description=(field_limit_text + "Requested maximum rate; the APS100 stored range limits can make actual rates slower. Continuous samples during motion; Stepped waits at each field." if magnet_backend == "1000" else "Stepped only; field ramp is managed by the SDK."))
+        if magnet_backend == "1000":
+            from app.engine.bfield_transport_sweep import effective_rate_limit_t_per_min
+            try:
+                limit = effective_rate_limit_t_per_min()
+                limit_text = f"{limit * 10000 / 60:g} Oe/s ({limit:g} T/min)"
+            except (ValueError, TypeError):
+                limit_text = "unavailable; check magnet configuration"
+            try:
+                requested = float(current.get("rate_t_per_min", 0))
+                equivalent = f"{requested * 10000 / 60:g} Oe/s"
+            except (TypeError, ValueError):
+                equivalent = "invalid input"
+            add("Sweep rate", ["rate_t_per_min"], columns=1,
+                description=f"Configured maximum: {limit_text}. Current request: {equivalent}. Stored RATE 0–4 and voltage limits may be slower; the final approach also slows down.")
+        add("Sample B current reversal", ["sample_reversal_mode", "sample_reversal_settle_s"],
+            description="Unchanged preserves B. Automatic modes require APS100 Stepped and A already ON; A is never changed. Per point: qualify a full ON temperature window, confirm OFF and wait, acquire, then confirm ON, wait and qualify a new ON window. Before/after ON temperatures must differ by no more than the configured temperature span before the point is saved. OFF readings remain safety monitored but are not mixed into ON windows. Whole sweep: B OFF with the existing target, span and drift checks. The configured wait does not certify transient removal. Monitoring or thermal interruptions end the run; B is restored after cleanup. If restoration fails, ownership is retained and Stop retries.")
+        if current.get("measurement_mode") == "stepped":
+            if magnet_backend == "1000":
+                add("Hysteresis: set, wait, measure", list(BFIELD_HYSTERESIS_LABELS),
+                    description="Stable offset points are measured at their readback field. Passed nominal points are logged, never revisited. History reversal, endpoint or actual-gap violations end the run. Gap 0 means twice the largest planned interval. Field and temperature have separate timeouts; protection holds still require review. Commission these limits on the magnet.")
+            step_section = add("Stepped field and temperature", ["field_step_t", "field_points"] +
+                ["temperature_target_k", "temperature_tolerance_k", "temperature_window_s", "temperature_span_k", "temperature_drift_k_per_min", "temperature_timeout_s"],
+                description=("All points use one sample target; passive waiting only." if magnet_backend == "1000" else "SDK temperature control stays enabled at one sample target throughout the sweep.") + (" Temperature timeout ends the run; protection holds require review." if magnet_backend == "1000" else " Timeout pauses the run."))
+            if magnet_backend == "1000":
+                for item in step_section["fields"]:
+                    if item["key"] == "temperature_timeout_s":
+                        item["label"] = "Temperature qualification timeout (s)"
+            try:
+                count, text = transport_sampling_summary(current, magnet_backend)
+                for item in step_section["fields"]:
+                    if item["key"] == "field_points":
+                        item["value"] = count
+                step_section.update(samplingText=text, samplingWarning=False)
+            except ValueError as exc:
+                for item in step_section["fields"]:
+                    if item["key"] == "field_points":
+                        item["value"] = "—"
+                step_section.update(samplingText=str(exc), samplingWarning=True)
         conversion = add("Shared gate conversion", ["ratio", "ratio_target"],
             description="Choose Vtg / Vbg to enter physical gate voltages, or Doping / E-field to enter weighted gate voltages. Switching views keeps the same gate setpoints. "
                         + ("Changing r keeps Vtg / Vbg fixed in this view." if transport_coordinates == "Raw" else "One ratio applies to all conditions."))
@@ -348,8 +444,9 @@ def measurement_sections(values, mode, selected=None, errors=None, *, transport_
                 elif item["key"] in ("doping", "efield") and transport_coordinates == "Raw":
                     item.update(readOnly=True, description="Calculated from Vtg / Vbg")
             row_key, row_index, current = "", -1, values
-        add("Cooldown and completion", ["cooldown_policy", "final_mode"], advanced=True,
-            description="Successful completion stays driven (heater ON). Stop, error and interlock retain persistent cleanup.")
+        if magnet_backend == "1000":
+            add("Cooldown and completion", ["cooldown_policy", "final_mode"], advanced=True,
+                description="Successful completion stays driven (heater ON). Stop, error and interlock retain persistent cleanup.")
 
     if mode in (0, 1, 2, 4):
         add("Vds source", ["vds_source"] + (["ao_channel"] if current["vds_source"] == "NI DAQ AO" else []))
@@ -452,7 +549,7 @@ def legacy_values(settings, mode):
         return settings.value(f"{prefix}/{key}", None)
 
     for key, default in result.copy().items():
-        if key in HIDDEN or key == "final_mode":
+        if (key in HIDDEN and key != "field_spacing") or key == "final_mode":
             continue
         value = read(aliases.get(key, key))
         if value is None:

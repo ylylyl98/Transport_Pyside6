@@ -17,6 +17,55 @@ from tests.test_quick_measurements import FakeManager
 
 
 class QuickFormTests(unittest.TestCase):
+    def test_rate_limit_per_second_and_hysteresis_limits_are_visible(self):
+        from app.quick.parameters import measurement_sections
+        from app.models import BFIELD_HYSTERESIS_LABELS
+        from utils.config import cfg
+        values = defaults(5)
+        values.update(measurement_mode="stepped", rate_t_per_min=.12)
+        with patch.object(cfg.magnet, "maximum_rate_a_per_s", .01), patch.object(cfg.magnet, "coil_constant_t_per_a", .2):
+            sections = measurement_sections(values, 5)
+        rate = next(s for s in sections if any(f['key'] == 'rate_t_per_min' for f in s['fields']))
+        self.assertIn('Configured maximum: 20 Oe/s', rate['description'])
+        self.assertIn('Current request: 20 Oe/s', rate['description'])
+        self.assertIn('voltage limits', rate['description'])
+        fields = {f['key']: f for s in sections for f in s['fields']}
+        self.assertTrue(set(BFIELD_HYSTERESIS_LABELS).issubset(fields))
+        self.assertEqual(fields['field_acceptance_t']['value'], .5)
+        self.assertEqual(fields['field_drift_t_per_s']['value'], .1)
+
+    def test_stepped_form_exposes_selected_spacing_and_temperature(self):
+        from app.quick.parameters import measurement_sections, build_params
+        values = defaults(5)
+        self.assertEqual(values["measurement_mode"], "continuous")
+        values.update(measurement_mode="stepped", field_spacing="step", field_step_t=0.2)
+        sections = measurement_sections(values, 5)
+        keys = {item["key"] for section in sections for item in section.get("fields", [])}
+        self.assertIn("field_step_t", keys)
+        self.assertIn("field_points", keys)
+        items = {item["key"]: item for section in sections for item in section.get("fields", [])}
+        self.assertEqual(items["field_step_t"]["label"], "Step size (mT)")
+        self.assertEqual(items["field_step_t"]["value"], 200.)
+        self.assertTrue(items["field_points"]["readOnly"])
+        self.assertEqual(items["field_points"]["value"], 6)
+        self.assertNotIn("field_spacing", keys)
+        self.assertIn("rate_t_per_min", keys)
+        self.assertEqual(items["field_tolerance_t"]["value"], .2)
+        self.assertIn("temperature_target_k", keys)
+        self.assertEqual(build_params(values, 5).field_step_t, 0.2)
+
+    def test_2100_form_explains_sdk_control_and_hides_aps_options(self):
+        from app.quick.parameters import measurement_sections
+        values = defaults(5)
+        values["measurement_mode"] = "stepped"
+        sections = measurement_sections(values, 5, magnet_backend="2100")
+        keys = {field["key"] for section in sections for field in section.get("fields", [])}
+        self.assertNotIn("magnet_backend", keys)
+        self.assertNotIn("rate_t_per_min", keys)
+        self.assertNotIn("cooldown_policy", keys)
+        self.assertIn("temperature_target_k", keys)
+        self.assertIn("SDK", " ".join(section.get("description", "") for section in sections))
+
     @classmethod
     def setUpClass(cls):
         cls.app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
@@ -63,6 +112,20 @@ class QuickFormTests(unittest.TestCase):
         self.app.sendPostedEvents(None, QtCore.QEvent.Type.DeferredDelete)
         self.directory.cleanup()
         self.assertEqual(self.warnings, [])
+
+    def test_hysteresis_field_tolerance_editor_commits_mt_as_tesla(self):
+        self.service.mode = 5
+        self.service.setValue("measurement_mode", "stepped")
+        self.load()
+        editor = self.find("field_field_tolerance_t")
+        editor.forceActiveFocus()
+        editor.setProperty("text", "0.3")
+        QtTest.QTest.keyClick(self.window, QtCore.Qt.Key_Return)
+        self.app.processEvents()
+        self.assertAlmostEqual(self.service.collect_params().field_tolerance_t, .0003)
+        self.assertEqual(float(editor.property("text")), .3)
+        self.assertTrue(self.find("field_field_stability_s").isVisible())
+        self.assertTrue(self.find("field_field_settle_s").isVisible())
 
     def test_measurement_draft_and_focus_survive_sibling_edits_and_telemetry(self):
         self.load()

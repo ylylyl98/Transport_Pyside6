@@ -75,6 +75,20 @@ ColumnLayout {
         }
         ColumnLayout {
             visible: section.magnet.backend === "1000"; Layout.fillWidth: true; spacing: 6
+            Label { text: "LS335 sensor current reversal"; font.bold: true; color: Theme.text }
+            Label { text: section.magnet.currentReversalStatus; wrapMode: Text.Wrap; Layout.fillWidth: true; color: Theme.muted }
+            Label { text: "OFF uses DC excitation and keeps temperature readout active, but removes thermal EMF compensation. Change only while measurements and field motion are idle."; wrapMode: Text.Wrap; Layout.fillWidth: true; color: Theme.muted }
+            Repeater {
+                model: section.magnet.currentReversalChannels
+                delegate: RowLayout {
+                    required property var modelData
+                    Layout.fillWidth: true
+                    Label { text: "Input " + modelData.channel; color: Theme.text; Layout.fillWidth: true }
+                    ActionButton { text: "ON"; enabled: !section.magnet.busy && modelData.supported && modelData.enabled !== true; onClicked: section.magnet.setCurrentReversal(modelData.channel, true) }
+                    ActionButton { text: "OFF (DC)"; enabled: !section.magnet.busy && modelData.supported && modelData.enabled !== false; onClicked: section.magnet.setCurrentReversal(modelData.channel, false) }
+                }
+            }
+            ActionButton { text: "Refresh input settings"; enabled: !section.magnet.busy && section.magnet.connections.temperature; onClicked: section.magnet.refreshCurrentReversal() }
             ActionButton { id: bands; text: checked ? "Hide automatic heater bands" : "Automatic heater bands…"; checkable: true }
             ColumnLayout {
                 visible: bands.checked; Layout.fillWidth: true

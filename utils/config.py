@@ -249,7 +249,11 @@ class MagnetConfig:
     # releases ownership because a watchdog elapsed without acknowledgement.
     operation_timeout_s: float = 180.0
     persistent_operation_timeout_s: float = 900.0
+    # Retained for the sample-heater zero-current interlock. Magnet switch
+    # matching and lead-zero completion use independent field tolerances below.
     current_match_tolerance_a: float = 0.01
+    current_match_tolerance_t: float = 0.010
+    lead_zero_tolerance_t: float = 0.010
     field_tolerance_t: float = 0.002
     # Magnet specification: maximum documented charging voltage is 2 V
     # (0-40 A at 0.0343 A/s). This is intentionally below APS100 VLIM=3 V.

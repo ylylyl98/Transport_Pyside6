@@ -78,6 +78,7 @@ class FakeWorker(RunWorker):
 
 class FakeMagnet(QObject):
     transport_config_result = Signal(object)
+    transport_restore_result = Signal(object)
     safe_move_result = Signal(object)
     transport_sweep_result = Signal(object)
     snapshot_updated = Signal(object)
@@ -105,6 +106,7 @@ class FakeMagnet(QObject):
         return "move-1"
     def pause(self): self.calls.append(("pause",))
     def configure_transport(self, rate, limit): self.calls.append(("configure", rate, limit))
+    def restore_transport(self, rates, limits): self.calls.append(("restore", rates, limits))
     def enter_persistent_mode(self, **kwargs): self.calls.append(("persistent", kwargs))
 
 
@@ -152,12 +154,68 @@ class QuickMeasurementTests(unittest.TestCase):
         for index, (_, _, cls) in enumerate(MODES):
             self.service.mode = index
             keys = {f["key"] for f in self.service.fields}
-            self.assertTrue({k for k in defaults(index) if not k.startswith("output_") and k != "plot_x_resolved"}.issubset(keys))
+            self.assertTrue({k for k in defaults(index) if not k.startswith("output_") and k not in {"plot_x_resolved", "magnet_backend", "rate_t_per_min", "field_spacing"}}.issubset(keys))
             self.assertIsInstance(build_params(defaults(index), index), cls)
         self.assertIsInstance(self.service, QObject)
 
     def ui_fields(self):
         return {f["key"]: f for s in self.service.uiSections for f in s["fields"]}
+
+    def test_transport_step_editor_uses_mt_and_calculates_points(self):
+        self.service.mode = 5
+        self.service.setValue("measurement_mode", "stepped")
+        self.service.setValue("field_step_t", "300")
+        params = self.service.collect_params()
+        self.assertEqual(params.field_step_t, .3)
+        self.assertEqual(params.field_spacing, "step")
+        fields = self.ui_fields()
+        self.assertEqual(fields["field_step_t"]["value"], 300.)
+        self.assertEqual(fields["field_points"]["value"], 5)
+        self.assertTrue(fields["field_points"]["readOnly"])
+        self.assertIn("rate_t_per_min", fields)
+        summaries = " ".join(s.get("samplingText", "") for s in self.service.uiSections)
+        self.assertIn("9 points / condition", summaries)
+        self.assertIn("100 mT (shorter)", summaries)
+        self.service.setValue("field_points", 100)
+        self.assertEqual(self.service.collect_params().field_step_t, .3)
+        self.service.setValue("field_step_t", "invalid")
+        self.assertEqual(self.service.collect_params().field_step_t, .3)
+        self.assertIn("error", self.ui_fields()["field_step_t"])
+        self.service.setValue("field_step_t", "250")
+        self.assertEqual(self.service.collect_params().field_step_t, .25)
+
+    def test_hysteresis_editors_convert_mt_and_survive_mode_changes(self):
+        self.service.mode = 5
+        self.service.setValue("measurement_mode", "stepped")
+        self.service.setValue("field_tolerance_t", "0.3")
+        self.service.setValue("field_acceptance_t", "0.6")
+        self.service.setValue("field_drift_t_per_s", "0.2")
+        self.service.setValue("field_stability_s", "3")
+        self.service.setValue("field_settle_s", "2.5")
+        params = self.service.collect_params()
+        self.assertAlmostEqual(params.field_tolerance_t, .0003)
+        self.assertAlmostEqual(params.field_acceptance_t, .0006)
+        self.assertAlmostEqual(params.field_drift_t_per_s, .0002)
+        self.assertEqual(params.field_stability_s, 3.)
+        self.assertEqual(params.field_settle_s, 2.5)
+        self.assertEqual(self.ui_fields()["field_tolerance_t"]["value"], .3)
+        self.service.setValue("measurement_mode", "continuous")
+        self.assertNotIn("field_tolerance_t", self.ui_fields())
+        self.service.setValue("measurement_mode", "stepped")
+        self.assertEqual(self.ui_fields()["field_tolerance_t"]["value"], .3)
+        from app.quick.parameters import measurement_sections
+        sections = measurement_sections(self.service._values[5], 5, magnet_backend="2100")
+        self.assertFalse(any(f["key"] == "field_tolerance_t" for s in sections for f in s["fields"]))
+
+    def test_old_transport_points_migrate_without_unit_change(self):
+        from app.quick.parameters import normalize_transport_spacing
+        values = defaults(5)
+        values.update(field_spacing="points", field_points=5, start_field_t=-.5, stop_field_t=.5)
+        normalize_transport_spacing(values)
+        self.assertEqual(values["field_spacing"], "step")
+        self.assertEqual(values["field_step_t"], .25)
+        normalize_transport_spacing(values)
+        self.assertEqual(values["field_step_t"], .25)
 
     def test_bfield_gate_selected_editor_is_execution_recipe_and_empty_add_captures_default(self):
         self.service.mode = 4
@@ -683,7 +741,8 @@ class QuickMeasurementTests(unittest.TestCase):
                 "tabs/map_2d/derived_slow_axis": "Doping", "tabs/map_2d/sweep_dim": "2D map",
                 "tabs/photocurrent/bias_conditions": json.dumps([dict(enabled=True, vtg=2., vbg=1., vds=.1, settle_s=4.)]),
                 "tabs/bfield_gate_scan/bfield_fields": "(-1,1,5)",
-                "tabs/bfield_transport/delay_s": .3, "tabs/bfield_transport/final_mode": "persistent"}
+                "tabs/bfield_transport/delay_s": .3, "tabs/bfield_transport/final_mode": "persistent",
+                "tabs/bfield_transport/field_spacing": "points", "tabs/bfield_transport/field_points": 5}
             def value(self, key, default=None): return self.values.get(key, default)
         service = MeasurementService(self.manager, SaveRoot(base=self.directory.name), settings=Settings())
         self.assertEqual(service._values[0]["ao_channel"], 1)
@@ -700,6 +759,8 @@ class QuickMeasurementTests(unittest.TestCase):
         self.assertEqual(service._values[4]["fields_t"], "(-1,1,5)")
         self.assertEqual(service._values[5]["acquisition_delay_s"], .3)
         self.assertEqual(service._values[5]["final_mode"], "driven")
+        self.assertEqual(service._values[5]["field_spacing"], "step")
+        self.assertEqual(service._values[5]["field_step_t"], .25)
         service.deleteLater()
 
     def test_magnetic_confirmation_is_async_bound_to_field_and_mode(self):
@@ -740,16 +801,69 @@ class QuickMeasurementTests(unittest.TestCase):
         magnet = FakeMagnet()
         service = MeasurementService(self.manager, SaveRoot(base=self.directory.name), magnet1000=magnet,
             review_valid_callable=lambda: True, selected_backend_callable=lambda: "2100")
-        service.mode = 5
+        service.mode = 4
         service.start()
         self.assertFalse(service.active)
         self.assertIn("APS100", service.message)
+        service.mode = 5
+        service.start()
+        self.assertIn("stepped", service.message)
         service._selected_backend = lambda: "1000"
         service.start()
         self.assertFalse(service.active)
         self.assertIn("thermal", service.message)
         self.assertFalse(magnet.calls)
         service.deleteLater()
+
+    def test_quick_2100_stepped_routes_without_aps_or_lakeshore_and_locks_engine(self):
+        class Fake2100Engine(QObject):
+            continuation_changed = Signal(bool, bool, str)
+            state_changed = Signal(str, str)
+            progress_changed = Signal(int, int, str)
+            error = Signal(str)
+            restoration_warning = Signal(str)
+            finished = Signal()
+            stopped = Signal(str)
+            shutdown_ready = Signal()
+
+            def __init__(self, magnet, tab, manager, parent=None, review_valid_callable=None):
+                super().__init__(parent)
+                self.tab = tab
+                self.active = self._cleanup_in_progress = False
+                self.started_params = None
+                self.stop_count = 0
+
+            def start(self, *, verified_calibration=None):
+                self.started_params = self.tab.collect_params()
+                self.active = True
+                return True
+
+            def stop(self):
+                self.stop_count += 1
+                self.active = False
+
+        selected = ["2100"]
+        with patch("app.engine.bfield2100_transport_controller.BField2100TransportController", Fake2100Engine):
+            magnet = FakeMagnet()
+            service = MeasurementService(self.manager, SaveRoot(base=self.directory.name),
+                magnet1000=magnet, magnet2100=object(), thermal_safety=None,
+                selected_backend_callable=lambda: selected[0], review_valid_callable=lambda: True)
+            service.mode = 5
+            service._values[5]["measurement_mode"] = "stepped"
+            with patch.object(service, "_begin_preflight") as preflight:
+                service.start()
+            self.assertTrue(preflight.called, service.message)
+            self.assertEqual(preflight.call_args.args[0].magnet_backend, "2100")
+            self.assertFalse(magnet.calls)
+            engine = service._transport._engines["2100"]
+            self.assertTrue(service._transport.start())
+            self.assertEqual(engine.started_params.magnet_backend, "2100")
+            selected[0] = "1000"
+            self.assertIs(service._transport._selected(), engine)
+            service._transport.stop()
+            self.assertEqual(engine.stop_count, 1)
+            self.assertFalse(magnet.calls)
+            service.deleteLater()
 
     def test_lakeshore_fault_and_read_errors_reach_engines_immediately(self):
         magnet, lake = FakeMagnet(), FakeLake()
@@ -970,6 +1084,14 @@ class QuickMeasurementTests(unittest.TestCase):
         self.assertFalse(completed)
         self.assertTrue(magnet.owner)
         magnet.operation_finished.emit("enter_persistent_mode")
+        self.assertTrue(service.active)
+        self.assertEqual(service._transport._cleanup_waiting, "configuration")
+        saved_rates = {i: (10. * (i + 1), .1) for i in range(5)}
+        magnet.transport_config_result.emit(dict(success=True, stored_rates=saved_rates, stored_limits=(-1., 1.)))
+        self.assertTrue(service.active)
+        self.assertIn(("restore", saved_rates, (-1., 1.)), magnet.calls)
+        self.assertFalse(any(call[0] == "move" for call in magnet.calls))
+        magnet.transport_restore_result.emit(dict(success=True))
         self.spin(lambda: not service.active)
         self.assertEqual(len(completed), 1)
         result, locks, owner = completed[0]

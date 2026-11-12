@@ -5,6 +5,7 @@ import QtQuick.Layouts
 ColumnLayout {
     id: pane
     property var measurement: null
+    property var magnet: null
     property bool locked: measurement ? measurement.active : false
     property var expandedSections: ({})
     property var recipeDetails: ({})
@@ -19,6 +20,15 @@ ColumnLayout {
     }
     spacing: 10
     Layout.fillWidth: true
+
+    Label {
+        objectName: "measurementCurrentReversalStatus"
+        visible: pane.measurement && (pane.measurement.mode === 4 || pane.measurement.mode === 5) && pane.magnet && pane.magnet.backend === "1000"
+        text: pane.magnet ? pane.magnet.currentReversalStatus + "\nChange in Instruments → Sample temperature while idle." : ""
+        wrapMode: Text.Wrap
+        color: Theme.muted
+        Layout.fillWidth: true
+    }
 
     ActionButton {
         objectName: "measurementPreviewSweep"

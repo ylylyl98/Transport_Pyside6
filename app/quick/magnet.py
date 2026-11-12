@@ -17,6 +17,7 @@ from app.thermal_safety import ThermalSafetyEvaluator, _sensor_status_is_clear
 from app.quick.forms import field, checked_value
 from app.sample_heater_ranges import validate_heater_ranges, select_heater_range
 from app.sample_heating_interlock import SampleHeatingInterlock
+from app.lakeshore_input_state import current_reversal_summary, input_state_fresh, input_change_magnet_block
 from utils.config import cfg
 
 
@@ -57,6 +58,8 @@ class MagnetService(QObject):
         self._control_failed = False
         self._control_state = None
         self._controls_seen = False
+        self._input_configurations = None
+        self._input_configurations_stamp = None
         self._last_ready = None
         self._closing = False
         self._last_temperature_poll = 0.
@@ -72,6 +75,9 @@ class MagnetService(QObject):
         self.magnet2100.temperature_updated.connect(lambda s: self._snapshot("temperature2100", s))
         self.lakeshore335.snapshot_updated.connect(self._temperature_snapshot)
         self.lakeshore335.control_result.connect(self._control_result)
+        pending_signal = getattr(self.lakeshore335, "input_configuration_pending_changed", None)
+        if pending_signal is not None:
+            pending_signal.connect(lambda *_: self._input_pending_changed())
         for key, controller in (("1000", self.magnet1000), ("2100", self.magnet2100), ("temperature", self.lakeshore335)):
             controller.connected.connect(lambda _identity, name=key: self._connection(name, True))
             controller.disconnected.connect(lambda name=key: self._connection(name, False))
@@ -81,6 +87,8 @@ class MagnetService(QObject):
         self.magnet1000.safe_move_result.connect(self._move_result)
         self.magnet1000.transition_progress.connect(lambda label, value: self._report(f"{label}: {value:g}"))
         self.magnet1000.exclusive_changed.connect(lambda *_: self.changed.emit())
+        if hasattr(self.magnet2100, "exclusive_changed"):
+            self.magnet2100.exclusive_changed.connect(lambda *_: self.changed.emit())
         self.magnet2100.operation_finished.connect(self._operation2100)
         self._timer = QTimer(self)
         self._timer.setInterval(500)
@@ -111,11 +119,65 @@ class MagnetService(QObject):
     def busy(self):
         return bool(self._closing or self.manualBusy or self._active())
 
-    manualBusy = Property(bool, lambda s: bool(s._pending or s.magnet1000.exclusive_owner or s.magnet2100.has_pending_work), notify=changed)
+    manualBusy = Property(bool, lambda s: bool(s._pending or getattr(s.lakeshore335, "input_configuration_pending", False) or s.magnet1000.exclusive_owner or getattr(s.magnet2100, "exclusive_owner", None) or s.magnet2100.has_pending_work), notify=changed)
     pendingOperations = Property('QVariantList', lambda s: sorted(s._pending), notify=changed)
     temperatureAvailable = Property(bool, lambda s: s._connected["temperature"] if s._backend == "1000" else s._connected["2100"] and bool(getattr(getattr(s._snapshots.get("2100"), "capabilities", None), "sample_temperature_control", False)), notify=changed)
     heatingBlockReason = Property(str, lambda s: s.heating_interlock.heating_block_reason() if s._backend == "1000" else "", notify=changed)
     thermalStatus = Property(str, lambda s: f"{s.thermal_safety.state.value}: {s.thermal_safety.reason}", notify=changed)
+
+    @Property(str, notify=changed)
+    def currentReversalStatus(self):
+        return current_reversal_summary(self._input_configurations, self._input_configurations_stamp,
+                                        self._connected["temperature"])
+
+    @Property('QVariantList', notify=changed)
+    def currentReversalChannels(self):
+        fresh = self._connected["temperature"] and input_state_fresh(self._input_configurations_stamp)
+        return [dict(channel=channel, supported=bool(fresh and state.get("supported")),
+                     enabled=state.get("current_reversal") if fresh else None)
+                for channel in ("A", "B")
+                for state in [(self._input_configurations or {}).get(channel, {})]]
+
+    def _input_pending_changed(self):
+        if getattr(self.lakeshore335, "input_configuration_pending", False):
+            self._reset_input_temperature()
+        self.changed.emit()
+        self._notify_readiness()
+
+    def _reset_input_temperature(self):
+        self._stable_since = None
+        self._snapshots.pop("temperature", None)
+        self.thermal_safety.latest_snapshot = None
+        self.thermal_safety._stable_since = None
+        self.thermal_safety._measurement_stable_since = None
+        self.thermal_safety.evaluate(None)
+
+    @Slot()
+    def refreshCurrentReversal(self):
+        try:
+            self._guard(connected=False, review=False)
+            if self._backend != "1000" or not self._connected["temperature"]:
+                raise RuntimeError("Connect LS335 first")
+            self._submit("read_input_configurations", self.lakeshore335.refresh_input_configurations)
+        except Exception as exc:
+            self._report(str(exc))
+
+    @Slot(str, bool)
+    def setCurrentReversal(self, channel, enabled):
+        try:
+            self._guard(connected=False)
+            if self._backend != "1000" or not self._connected["temperature"]:
+                raise RuntimeError("Connect LS335 first")
+            state = (self._input_configurations or {}).get(channel, {})
+            if not input_state_fresh(self._input_configurations_stamp) or not state.get("supported"):
+                raise RuntimeError("Refresh inputs; current reversal requires a PTC or NTC RTD sensor")
+            reason = input_change_magnet_block(self._snapshots.get("1000"), self._connected["1000"])
+            if reason:
+                raise RuntimeError(reason)
+            self._reset_input_temperature()
+            self._submit("set_current_reversal", self.lakeshore335.set_current_reversal, channel, enabled)
+        except Exception as exc:
+            self._report(str(exc))
 
     @Property(str, notify=changed)
     def temperatureStatus(self):
@@ -328,6 +390,8 @@ class MagnetService(QObject):
                     self._pending_start_2100 = False
                     self._confirmation = None
                     self.magnet1000.pause() if self._backend == "1000" else self.magnet2100.request_stop()
+                elif self._backend == "2100" and getattr(self.magnet2100, "exclusive_owner", None):
+                    raise RuntimeError("Temperature control is reserved by the active measurement")
                 elif self._backend == "1000":
                     if not self._connected["temperature"] or "heater_off" in self._pending:
                         return
@@ -479,6 +543,8 @@ class MagnetService(QObject):
         if not connected:
             self._snapshots.pop(name, None)
             if name == "temperature":
+                self._input_configurations = self._input_configurations_stamp = None
+                self._pending.difference_update(("set_current_reversal", "read_input_configurations"))
                 self.thermal_safety.latest_snapshot = None
                 self.thermal_safety.evaluate(None)
                 self._stable_since = None
@@ -537,6 +603,17 @@ class MagnetService(QObject):
 
     def _control_result(self, result):
         operation = result.get("operation")
+        if operation in {"read_input_configurations", "set_current_reversal"}:
+            self._pending.discard(operation)
+            self._input_configurations = deepcopy(result.get("inputs")) if result.get("ok") else None
+            self._input_configurations_stamp = result.get("monotonic_s") if result.get("ok") else None
+            if operation == "set_current_reversal":
+                self._stable_since = None
+                self._report(self.currentReversalStatus if result.get("ok") else
+                             "LS335 current reversal unconfirmed: " + str(result.get("error", "readback failed")))
+            self.changed.emit()
+            self._notify_readiness()
+            return
         if operation not in {"sample_control", "setpoint", "read_control", "heater_off"}:
             return
         self._pending.discard(operation)
@@ -576,6 +653,9 @@ class MagnetService(QObject):
         self._notify_readiness()
 
     def is_ready(self):
+        if (getattr(self.lakeshore335, "input_configuration_pending", False)
+                or "set_current_reversal" in self._pending):
+            return False
         if self._backend != "1000" or not self._values["wait_temperature"]:
             return True
         return bool(not self._temperature_pending() and not self._control_failed
@@ -619,6 +699,8 @@ class MagnetService(QObject):
 
     def _poll_2100_temperature(self, force=False):
         capabilities = getattr(self._snapshots.get("2100"), "capabilities", None)
+        if getattr(self.magnet2100, "exclusive_owner", None):
+            return
         if not getattr(capabilities, "sample_temperature_readback", False) or self.magnet2100.has_pending_work and not force:
             return
         now = time.monotonic()
@@ -659,6 +741,7 @@ class MagnetService(QObject):
     def _error(self, name, message):
         self._pending.discard("connect" + name)
         if name == "temperature":
+            self._input_configurations = self._input_configurations_stamp = None
             self._snapshots.pop("temperature", None)
             self._stable_since = None
             self._control_failed = True
@@ -685,6 +768,9 @@ class MagnetService(QObject):
 
     def experiment_context_snapshot(self):
         result = dict(source="cached UI telemetry", scope="run-start conditions; not per-point telemetry", magnet_backend=self._backend)
+        result["ls335_inputs"] = dict(inputs=deepcopy(self._input_configurations),
+            monotonic_s=self._input_configurations_stamp,
+            fresh=self._connected["temperature"] and input_state_fresh(self._input_configurations_stamp))
         for key, name in (("magnet1000", "1000"), ("magnet2100", "2100"), ("temperature", "temperature"), ("temperature2100", "temperature2100")):
             value = self._snapshots.get(name)
             data = asdict(value) if is_dataclass(value) else deepcopy(value) if isinstance(value, dict) else None

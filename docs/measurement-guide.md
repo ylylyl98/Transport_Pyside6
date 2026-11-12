@@ -12,7 +12,7 @@ The application coordinates Keithley 2400 source meters, an NI DAQ device and an
 | --- | --- |
 | **Vds Sweep** | Sweep drain-source bias while holding top- and back-gate biases. Vds can come from Keithley G3 or an NI-DAQ analog-output channel. |
 | **Gate Scan** | Run a one-dimensional raw-voltage trajectory or a derived doping/electric-field trajectory, with an optional reverse pass. |
-| **B-field Sweep** | Sweep APS100 between editable B-field endpoints while holding one or more fixed Doping/E-field/Vds rows; round trip is enabled by default. |
+| **B-field Sweep** | Sweep APS100 continuously, or measure prescribed field points on APS100 / attoDRY2100 with a fixed sample-temperature target; hold one or more fixed Doping/E-field/Vds rows, with optional round trip. |
 | **2D Map** | Acquire a 1D or 2D grid across `Vtg`, `Vbg`, and/or `Vds`; select fast and slow axes and preview the planned sweep. |
 | **Photocurrent** | Sweep monochromator wavelength for one or more enabled Vtg/Vbg recipe conditions, with optional per-condition Vds. |
 | **B-field Gate Scan** | Execute gate-scan conditions at selected magnetic-field targets. |
@@ -173,10 +173,68 @@ Always confirm actual instrument state independently after an error, interrupted
 
 ### Magnetic-field completion and stop behavior
 
-Successful B-field Transport sweeps always finish in **Driven (leave heater ON)**, holding the final field for the next sweep without persistent-mode cooldown or lead zeroing. A round trip finishes at its starting field. Older recipes and saved Persistent selections are overridden, and the successful final-mode display is fixed to Driven. Stop, error, interlock, and application-shutdown cleanup still use Persistent mode.
+APS100 B-field Sweep Start/Stop now share the commissioned field envelope with
+planning and execution: at most ±8 T, or the smaller configured control, absolute
+field, or current × coil-constant limit. The form displays that effective limit.
+The attoDRY2100 limit remains SDK-specific. Adding or duplicating conditions
+chooses an unused name such as Con2/Con3; existing recipe names are preserved.
 
-B-field Transport runs voltage ramps and sample acquisition on one serialized worker, and CSV/checkpoint writes on another. STOP cancels ramps between steps, pauses APS100, then waits for in-flight instrument work, bias zeroing, and output flushing before releasing devices. An unresponsive driver can still delay cleanup, but it no longer blocks Qt telemetry processing.
+The sweep page displays LS335 A/B sensor current-reversal readbacks. Change these
+under **Instruments → Sample temperature** while idle; OFF keeps DC temperature
+readout but removes thermal EMF compensation. See [LS335 sensor current reversal](guides/SAMPLE_TEMPERATURE_1000.md#sensor-current-reversal-ac-excitation).
+
+For hysteresis sampling, choose **B-field Sweep → Measurement mode → Stepped**.
+Set Start/Stop in T, nominal Step size in mT, and one sample-temperature target.
+APS100 approaches in the branch direction, confirms pause, qualifies field and
+temperature independently, waits the extra delay, measures, then verifies fresh
+post-readings. Stable offsets within the separate point/endpoint acceptance limits
+are sampled at their field readback, without manual Continue. Passed interior
+nominal targets are logged and skipped without reversing. History reversals, endpoint
+violations, excessive actual sample gaps and quality timeouts end the run and preserve
+its data and diagnostic records. Thermal protection retains its existing recovery
+rules in Unchanged mode; automatic sample reversal ends the run on a monitoring or
+thermal interruption. These software limits require commissioning; current-derived field readback
+is not calibrated sample-field accuracy. See the [full settings and defaults](guides/SAMPLE_TEMPERATURE_1000.md#stepped-b-field-sweep).
+
+For APS100 continuous and stepped sweeps, set **Maximum sweep rate (T/min)** per run. The configured maximum and current request are displayed in **Oe/s** above the input; 0.12 T/min equals 20 Oe/s. Start reads the instrument's **RANGE/RATE 0–4** table, and uses the lower of the requested maximum and each stored range rate; actual rates can therefore be slower. The requested maximum is rounded down to the instrument's 0.1 mA/s resolution. The program verifies the written rates, records requested and effective tables in metadata, and uses the effective rates for motion timeouts. On completion, cancellation or error it attempts to restore and verify the original rate table; a restoration failure is reported. Fast mode RATE 5 is not changed. The attoDRY2100 ramp remains SDK-managed. Filenames omit sweep-rate, stepped-point-count and condition-count tags, and use **D** for Doping and **E** for E-field; the complete recipe remains in metadata. Previously saved files are not renamed.
+
+APS100 stepped moves use intermediate targets and reduced rates within the verified per-run limits. A fresh worker readback guards each commanded direction. An undershot stationary point can receive a same-direction correction within the original deadline; an overshot point is paused without reversing. Continue rechecks the point without authorizing a backwards move. Only planned round-trip turns and preparation between separate conditions change direction; preparation is not acquired as measurement data. Temporary approach rates are restored and verified before measurement. Field/temperature qualification and the extra delay restart after excursions or stale readings; post-acquisition checks discard invalid samples. Requested and measured fields remain separate in CSVs. Continuous sweeps retain their existing acquisition-during-motion behavior, and attoDRY2100 retains its SDK-managed path.
+
+For **attoDRY2100**, select that system under Instruments, review its commissioned connection and limits, and use **Stepped** mode. The workflow actively sets and verifies the sample-temperature target through the SDK; sample temperature control stays enabled while the field is on. The 1000 heater-OFF restriction does not apply to this backend. Field ramping uses the cryostat's SDK control, without APS100 ramp tables, persistent-switch commands or lead-zeroing rules. Start requires Driven mode and no ongoing field motion.
+
+At each 2100 point, the field setpoint must match, SDK field control must report IDLE, and three fresh field readings must be within ±10 mT. Then fresh sample-temperature readings must qualify over the selected window: by default 10 s, within ±0.05 K of the same target, with peak-to-peak variation ≤0.02 K and absolute fitted drift ≤0.01 K/min. These limits are editable. The 10 s is a temperature observation window, not a fixed field delay or a guarantee of thermal equilibrium. Both field and temperature are checked again after acquisition; a failed check discards that sample and requalifies the point.
+
+If temperature cannot qualify before the timeout, 2100 field control receives Stop, temperature control stays enabled, and safety monitoring continues. **Continue** retries the same point and requires fresh qualification; it does not override the limits. Normal completion and user Stop also stop field control and retain sample-temperature control. Manual field/temperature changes and backend switching are locked during measurement and cleanup. Electrical outputs are zeroed and files flushed before releasing the devices; a failed SDK Stop retains the reservation and requires retrying Stop. CSV and metadata record the backend, requested/measured field, sample temperature and stability metrics, with magnet temperature stored separately. Verify this workflow on the commissioned hardware before production acquisition; offline tests do not establish physical settling performance.
+
+Successful **APS100** B-field Transport sweeps always finish in **Driven (leave heater ON)**, holding the final field for the next sweep without persistent-mode cooldown or lead zeroing. Here, heater means the APS100 persistent-switch heater, not the sample heater. A round trip finishes at its starting field. Older recipes and saved Persistent selections are overridden, and the successful final-mode display is fixed to Driven. Stop, error, interlock, and application-shutdown cleanup still use Persistent mode.
+
+B-field Transport runs voltage ramps and sample acquisition on one serialized worker, and CSV/checkpoint writes on another. STOP cancels ramps between steps, pauses APS100 or requests 2100 SDK field Stop, then waits for in-flight instrument work, bias zeroing, and output flushing before releasing devices. An unresponsive driver can still delay cleanup, but it no longer blocks Qt telemetry processing.
+
+With **Keithley 2400** selected as the Vds source, B-field Transport publishes the measured G3 current in amperes as **Ids_Keithley** for live plots and CSV output. The historical **Keithley_current** column remains an identical alias from the same acquisition. A failed read is recorded in **Keithley_read_error** and is not replaced by a zero current. Existing CSV files with only the historical column remain readable in History.
 
 Monitoring-loss recovery, endpoint windows and optional settling have specific acknowledgement and timeout rules. See [Developer notes: transport timing and recovery](developer-notes.md#transport-timing-and-recovery), [sample-temperature controls](guides/SAMPLE_TEMPERATURE_1000.md) and [thermal protection](guides/FIELD_THERMAL_COMPARISON.md).
 
 [Documentation index](README.md) · [Project overview](../README.md)
+
+### Sample B current reversal during APS100 stepped sweeps
+
+The default **Unchanged** leaves the LS335 sample B current reversal as set.
+**Per point** first qualifies a full temperature window with B ON. It confirms B
+OFF, waits the configured settling time, acquires, then confirms B ON and waits
+again. A fresh ON temperature window must qualify, and the pre- and post-acquisition
+ON temperatures must differ by no more than the configured maximum temperature
+span, before the point is committed. OFF readings remain in use for thermal safety,
+but are not mixed into either ON stability window.
+
+**Whole sweep** keeps B OFF during the sweep and retains the existing sample target,
+span and drift stability requirements; no tolerance is automatically widened.
+The settling time is a configured wait, not proof that a transient has disappeared.
+Temperature readout continues with DC excitation, but thermal EMF compensation is
+lost. Automatic modes require APS100 Stepped, verified sample B / magnet A mapping
+and supported sensor inputs. A must already be ON; the program never changes A.
+
+A monitoring or thermal protection interruption ends an automatic-mode run; it
+does not automatically continue the interrupted point. Stop first completes APS
+cleanup and drains pending DAQ and LS operations, then restores the original B
+setting. If restoration fails, the instrument reservation is retained and **Stop**
+retries restoration. All magnet and thermal safety checks remain active.

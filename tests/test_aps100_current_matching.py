@@ -18,8 +18,32 @@ class CurrentMatchingTests(unittest.TestCase):
         self.fake.heater = 0
         self.fake.field_kg = self.fake.output_kg = 20.005
 
+    def test_field_based_match_tolerance_uses_coil_and_explicit_a_override(self):
+        from app.devices.aps100_attodry1000_adapter import MockAPS100Adapter
+        for cls in (APS100AttoDry1000Adapter, MockAPS100Adapter):
+            self.assertAlmostEqual(cls(coil_constant_t_per_a=0.1).current_match_tolerance_a, 0.1)
+            self.assertAlmostEqual(cls(coil_constant_t_per_a=0.1, current_match_tolerance_a=0.02).current_match_tolerance_a, 0.02)
+
+    def test_mismatch_between_five_and_nine_mt_is_accepted(self):
+        for mismatch in (0.005, 0.009):
+            with self.subTest(mismatch=mismatch), patch.object(self.adapter, "get_output_field_t", return_value=2.0005 - mismatch), patch.object(self.adapter, "_start_output_sweep_to") as ramp:
+                matched, *_ = self.adapter._settled_current_match(heater_state=0, action="enable")
+                self.assertTrue(matched)
+                ramp.assert_not_called()
+
+    def test_direct_zero_and_final_verification_use_lead_tolerance(self):
+        from dataclasses import replace
+        from app.devices.aps100_attodry1000_adapter import MockAPS100Adapter
+        with patch.object(self.adapter, "get_output_field_t", return_value=0.009), patch.object(self.adapter, "_write") as write:
+            self.assertEqual(self.adapter.zero_output(), 0.009)
+            write.assert_not_called()
+        good = replace(MockAPS100Adapter().read_snapshot(), heater_on=False, field_t=2.0,
+                       output_field_t=0.009, output_current_a=0.009 / 0.20328)
+        with patch.object(self.adapter, "read_snapshot", return_value=good):
+            self.adapter._verify_final_readings(2.0, "persistent", True, 0.01)
+
     def test_transient_after_pause_recovers_without_rematching(self):
-        outputs = iter([2.0005, 1.9979, 2.0005, 2.0005])
+        outputs = iter([2.0005, 1.989, 2.0005, 2.0005])
         with patch.object(self.adapter, "get_output_field_t", side_effect=lambda: next(outputs)), patch.object(self.adapter, "_start_output_sweep_to") as ramp:
             self.adapter.enter_driven_mode()
         ramp.assert_not_called()
@@ -28,14 +52,14 @@ class CurrentMatchingTests(unittest.TestCase):
     def test_recorded_mismatch_is_rematched_before_heater_on(self):
         attempts = []
         def output():
-            return 0.0 if not attempts else (1.9979 if len(attempts) == 1 else 2.0005)
+            return 0.0 if not attempts else (1.989 if len(attempts) == 1 else 2.0005)
         with patch.object(self.adapter, "get_output_field_t", side_effect=output), patch.object(self.adapter, "_start_output_sweep_to", side_effect=lambda target: attempts.append(target)), patch.object(self.adapter, "wait_for_field"):
             self.adapter.enter_driven_mode()
         self.assertEqual(len(attempts), 2)
         self.assertIn("PSHTR ON", self.fake.commands)
 
     def test_persistent_mismatch_stays_off_after_bounded_attempts(self):
-        with patch.object(self.adapter, "get_output_field_t", return_value=1.9979), patch.object(self.adapter, "_start_output_sweep_to") as ramp, patch.object(self.adapter, "wait_for_field"):
+        with patch.object(self.adapter, "get_output_field_t", return_value=1.989), patch.object(self.adapter, "_start_output_sweep_to") as ramp, patch.object(self.adapter, "wait_for_field"):
             with self.assertRaisesRegex(APS100SafetyError, "2 rematching attempts"):
                 self.adapter.enter_driven_mode()
         self.assertEqual(ramp.call_count, 3)
@@ -43,7 +67,7 @@ class CurrentMatchingTests(unittest.TestCase):
 
     def test_heater_off_transient_settles_without_fast_ramp(self):
         self.fake.heater = 1
-        outputs = iter([1.9979, 2.0005, 2.0005])
+        outputs = iter([1.989, 2.0005, 2.0005])
         with patch.object(self.adapter, "get_output_field_t", side_effect=lambda: next(outputs)), patch.object(self.adapter, "_start_output_sweep_to") as ramp:
             self.adapter.enter_persistent_mode(zero_leads=False)
         ramp.assert_not_called()
@@ -70,7 +94,7 @@ class CurrentMatchingTests(unittest.TestCase):
 
     def test_one_good_reading_is_not_enough(self):
         from itertools import cycle
-        readings = cycle([2.0005, 1.9979])
+        readings = cycle([2.0005, 1.989])
         with patch.object(self.adapter, "get_output_field_t", side_effect=lambda: next(readings)):
             matched, *_ = self.adapter._settled_current_match(heater_state=0, action="enable")
         self.assertFalse(matched)
@@ -98,7 +122,7 @@ class CurrentMatchingTests(unittest.TestCase):
         from dataclasses import replace
         from app.devices.aps100_attodry1000_adapter import MockAPS100Adapter
         bad = replace(MockAPS100Adapter().read_snapshot(), heater_on=False,
-                      field_t=2.0, output_field_t=0.003, output_current_a=0.02)
+                      field_t=2.0, output_field_t=0.011, output_current_a=0.011 / 0.20328)
         with patch.object(self.adapter, "read_snapshot", return_value=bad):
             with self.assertRaisesRegex(APS100SafetyError, "lead current"):
                 self.adapter._verify_final_readings(2.0, "persistent", True, 0.002)

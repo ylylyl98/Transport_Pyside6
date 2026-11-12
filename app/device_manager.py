@@ -1143,7 +1143,7 @@ class DeviceManager(QtCore.QObject):
         if start_voltage is not None and not math.isclose(float(start_voltage), 0.0, abs_tol=1e-9):
             zero_detail = f" Existing {float(start_voltage):g} V setpoint was safely ramped to 0 V before configuration."
         return (
-            f"{mode_text}; ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â±{max_voltage:g} V maximum; "
+            f"{mode_text}; +/-{max_voltage:g} V maximum; "
             f"{current_compliance:.3g} A current compliance. "
             + (
                 "Requested profile is applied and verified."

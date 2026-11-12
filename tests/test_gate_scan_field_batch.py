@@ -662,6 +662,19 @@ class GateScanFieldBatchTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     self.batch._verify_persistent_snapshot(snapshot, 0.0)
 
+    def test_lead_zero_uses_ten_mt_for_field_and_current(self):
+        from utils.config import cfg
+        snapshot = _snapshot(0., output=.008)
+        snapshot.output_current_a = .008 / cfg.magnet.coil_constant_t_per_a
+        self.batch._verify_persistent_snapshot(snapshot, 0.)
+        snapshot.output_field_t = .011
+        with self.assertRaisesRegex(ValueError, "leads are not zero"):
+            self.batch._verify_persistent_snapshot(snapshot, 0.)
+        snapshot.output_field_t = 0.
+        snapshot.output_current_a = .011 / cfg.magnet.coil_constant_t_per_a
+        with self.assertRaisesRegex(ValueError, "leads are not zero"):
+            self.batch._verify_persistent_snapshot(snapshot, 0.)
+
     def test_unknown_sweep_states_are_not_treated_as_pause(self):
         for state in ("", "unknown", "ramping", "not paused"):
             snapshot = _snapshot(0.0, standby=False)

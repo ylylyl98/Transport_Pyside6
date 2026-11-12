@@ -356,16 +356,25 @@ class APS100TransportWorkerTests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     @staticmethod
-    def _adapter(*, sweep_active=False, fail_rate=False):
+    def _adapter(*, sweep_active=False, fail_limits=False):
         class Adapter:
             connected = True
+            coil_constant_t_per_a = .2
+            maximum_current_a = 45.
+            maximum_field_t = 9.
+            maximum_rate_a_per_s = .0343
 
             def __init__(self):
                 self.calls = []
+                self.rates = {i: (10. * (i + 1), .1) for i in range(5)}
 
             def get_rates(self):
                 self.calls.append("get_rates")
-                return {0: (40.0, 0.1)}
+                return dict(self.rates)
+
+            def get_range_a(self, index): return self.rates[index][0]
+            def get_rate_a_per_s(self, index): return self.rates[index][1] / (self.coil_constant_t_per_a * 60.)
+            def get_field_t(self): return 0.
 
             def get_limits_t(self):
                 self.calls.append("get_limits")
@@ -379,16 +388,17 @@ class APS100TransportWorkerTests(unittest.TestCase):
 
             def set_rate_t_per_min(self, rate, **_kwargs):
                 self.calls.append(("rate", rate))
-                if fail_rate:
-                    raise RuntimeError("injected RATE failure")
                 return {0: rate}
 
             def set_limits_t(self, low, high):
                 self.calls.append(("limits", low, high))
+                if fail_limits and (low, high) == (-6.0, 6.0):
+                    raise RuntimeError("injected limit write failure")
                 return (low, high)
 
             def restore_rates(self, rates):
                 self.calls.append(("restore_rates", rates))
+                self.rates.update(rates)
 
             def get_status(self):
                 self.calls.append("status")
@@ -404,27 +414,30 @@ class APS100TransportWorkerTests(unittest.TestCase):
 
         return Adapter()
 
-    def test_transport_configuration_takes_remote_before_rate(self):
+    def test_transport_configuration_takes_remote_before_rate_and_limits(self):
         worker = _MagnetWorker()
         worker.adapter = self._adapter()
+        worker._check_thermal = lambda *args, **kwargs: None
         results = []
         worker.transport_config_result.connect(results.append)
 
         worker.configure_transport(0.05, 6.0)
 
         self.assertTrue(results[-1]["success"])
-        self.assertLess(worker.adapter.calls.index("remote"), worker.adapter.calls.index(("rate", 0.05)))
+        self.assertLess(worker.adapter.calls.index("remote"), worker.adapter.calls.index(("limits", -6.0, 6.0)))
+        self.assertTrue(any(isinstance(call, tuple) and call[0] == "restore_rates" for call in worker.adapter.calls))
 
     def test_transport_configuration_rolls_back_after_mutation_failure(self):
         worker = _MagnetWorker()
-        worker.adapter = self._adapter(fail_rate=True)
+        worker.adapter = self._adapter(fail_limits=True)
+        worker._check_thermal = lambda *args, **kwargs: None
         results = []
         worker.transport_config_result.connect(results.append)
 
         worker.configure_transport(0.05, 6.0)
 
         self.assertFalse(results[-1]["success"])
-        self.assertIn(("restore_rates", {0: (40.0, 0.1)}), worker.adapter.calls)
+        self.assertTrue(any(isinstance(call, tuple) and call[0] == "restore_rates" for call in worker.adapter.calls))
         self.assertIn(("limits", -1.0, 1.0), worker.adapter.calls)
 
     def test_idle_pause_is_an_acknowledged_noop(self):
@@ -456,6 +469,9 @@ class ExplicitMockControllerTests(unittest.TestCase):
                 break
             QtCore.QThread.msleep(10)
         self.assertTrue(identities)
+        adapter = controller._worker.adapter
+        self.assertAlmostEqual(adapter.current_match_tolerance_a * adapter.coil_constant_t_per_a, .010)
+        self.assertAlmostEqual(adapter.lead_zero_tolerance_t, .010)
         controller.shutdown()
 
 
@@ -538,10 +554,12 @@ class RestorationReadbackTests(unittest.TestCase):
         from unittest.mock import MagicMock
         worker = _MagnetWorker()
         worker.adapter = MagicMock()
-        worker.adapter.restore_rates.side_effect = RuntimeError("write failed")
+        worker.adapter.set_limits_t.side_effect = RuntimeError("limit write failed")
         worker.adapter.get_rates.return_value = {0: (40.0, 0.02)}
         results = []
         worker.transport_restore_result.connect(results.append)
-        worker.restore_transport({0: (40.0, 0.4)}, None)
+        worker.restore_transport({0: (40.0, 0.4)}, (-1.0, 1.0))
         self.assertFalse(results[-1]["success"])
+        self.assertIn("limit restoration failed", results[-1]["failures"][0])
+        worker.adapter.restore_rates.assert_called_once_with({0: (40.0, 0.4)})
         self.assertEqual(results[-1]["actual_rates_t_per_min"], {0: (40.0, 0.02)})
