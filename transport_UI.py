@@ -5,6 +5,9 @@ import sys
 
 def main(argv=None):
     arguments = list(sys.argv[1:] if argv is None else argv)
+    from app import source_runtime
+    if not source_runtime.begin(arguments):
+        return 0
     if "--verify-package" in arguments:
         arguments.remove("--verify-package")
         from app.package_smoke import main as run
@@ -27,6 +30,7 @@ def main(argv=None):
         configure_qapp(application)
         window = MainWindow()
         window.show()
+        source_runtime.register_window(window, "widgets")
         return application.exec()
     if "--history" in arguments:
         from app.quick.history_app import main as run

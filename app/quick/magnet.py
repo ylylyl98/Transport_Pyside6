@@ -32,23 +32,25 @@ class MagnetService(QObject):
     def __init__(self, parent=None, *, offline=False, magnet1000=None, magnet2100=None, lakeshore=None):
         super().__init__(parent)
         self.offline = offline
+        cfg.setup.validate()
+        self._setup = deepcopy(cfg.setup)
+        self._backend = self._setup.magnet_backend
         self.heating_interlock = (getattr(magnet1000, "heating_interlock", None)
                                   or getattr(lakeshore, "heating_interlock", None)
                                   or SampleHeatingInterlock())
-        self.magnet1000 = magnet1000 or MagnetController(self, interlock=self.heating_interlock)
-        self.magnet2100 = magnet2100 or AttoDRY2100Controller(config=cfg.attodry2100, parent=self)
-        self.lakeshore335 = lakeshore or LakeShore335Controller(self, interlock=self.heating_interlock)
+        self.magnet1000 = (magnet1000 or MagnetController(self, interlock=self.heating_interlock)) if self._backend == "1000" else None
+        self.magnet2100 = (magnet2100 or AttoDRY2100Controller(config=cfg.attodry2100, parent=self)) if self._backend == "2100" else None
+        self.lakeshore335 = (lakeshore or LakeShore335Controller(self, interlock=self.heating_interlock)) if self._setup.temperature_source == "ls335" else None
         if (getattr(self.lakeshore335, "heating_interlock", self.heating_interlock)
                 is not self.heating_interlock):
             raise ValueError("APS100 and LS335 controllers must share their heating interlock")
         self.thermal_safety = ThermalSafetyEvaluator(cfg.lakeshore335)
-        self._backend = "1000"
-        self._auto = True
         self._review = None
         self._connected = {"1000": False, "2100": False, "temperature": False}
         self._pending = set()
         self._snapshots = {}
-        self._message = "Review configured limits before connecting"
+        self._message = ("Temperature is controlled externally; no magnet configured" if self._backend == "none"
+                         else "Review configured limits before connecting")
         self._log = []
         self._active = lambda: False
         self._confirmation = None
@@ -67,33 +69,39 @@ class MagnetService(QObject):
         self._bands = deepcopy(cfg.lakeshore335.sample_auto_heater_ranges)
         self._values = dict(target_field=0., final_mode="persistent", target_temperature=4.,
                             heater_range=None, ramp_enabled=None, ramp_rate=1., wait_temperature=False)
-        self.magnet1000._worker.thermal_source = self.thermal_safety
-        self.magnet1000._worker.thermal_field_updated.connect(self.thermal_safety.note_magnet_snapshot)
-        self.magnet1000.snapshot_updated.connect(self.thermal_safety.note_magnet_snapshot)
-        self.magnet1000.snapshot_updated.connect(lambda s: self._snapshot("1000", s))
-        self.magnet2100.snapshot_updated.connect(lambda s: self._snapshot("2100", s))
-        self.magnet2100.temperature_updated.connect(lambda s: self._snapshot("temperature2100", s))
-        self.lakeshore335.snapshot_updated.connect(self._temperature_snapshot)
-        self.lakeshore335.control_result.connect(self._control_result)
+        if self.magnet1000 is not None:
+            self.magnet1000._worker.thermal_source = self.thermal_safety
+            self.magnet1000._worker.thermal_field_updated.connect(self.thermal_safety.note_magnet_snapshot)
+            self.magnet1000.snapshot_updated.connect(self.thermal_safety.note_magnet_snapshot)
+            self.magnet1000.snapshot_updated.connect(lambda s: self._snapshot("1000", s))
+            self.magnet1000.operation_finished.connect(self._operation1000)
+            self.magnet1000.safe_move_result.connect(self._move_result)
+            self.magnet1000.transition_progress.connect(lambda label, value: self._report(f"{label}: {value:g}"))
+            self.magnet1000.exclusive_changed.connect(lambda *_: self.changed.emit())
+        if self.magnet2100 is not None:
+            self.magnet2100.snapshot_updated.connect(lambda s: self._snapshot("2100", s))
+            self.magnet2100.temperature_updated.connect(lambda s: self._snapshot("temperature2100", s))
+            self.magnet2100.operation_finished.connect(self._operation2100)
+        if self.lakeshore335 is not None:
+            self.lakeshore335.snapshot_updated.connect(self._temperature_snapshot)
+            self.lakeshore335.control_result.connect(self._control_result)
         pending_signal = getattr(self.lakeshore335, "input_configuration_pending_changed", None)
         if pending_signal is not None:
             pending_signal.connect(lambda *_: self._input_pending_changed())
         for key, controller in (("1000", self.magnet1000), ("2100", self.magnet2100), ("temperature", self.lakeshore335)):
+            if controller is None:
+                continue
             controller.connected.connect(lambda _identity, name=key: self._connection(name, True))
             controller.disconnected.connect(lambda name=key: self._connection(name, False))
             controller.error.connect(lambda msg, name=key: self._error(name, msg))
             controller.fault.connect(lambda msg, name=key: self._error(name, msg))
-        self.magnet1000.operation_finished.connect(self._operation1000)
-        self.magnet1000.safe_move_result.connect(self._move_result)
-        self.magnet1000.transition_progress.connect(lambda label, value: self._report(f"{label}: {value:g}"))
-        self.magnet1000.exclusive_changed.connect(lambda *_: self.changed.emit())
         if hasattr(self.magnet2100, "exclusive_changed"):
             self.magnet2100.exclusive_changed.connect(lambda *_: self.changed.emit())
-        self.magnet2100.operation_finished.connect(self._operation2100)
         self._timer = QTimer(self)
         self._timer.setInterval(500)
         self._timer.timeout.connect(self._tick)
-        self._timer.start()
+        if self._backend != "none":
+            self._timer.start()
 
     def set_active_provider(self, callback):
         self._active = callback
@@ -102,7 +110,10 @@ class MagnetService(QObject):
         return self._backend
 
     def _fingerprint(self):
-        return json.dumps([asdict(cfg.magnet), asdict(cfg.attodry2100), asdict(cfg.lakeshore335)], sort_keys=True, default=str)
+        configs = [asdict(cfg.setup)]
+        configs.extend([asdict(cfg.magnet), asdict(cfg.lakeshore335)] if self._backend == "1000"
+                       else [asdict(cfg.attodry2100)] if self._backend == "2100" else [])
+        return json.dumps(configs, sort_keys=True, default=str)
 
     def review_valid(self):
         return self._review is not None and self._review == self._fingerprint()
@@ -110,6 +121,10 @@ class MagnetService(QObject):
     @Property(str, notify=changed)
     def backend(self):
         return self._backend
+
+    magnetEnabled = Property(bool, lambda s: s._backend != "none", constant=True)
+    systemName = Property(str, lambda s: {"1000": "attoDRY1000 / APS100", "2100": "attoDRY2100 / SDK",
+                                         "none": "No magnet · External temperature control"}[s._backend], constant=True)
 
     @Property(bool, notify=changed)
     def reviewed(self):
@@ -119,7 +134,7 @@ class MagnetService(QObject):
     def busy(self):
         return bool(self._closing or self.manualBusy or self._active())
 
-    manualBusy = Property(bool, lambda s: bool(s._pending or getattr(s.lakeshore335, "input_configuration_pending", False) or s.magnet1000.exclusive_owner or getattr(s.magnet2100, "exclusive_owner", None) or s.magnet2100.has_pending_work), notify=changed)
+    manualBusy = Property(bool, lambda s: bool(s._pending or getattr(s.lakeshore335, "input_configuration_pending", False) or getattr(s.magnet1000, "exclusive_owner", None) or getattr(s.magnet2100, "exclusive_owner", None) or getattr(s.magnet2100, "has_pending_work", False)), notify=changed)
     pendingOperations = Property('QVariantList', lambda s: sorted(s._pending), notify=changed)
     temperatureAvailable = Property(bool, lambda s: s._connected["temperature"] if s._backend == "1000" else s._connected["2100"] and bool(getattr(getattr(s._snapshots.get("2100"), "capabilities", None), "sample_temperature_control", False)), notify=changed)
     heatingBlockReason = Property(str, lambda s: s.heating_interlock.heating_block_reason() if s._backend == "1000" else "", notify=changed)
@@ -181,6 +196,8 @@ class MagnetService(QObject):
 
     @Property(str, notify=changed)
     def temperatureStatus(self):
+        if self._setup.temperature_source == "external":
+            return "Temperature controlled externally; no temperature readback"
         def display(value):
             if isinstance(value, (int, float)) and math.isfinite(value):
                 return f"{value:.6g}"
@@ -230,11 +247,14 @@ class MagnetService(QObject):
         m, a, t = cfg.magnet, cfg.attodry2100, cfg.lakeshore335
         def number(value):
             return "not configured" if value is None else f"{value:g}"
+        if self._backend == "none":
+            return "No magnet configured. Temperature is controlled externally."
+        if self._backend == "2100":
+            return (f"2100: {a.host}, channel {a.channel}; field ±{number(a.maximum_field_t)} T; "
+                    f"temperature {number(a.minimum_temperature_k)}–{number(a.maximum_temperature_k)} K.")
         return (f"APS100: {m.visa_resource}; coil {m.coil_constant_t_per_a:g} T/A; "
                 f"control ±{m.safe_control_max_field_t:g} T; current {m.maximum_current_a:g} A; "
                 f"rate {m.maximum_rate_a_per_s:g} A/s; heater warm/cool {m.heater_warm_s:g}/{m.heater_cool_s:g} s.\n"
-                f"2100: {a.host}, channel {a.channel}; field ±{number(a.maximum_field_t)} T; "
-                f"temperature {number(a.minimum_temperature_k)}–{number(a.maximum_temperature_k)} K.\n"
                 f"LS335: {t.visa_resource}; sample channel {t.sample_channel}; "
                 f"temperature {t.sample_minimum_temperature_k:g}–{t.sample_maximum_temperature_k:g} K.")
 
@@ -244,6 +264,8 @@ class MagnetService(QObject):
 
     @Property('QVariantList', notify=fieldsChanged)
     def fields(self):
+        if self._backend == "none":
+            return []
         v = self._values
         maximum = cfg.magnet.safe_control_max_field_t if self._backend == "1000" else min(cfg.attodry2100.maximum_field_t or 6., 6.)
         result = [field("target_field", "Target field (T)", v["target_field"], min=-maximum, max=maximum, group="Magnetic field")]
@@ -335,6 +357,8 @@ class MagnetService(QObject):
 
     @Property(str, notify=changed)
     def summary(self):
+        if self._backend == "none":
+            return self.systemName
         snapshot = self._snapshots.get(self._backend)
         field_t = getattr(snapshot, "field_t", None)
         field_text = f"{field_t:+.6g} T" if isinstance(field_t, (int, float)) and math.isfinite(field_t) else "unavailable"
@@ -348,14 +372,8 @@ class MagnetService(QObject):
 
     @Slot(str)
     def selectBackend(self, backend):
-        if backend not in ("1000", "2100") or self.busy:
-            self._report("Wait for active operations before selecting a temperature system")
-            return
-        self._backend = backend
-        self._auto = False
-        self._confirmation = None
-        self.fieldsChanged.emit()
-        self.changed.emit()
+        if backend != self._backend:
+            self._report("System selection is configured in config.json; restart after changing setup")
 
     @Slot(bool)
     def acknowledgeReview(self, accepted):
@@ -376,6 +394,10 @@ class MagnetService(QObject):
             self._report(str(exc) or "Unknown setting")
 
     def _guard(self, *, connected=True, review=True):
+        if self._backend == "none":
+            raise RuntimeError("No magnet configured; temperature is controlled externally")
+        if cfg.setup != self._setup:
+            raise RuntimeError("Setup configuration changed; restart before operating instruments")
         if self.offline:
             raise RuntimeError("Offline preview: instrument commands are disabled")
         if review and not self.review_valid():
@@ -388,6 +410,8 @@ class MagnetService(QObject):
     @Slot(str)
     def command(self, action):
         try:
+            if self._backend == "none" and action != "clear_log":
+                raise RuntimeError("No magnet configured; temperature is controlled externally")
             if action in ("stop", "heater_off", "temperature_stop"):
                 if self.offline:
                     raise RuntimeError("Offline preview: instrument commands are disabled")
@@ -414,8 +438,7 @@ class MagnetService(QObject):
             self._guard(connected=action not in ("connect", "detect", "connect_temperature", "disconnect_temperature", "temperature"),
                         review=action not in ("refresh", "disconnect", "disconnect_temperature"))
             if action in ("connect", "detect"):
-                targets = ("1000", "2100") if action == "detect" else (self._backend,)
-                self._auto = action == "detect"
+                targets = (self._backend,)
                 for backend in targets:
                     if not self._connected[backend]:
                         try:
@@ -564,14 +587,6 @@ class MagnetService(QObject):
                 self._snapshots.pop("temperature2100", None)
                 self._pending_start_2100 = False
                 self._pending.difference_update(("move2100", "configure_temperature", "stop_temperature"))
-        if self._auto and not self.manualBusy and not self._active():
-            connected_names = [key for key in ("1000", "2100") if self._connected[key]]
-            if len(connected_names) == 1:
-                if self._backend != connected_names[0]:
-                    self._backend = connected_names[0]
-                    self.fieldsChanged.emit()
-            elif len(connected_names) == 2:
-                self._report("Both systems are online; select the intended system")
         self.changed.emit()
 
     def _snapshot(self, name, snapshot):
@@ -658,6 +673,10 @@ class MagnetService(QObject):
         self._notify_readiness()
 
     def is_ready(self):
+        if cfg.setup != self._setup:
+            return False
+        if self._setup.temperature_source == "external":
+            return True
         if (getattr(self.lakeshore335, "input_configuration_pending", False)
                 or "set_current_reversal" in self._pending):
             return False
@@ -670,9 +689,14 @@ class MagnetService(QObject):
                     and time.monotonic() - self._stable_since >= cfg.lakeshore335.sample_stability_dwell_s)
 
     def measurement_settings(self):
+        if self._setup.temperature_source != "ls335":
+            return False, None
         return self._values["wait_temperature"], self._target if not self._control_failed and not self._temperature_pending() and self._control_state is not None else None
 
     def _tick(self):
+        if self._backend == "none":
+            self._notify_readiness()
+            return
         heating_block = self.heatingBlockReason
         if heating_block != self._last_heating_block:
             self._last_heating_block = heating_block
@@ -683,12 +707,6 @@ class MagnetService(QObject):
         self._notify_readiness()
         if not self.offline and self._connected["2100"] and self._backend == "2100" and not self._closing:
             self._poll_2100_temperature()
-        if self._auto and not self.manualBusy and not self._active():
-            online = [key for key in ("1000", "2100") if self._connected[key]]
-            if len(online) == 1 and self._backend != online[0]:
-                self._backend = online[0]
-                self.fieldsChanged.emit()
-                self.changed.emit()
         if self._review is not None and not self.review_valid():
             self._review = None
             # Commissioned field and temperature limits may have changed.
@@ -703,6 +721,8 @@ class MagnetService(QObject):
             self.changed.emit()
 
     def _poll_2100_temperature(self, force=False):
+        if self.magnet2100 is None:
+            return
         capabilities = getattr(self._snapshots.get("2100"), "capabilities", None)
         if getattr(self.magnet2100, "exclusive_owner", None):
             return
@@ -772,7 +792,12 @@ class MagnetService(QObject):
         self.messageRaised.emit(self._message)
 
     def experiment_context_snapshot(self):
-        result = dict(source="cached UI telemetry", scope="run-start conditions; not per-point telemetry", magnet_backend=self._backend)
+        result = dict(source="cached UI telemetry", scope="run-start conditions; not per-point telemetry",
+                      setup=asdict(self._setup), magnet_backend=self._backend,
+                      temperature_source=self._setup.temperature_source)
+        if self._backend == "none":
+            result.update(field_t=None, sample_temperature_k=None, temperature_control="external",
+                          field_status="not measured", temperature_status="not measured")
         result["ls335_inputs"] = dict(inputs=deepcopy(self._input_configurations),
             monotonic_s=self._input_configurations_stamp,
             fresh=self._connected["temperature"] and input_state_fresh(self._input_configurations_stamp))
@@ -802,13 +827,16 @@ class MagnetService(QObject):
 
     def cancelShutdown(self):
         self._closing = False
-        self._timer.start()
+        if self._backend != "none":
+            self._timer.start()
         self.changed.emit()
 
     def close(self):
         self._closing = True
         self._confirmation = None
         self._timer.stop()
-        self.magnet1000.shutdown()
-        self.lakeshore335.shutdown()
-        return self.magnet2100.shutdown()
+        if self.magnet1000 is not None:
+            self.magnet1000.shutdown()
+        if self.lakeshore335 is not None:
+            self.lakeshore335.shutdown()
+        return self.magnet2100.shutdown() if self.magnet2100 is not None else True

@@ -22,7 +22,8 @@ class RuntimeSettings(QObject):
         return [field(s.path, s.label + s.suffix, get_value(self.config, s.path),
                       min=s.minimum, max=s.maximum,
                       group=groups.get(s.path, "Magnet sweep · next measurement"))
-                for s in SPECS.values()]
+                for s in SPECS.values()
+                if s.path == "font_size_pt" or self.config.setup.magnet_backend == "1000"]
 
     @Slot(str, 'QVariant')
     def setValue(self, key, value):

@@ -11,7 +11,7 @@ from PySide6 import QtCore, QtQml, QtWidgets, QtTest
 from PySide6.QtQuickControls2 import QQuickStyle
 from app.quick.application import ApplicationBackend
 from app.quick.plot import register_types
-from utils.config import cfg
+from utils.config import cfg, SetupConfig
 
 
 class QuickApplicationTests(unittest.TestCase):
@@ -22,6 +22,12 @@ class QuickApplicationTests(unittest.TestCase):
 
     def setUp(self):
         self.application = QtWidgets.QApplication.instance()
+        setup = (SetupConfig("2100", "2100") if self._testMethodName in {
+                 "test_close_preserves_owners_until_manual_operation_drains",
+                 "test_optional_commissioning_limits_display_and_invalidate_review"} else SetupConfig())
+        setup_patch = patch.object(cfg, "setup", setup)
+        setup_patch.start()
+        self.addCleanup(setup_patch.stop)
         self.backend = ApplicationBackend(offline=True)
 
     def tearDown(self):
@@ -29,9 +35,11 @@ class QuickApplicationTests(unittest.TestCase):
         for _ in range(20):
             self.application.processEvents()
         if not self.backend.closeAccepted:
-            self.backend._magnet.magnet1000.shutdown()
-            self.backend._magnet.lakeshore335.shutdown()
-            self.backend._magnet.magnet2100.shutdown()
+            for controller in (self.backend._magnet.magnet1000,
+                               self.backend._magnet.lakeshore335,
+                               self.backend._magnet.magnet2100):
+                if controller is not None:
+                    controller.shutdown()
         self.backend.deleteLater()
         self.application.sendPostedEvents(None, QtCore.QEvent.Type.DeferredDelete)
         self.application.processEvents()
@@ -55,6 +63,7 @@ class QuickApplicationTests(unittest.TestCase):
                 pane.setProperty("section", i)
                 self.application.processEvents()
             self.backend._magnet.selectBackend("2100")
+            self.assertEqual(self.backend._magnet.selected_backend(), "1000")
             self.application.processEvents()
             self.backend.dark = True
             self.application.processEvents()
@@ -332,7 +341,7 @@ class QuickApplicationTests(unittest.TestCase):
             self.assertIn("not configured", magnet.reviewDetails)
             magnet.acknowledgeReview(True)
             self.assertTrue(magnet.review_valid())
-            with patch.object(cfg.magnet, "safe_control_max_field_t", cfg.magnet.safe_control_max_field_t / 2):
+            with patch.object(cfg.attodry2100, "maximum_field_t", cfg.attodry2100.maximum_field_t / 2):
                 self.assertFalse(magnet.review_valid())
 
     def test_preview_stop_cannot_call_hardware(self):

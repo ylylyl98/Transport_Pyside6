@@ -14,6 +14,7 @@ from app.devices.attodry2100_adapter import (
 )
 from app.ui.magnet_panel import MagnetPanel
 from app.ui.main_window import MainWindow
+from utils.config import cfg
 from app.ui.sample_temperature_bar import SampleTemperatureBar
 from test_magnet_control import _Fake1000, _Fake2100
 from test_sample_temperature_control_ui import _FakeLakeShoreController, _snapshot
@@ -208,61 +209,54 @@ class TemperatureSystemWindowTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QtWidgets.QApplication.instance()
-        with patch("app.ui.dock.ConnDock._start_scan"):
-            cls.window = MainWindow()
-        cls.window.show()
-        cls.app.processEvents()
+        cls.windows = {}
+        for backend, source in (("1000", "ls335"), ("2100", "2100")):
+            with (patch.object(cfg.setup, "magnet_backend", backend),
+                  patch.object(cfg.setup, "temperature_source", source),
+                  patch("app.ui.dock.ConnDock._start_scan")):
+                cls.windows[backend] = MainWindow()
+                cls.windows[backend].show()
+                cls.app.processEvents()
 
     @classmethod
     def tearDownClass(cls):
-        w = cls.window
-        w.magnet1000.shutdown()
-        w.lakeshore335.shutdown()
-        w.magnet2100.shutdown()
-        w.device_manager.shutdown()
-        w.hide()
-        w.deleteLater()
+        for backend, w in cls.windows.items():
+            if backend == "1000":
+                w.magnet1000.shutdown(); w.lakeshore335.shutdown()
+            else:
+                w.magnet2100.shutdown()
+            w.device_manager.shutdown()
+            w.hide(); w.deleteLater()
         cls.app.sendPostedEvents(None, QtCore.QEvent.Type.DeferredDelete)
         cls.app.processEvents()
 
-    def setUp(self):
-        w = self.window
-        w.magnet_panel.backend_combo.setCurrentIndex(0)
-        w.sample_temperature_bar._on_disconnected()
-        w.sample_temperature_bar.wait_check.setChecked(False)
-        w.magnet_panel._on_disconnected("2100")
-        w._experiment_2100_temperature = None
-        w._update_temperature_summary()
-
-    def test_main_summary_follows_selected_system_without_copying_targets(self):
-        w = self.window
-        bar = w.sample_temperature_bar
+    def test_summaries_use_only_configured_system_telemetry(self):
+        a, b = self.windows["1000"], self.windows["2100"]
+        bar = a.sample_temperature_bar
         bar._on_connected()
         bar._on_control_result(control_state(10))
         bar.on_snapshot(_snapshot(time.monotonic()))
-        w._experiment_2100_temperature = AttoDRY2100TemperatureSnapshot(
+        a._update_temperature_summary()
+        self.assertIn("attoDRY1000 / LS335", a.temperature_summary_label.text())
+        self.assertIn("target: 10.000 K", a.temperature_summary_label.text())
+        b._experiment_2100_temperature = AttoDRY2100TemperatureSnapshot(
             sample_temperature_k=5.5, sample_setpoint_k=6, vti_temperature_k=4.5,
             sample_control_active=True)
-        w.magnet_panel._connected["2100"] = True
-        w._update_temperature_summary()
-        self.assertIn("attoDRY1000 / LS335", w.temperature_summary_label.text())
-        self.assertIn("10.000 K", w.temperature_summary_label.text())
-        w.magnet_panel.backend_combo.setCurrentIndex(1)
-        text = w.temperature_summary_label.text()
-        self.assertIn("attoDRY2100 / SDK", text)
-        self.assertIn("Sample: 5.500 K", text)
-        self.assertIn("target: 6.000 K", text)
-        self.assertIn("VTI: 4.500 K", text)
+        b.magnet_panel._connected["2100"] = True
+        b._update_temperature_summary()
+        text = b.temperature_summary_label.text()
+        for expected in ("attoDRY2100 / SDK", "Sample: 5.500 K", "target: 6.000 K", "VTI: 4.500 K"):
+            self.assertIn(expected, text)
         self.assertNotIn("10.000 K", text)
-        w.magnet_panel.backend_combo.setCurrentIndex(0)
-        self.assertIn("target: 10.000 K", w.temperature_summary_label.text())
+        self.assertEqual(b.magnet_panel.backend_combo.count(), 1)
+        self.assertNotIn("APS100", b.magnet_panel.review_details.text())
 
     def test_stale_and_disconnected_2100_summary_does_not_show_old_readings(self):
-        w = self.window
+        w = self.windows["2100"]
         w.magnet_panel._connected["2100"] = True
         w._experiment_2100_temperature = AttoDRY2100TemperatureSnapshot(
             monotonic_s=time.monotonic() - 20, sample_temperature_k=5.5)
-        w.magnet_panel.backend_combo.setCurrentIndex(1)
+        w._update_temperature_summary()
         self.assertIn("readback stale", w.temperature_summary_label.text())
         self.assertNotIn("5.500", w.temperature_summary_label.text())
         w.magnet2100.disconnected.emit()
@@ -270,13 +264,9 @@ class TemperatureSystemWindowTests(unittest.TestCase):
         self.assertIsNone(w._experiment_2100_temperature)
         self.assertIn("Disconnected", w.temperature_summary_label.text())
 
-    def test_temperature_shortcut_opens_correct_panel_and_moves_existing_control(self):
-        w = self.window
-        self.assertTrue(w.magnet_panel.temp1000_group.isAncestorOf(w.sample_temperature_bar))
-        self.assertFalse(w.centralWidget().isAncestorOf(w.sample_temperature_bar))
-        self.assertFalse(w.temperature_summary.findChildren(QtWidgets.QDoubleSpinBox))
-        for index, group in ((0, w.magnet_panel.temp1000_group), (1, w.magnet_panel.temp_group)):
-            w.magnet_panel.backend_combo.setCurrentIndex(index)
+    def test_temperature_shortcut_opens_configured_panel(self):
+        for backend, w in self.windows.items():
+            group = w.magnet_panel.temp1000_group if backend == "1000" else w.magnet_panel.temp_group
             w.instrument_workspace.pages.setCurrentIndex(0)
             w.instrument_dock.hide()
             w.temperature_controls_button.click()
@@ -287,17 +277,13 @@ class TemperatureSystemWindowTests(unittest.TestCase):
             visible = group.mapTo(scroll.viewport(), group.rect().center())
             self.assertTrue(scroll.viewport().rect().contains(visible))
 
-    def test_measurement_wait_blocks_only_1000_and_survives_switching(self):
-        w = self.window
-        w.sample_temperature_bar.wait_check.setChecked(True)
-        for tab in w._measurement_tabs():
-            self.assertIn("sample_temperature", tab.run_panel._external_start_blocks)
-        w.magnet_panel.backend_combo.setCurrentIndex(1)
-        for tab in w._measurement_tabs():
-            self.assertNotIn("sample_temperature", tab.run_panel._external_start_blocks)
-        w.magnet_panel.backend_combo.setCurrentIndex(0)
-        for tab in w._measurement_tabs():
-            self.assertIn("sample_temperature", tab.run_panel._external_start_blocks)
+    def test_measurement_wait_blocks_only_1000(self):
+        for backend, w in self.windows.items():
+            w.sample_temperature_bar.wait_check.setChecked(True)
+            for tab in w._measurement_tabs():
+                self.assertEqual("sample_temperature" in tab.run_panel._external_start_blocks,
+                                 backend == "1000")
+            w.sample_temperature_bar.wait_check.setChecked(False)
 
 
 if __name__ == "__main__":

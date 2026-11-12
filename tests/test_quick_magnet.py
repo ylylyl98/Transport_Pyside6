@@ -8,7 +8,7 @@ from PySide6.QtCore import QObject, Signal
 from app.quick.magnet import MagnetService
 from app.devices.lakeshore335_adapter import LakeShore335Snapshot
 from app.devices.attodry2100_adapter import AttoDRY2100Snapshot, AttoDRY2100Capabilities
-from utils.config import cfg
+from utils.config import cfg, SetupConfig
 
 
 class Worker(QObject):
@@ -47,11 +47,24 @@ class SDKController(Controller):
 
 class QuickMagnetTests(unittest.TestCase):
     def setUp(self):
+        setup_patch = patch.object(cfg, "setup", SetupConfig("1000", "ls335"))
+        setup_patch.start()
+        self.addCleanup(setup_patch.stop)
         self.aps, self.sdk, self.ls = Controller(), SDKController(), Controller()
         self.service = MagnetService(magnet1000=self.aps, magnet2100=self.sdk, lakeshore=self.ls)
         self.service._timer.stop()
         self.addCleanup(self.service.close)
         self.service.acknowledgeReview(True)
+
+    def sdk_service(self):
+        setup_patch = patch.object(cfg, "setup", SetupConfig("2100", "2100"))
+        setup_patch.start()
+        self.addCleanup(setup_patch.stop)
+        service = MagnetService(magnet2100=self.sdk)
+        service._timer.stop()
+        self.addCleanup(service.close)
+        service.acknowledgeReview(True)
+        return service
 
     def sample(self, status=0, age=0., temperature=4.):
         return LakeShore335Snapshot(temperature, 3.5, status, 0, time.time(), time.monotonic() - age)
@@ -70,8 +83,10 @@ class QuickMagnetTests(unittest.TestCase):
         self.service.setValue("target_field", .2)
         self.assertEqual(changes, [True])
         self.service.selectBackend("2100")
-        self.assertEqual(changes, [True, True])
-        self.assertNotIn("final_mode", [s["key"] for s in self.service.fields])
+        self.assertEqual(changes, [True])
+        self.assertIn("restart", self.service.message)
+        self.assertIn("final_mode", [s["key"] for s in self.service.fields])
+        self.assertIsNone(self.service.magnet2100)
 
     def test_fault_clears_temperature_cache_thermal_permission_and_ready(self):
         self.service._connected["temperature"] = True
@@ -141,15 +156,17 @@ class QuickMagnetTests(unittest.TestCase):
         self.service.command("temperature")
         self.ls.set_sample_control.assert_called_once()
         self.service._pending.clear()
-        self.service.selectBackend("2100")
-        self.service._connected["2100"] = True
-        self.service.command("temperature")
+        sdk_service = self.sdk_service()
+        self.assertIsNone(sdk_service.magnet1000)
+        self.assertIsNone(sdk_service.lakeshore335)
+        sdk_service._connected["2100"] = True
+        sdk_service.command("temperature")
         self.sdk.configure_sample_temperature_async.assert_not_called()
-        self.service._snapshot("2100", AttoDRY2100Snapshot(0., capabilities=AttoDRY2100Capabilities(sample_temperature_control=True)))
-        self.service.command("temperature")
+        sdk_service._snapshot("2100", AttoDRY2100Snapshot(0., capabilities=AttoDRY2100Capabilities(sample_temperature_control=True)))
+        sdk_service.command("temperature")
         self.sdk.configure_sample_temperature_async.assert_called_once()
-        self.service._pending.clear()
-        self.service.command("disconnect_temperature")
+        sdk_service._pending.clear()
+        sdk_service.command("disconnect_temperature")
         self.ls.disconnect_instrument.assert_not_called()
 
     def test_submit_failure_clears_pending_and_requires_new_control_readback(self):
@@ -161,24 +178,27 @@ class QuickMagnetTests(unittest.TestCase):
         self.assertIsNone(self.service.measurement_settings()[1])
 
     def test_sdk_connection_starts_polling_and_capability_temperature_updates(self):
+        service = self.sdk_service()
         self.sdk.connected.emit("SDK")
         self.sdk.set_polling_enabled.assert_called_once_with(True)
-        self.service._backend = "2100"
-        self.service._snapshot("2100", AttoDRY2100Snapshot(0., capabilities=AttoDRY2100Capabilities(sample_temperature_readback=True)))
-        self.service._tick()
+        service._snapshot("2100", AttoDRY2100Snapshot(0., capabilities=AttoDRY2100Capabilities(sample_temperature_readback=True)))
+        service._tick()
         self.sdk.read_temperature_snapshot_async.assert_called_once()
-        self.service._tick()
+        service._tick()
         self.sdk.read_temperature_snapshot_async.assert_called_once()
 
     def test_stop_cancels_unissued_sdk_start_and_does_not_turn_sample_heater_off(self):
-        self.service._connected.update({"1000": True, "2100": True, "temperature": True})
-        self.service._pending_start_2100 = True
+        self.service._connected.update({"1000": True, "temperature": True})
         self.service.request_stop()
-        self.service._operation2100("setpoint", True, None)
-        self.sdk.start_field_control_async.assert_not_called()
         self.aps.pause.assert_called_once()
-        self.sdk.request_stop.assert_called_once()
         self.ls.heater_off.assert_not_called()
+        service = self.sdk_service()
+        service._connected["2100"] = True
+        service._pending_start_2100 = True
+        service.request_stop()
+        service._operation2100("setpoint", True, None)
+        self.sdk.start_field_control_async.assert_not_called()
+        self.sdk.request_stop.assert_called_once()
 
     def test_periodic_old_readback_cannot_hide_failed_temperature_apply(self):
         self.service._values["wait_temperature"] = True

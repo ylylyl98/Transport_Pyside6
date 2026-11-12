@@ -259,7 +259,8 @@ class ApplicationBackend(QObject):
             self._magnet.lakeshore335.heater_off()
         self._instruments.manager.emergency_stop()
         self._magnet.request_stop()
-        self.report("Stop requested. Voltage ramps and magnet pause are awaiting instrument confirmation; this does not zero magnetic field.")
+        self.report("Stop requested. Voltage ramps and magnet pause are awaiting instrument confirmation; this does not zero magnetic field."
+                    if self._magnet.magnetEnabled else "Stop requested. Waiting for electrical output cleanup.")
 
     @Slot(QUrl)
     def setDataFolder(self, url):
@@ -343,7 +344,7 @@ class ApplicationBackend(QObject):
                 if not self._measurement.prepare_shutdown():
                     return
                 if not self._prepared_2100:
-                    if not self._magnet.magnet2100.prepare_shutdown():
+                    if self._magnet.magnet2100 is not None and not self._magnet.magnet2100.prepare_shutdown():
                         raise RuntimeError("attoDRY2100 Stop was not confirmed. Keep the application open and retry Stop / pause.")
                     self._prepared_2100 = True
                 if self._magnet.manualBusy:
@@ -356,10 +357,12 @@ class ApplicationBackend(QObject):
                     QTimer.singleShot(100, self._retry_close)
                     return
                 self._instruments.manager.shutdown()
-                if self._magnet.magnet2100.shutdown() is False:
+                if self._magnet.magnet2100 is not None and self._magnet.magnet2100.shutdown() is False:
                     raise RuntimeError("attoDRY2100 safe shutdown was not confirmed")
-                self._magnet.magnet1000.shutdown()
-                self._magnet.lakeshore335.shutdown()
+                if self._magnet.magnet1000 is not None:
+                    self._magnet.magnet1000.shutdown()
+                if self._magnet.lakeshore335 is not None:
+                    self._magnet.lakeshore335.shutdown()
                 self._magnet._timer.stop()
                 self._instruments.close()
                 self._lockin.close()
@@ -427,6 +430,8 @@ def main(argv=None):
         app.processEvents()
         raise RuntimeError("Qt Quick interface failed to load: " + "\n".join(errors))
     window = engine.rootObjects()[0]
+    from app.source_runtime import register_window
+    register_window(window)
     pane = window.findChild(QObject, "instrumentPane")
     if args.panel is not None or args.preview:
         pane.setProperty("section", args.panel if args.panel is not None else int(backend.preference("previewPanel", 0)))

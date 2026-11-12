@@ -110,6 +110,8 @@ cd Transport_Pyside6
 .\Transport_App.bat
 ```
 
+首次启动（包括双击 `Transport_App.bat`）会创建或修复桌面的源码快捷方式。后续启动仅在仓库满足安全更新条件时检查更新；详见 [Windows 源码启动说明（英文）](docs/source-launcher.md)。
+
 根目录启动器创建或复用 `.venv`，按需安装固定版本的
 [requirements.txt](requirements.txt)，并在相关内容变化后执行隔离启动检查。
 开发使用正式根目录；工具和备份目录不作为替代启动位置。

@@ -26,13 +26,14 @@ class MagnetPanel(QtWidgets.QWidget):
     backend_changed = QtCore.Signal(str)
 
     def __init__(self, magnet1000, magnet2100, parent=None, lakeshore335=None, thermal_safety=None,
-                 *, sample_temperature_control=None):
+                 *, sample_temperature_control=None, configured_backend=None):
         super().__init__(parent)
         self.magnet1000 = magnet1000
         self.magnet2100 = magnet2100
         self.lakeshore335 = lakeshore335
         self.thermal_safety = thermal_safety
         self.sample_temperature_control = sample_temperature_control
+        self._configured_backend = configured_backend
         self._backend = "1000"
         self._connected = {"1000": False, "2100": False}
         self.auto_selection_allowed = None
@@ -70,7 +71,9 @@ class MagnetPanel(QtWidgets.QWidget):
         self._refresh_timeout_timer.timeout.connect(self._on_refresh_timeout)
         self._build_ui()
         self._connect_signals()
-        self._select_backend(0)
+        if configured_backend in ("1000", "2100"):
+            self.backend_combo.setCurrentIndex(self.backend_combo.findData(configured_backend))
+        self._select_backend(self.backend_combo.currentIndex())
         self._reconcile_auto_system()
         self._auto_selection_timer = QtCore.QTimer(self)
         self._auto_selection_timer.setInterval(500)
@@ -84,8 +87,10 @@ class MagnetPanel(QtWidgets.QWidget):
         selector_row = QtWidgets.QHBoxLayout()
         selector_row.addWidget(QtWidgets.QLabel("System"))
         self.backend_combo = SafeComboBox()
-        self.backend_combo.addItem("attoDRY1000 (APS100)", "1000")
-        self.backend_combo.addItem("attoDRY2100 (SDK)", "2100")
+        if self._configured_backend in (None, "1000", "none"):
+            self.backend_combo.addItem("attoDRY1000 (APS100)", "1000")
+        if self._configured_backend in (None, "2100"):
+            self.backend_combo.addItem("attoDRY2100 (SDK)", "2100")
         self.backend_combo.currentIndexChanged.connect(self._on_backend_selection_changed)
         self.backend_combo.activated.connect(lambda *_: self.auto_system_check.setChecked(False))
         selector_row.addWidget(self.backend_combo, 1)
@@ -129,6 +134,10 @@ class MagnetPanel(QtWidgets.QWidget):
                       if cfg.attodry2100.maximum_temperature_k is not None else "unset"),
             )
         )
+        if self._configured_backend in ("1000", "2100"):
+            lines = self.review_details.text().split("\n")
+            self.review_details.setText(lines[0] if self._configured_backend == "1000" else lines[-1])
+            self.auto_system_check.hide()
         self.review_details.setWordWrap(True)
         self.review_details.setStyleSheet("color: #777; font-size: 10px;")
         root.addWidget(self.review_details)
@@ -143,8 +152,11 @@ class MagnetPanel(QtWidgets.QWidget):
         buttons.addWidget(self.connect_button)
         buttons.addWidget(self.disconnect_button)
         conn_form.addRow("", buttons)
-        self.detect_system_button = QtWidgets.QPushButton("Detect && connect system")
+        self.detect_system_button = QtWidgets.QPushButton(
+            "Connect configured system" if self._configured_backend else "Detect && connect system")
         self.detect_system_button.setToolTip(
+            "Try the selected configured connection. Successful connections stay open; "
+            "temperature/field setpoints are not applied." if self._configured_backend else
             "Try the configured APS100 VISA resource and 2100 SDK endpoint. "
             "Successful connections stay open; temperature/field setpoints are not applied.")
         self.detect_system_button.clicked.connect(self._detect_system)
@@ -538,6 +550,9 @@ class MagnetPanel(QtWidgets.QWidget):
         return bool(self._reviewed and self._review_fingerprint == self._configuration_fingerprint())
 
     def _select_backend(self, index: int):
+        if self._configured_backend in ("1000", "2100") and self.backend_combo.itemData(index) != self._configured_backend:
+            self.backend_combo.setCurrentIndex(self.backend_combo.findData(self._configured_backend))
+            return
         self._backend = str(self.backend_combo.itemData(index) or "1000")
         aps = self._backend == "1000"
         self.aps_group.setVisible(aps)
@@ -618,7 +633,8 @@ class MagnetPanel(QtWidgets.QWidget):
             self._guard_message()
             return
         self._connection_errors.clear()
-        self._detect_pending = {key for key, connected in self._connected.items() if not connected}
+        self._detect_pending = {key for key, connected in self._connected.items()
+                                if not connected and (self._configured_backend is None or key == self._configured_backend)}
         # Register both requests before either controller can complete synchronously.
         self._aps_connect_pending = "1000" in self._detect_pending
         self._sdk_connect_pending = "2100" in self._detect_pending
@@ -1203,7 +1219,7 @@ class MagnetPanel(QtWidgets.QWidget):
         if self._backend == "1000":
             busy = busy or self._aps_exclusive
         busy = busy or bool(getattr(self.magnet2100, "exclusive_owner", None))
-        self.backend_combo.setEnabled(not busy)
+        self.backend_combo.setEnabled(not busy and self._configured_backend is None)
         detecting = bool(self._detect_pending)
         self.detect_system_button.setEnabled(
             not detecting and not self._aps_connect_pending and not self._sdk_connect_pending

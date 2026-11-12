@@ -49,6 +49,9 @@ class RuntimeSettingsDialog(QtWidgets.QDialog):
         self.availability.setWordWrap(True)
         next_form.addRow(self.availability)
         layout.addWidget(next_run)
+        if getattr(getattr(config, "setup", None), "magnet_backend", "1000") != "1000":
+            next_run.hide()
+            intro.setText("Appearance applies immediately. Saved values survive restart.")
         boundaries = QtWidgets.QLabel(
             "Reconnect one device: change addresses or Keithley mode in Devices. "
             "Use the existing protection controls for voltage/current limits.\n"

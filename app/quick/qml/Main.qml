@@ -111,13 +111,14 @@ ApplicationWindow {
                         text: window.width < 1000 ? "STOP / ZERO VOLTAGES" : "STOP ALL / ZERO VOLTAGES"
                         font.bold: true
                         Accessible.name: "Stop all measurements and ramp voltages to zero"
-                        Accessible.description: "Requests safe voltage ramps and magnet pause. Magnetic field is not zeroed."
+                        Accessible.description: window.backend.magnet.magnetEnabled ? "Requests safe voltage ramps and magnet pause. Magnetic field is not zeroed." : "Requests safe electrical output cleanup."
                         ToolTip.visible: hovered
-                        ToolTip.text: "Requests safe voltage ramps and magnet pause. Does not zero magnetic field."
+                        ToolTip.text: window.backend.magnet.magnetEnabled ? "Requests safe voltage ramps and magnet pause. Does not zero magnetic field." : "Requests safe electrical output cleanup."
                         onClicked: window.backend.emergencyStop()
                     }
                     Label {
                         objectName: "stopFieldNotice"
+                        visible: window.backend.magnet.magnetEnabled
                         text: "Magnetic field is not zeroed"
                         color: Theme.muted
                         font.pointSize: Theme.captionPointSize
@@ -263,6 +264,8 @@ ApplicationWindow {
                     Accessible.name: "Measurement mode"
                     background: Rectangle { color: Theme.surface }
                     property bool navigationReady: false
+                    readonly property var availableModes: window.backend.measurement.availableModes
+                    function indexForMode(mode) { return availableModes.findIndex(item => item.id === mode) }
                     readonly property real naturalWidth: {
                         let total = 0
                         for (let i = 0; i < count; ++i) total += itemAt(i).implicitWidth
@@ -272,28 +275,29 @@ ApplicationWindow {
                         measurementTabsView.positionViewAtIndex(currentIndex, ListView.Contain)
                     }
                     function focusCurrent() {
-                        const tab = itemAt(window.backend.measurement.mode)
+                        const tab = itemAt(indexForMode(window.backend.measurement.mode))
                         if (tab) tab.forceActiveFocus()
                         else forceActiveFocus()
                     }
                     Component.onCompleted: {
-                        setCurrentIndex(window.backend.measurement.mode)
+                        setCurrentIndex(indexForMode(window.backend.measurement.mode))
                         navigationReady = true
                         Qt.callLater(revealCurrent)
                     }
                     onCurrentIndexChanged: {
                         if (!navigationReady) return
-                        if (enabled && currentIndex !== window.backend.measurement.mode)
-                            window.backend.measurement.mode = currentIndex
+                        const selected = availableModes[currentIndex]
+                        if (enabled && selected && selected.id !== window.backend.measurement.mode)
+                            window.backend.measurement.mode = selected.id
                         // A rejected request must never leave a different tab selected.
-                        if (currentIndex !== window.backend.measurement.mode)
-                            setCurrentIndex(window.backend.measurement.mode)
+                        if (currentIndex !== indexForMode(window.backend.measurement.mode))
+                            setCurrentIndex(indexForMode(window.backend.measurement.mode))
                         Qt.callLater(revealCurrent)
                     }
                     Connections {
                         target: window.backend.measurement
                         function onModeChanged() {
-                            measurementMode.setCurrentIndex(window.backend.measurement.mode)
+                            measurementMode.setCurrentIndex(measurementMode.indexForMode(window.backend.measurement.mode))
                             Qt.callLater(measurementMode.revealCurrent)
                         }
                     }
@@ -310,13 +314,14 @@ ApplicationWindow {
                         onContentWidthChanged: Qt.callLater(measurementMode.revealCurrent)
                     }
                     Repeater {
-                        model: window.backend.measurement.modes
+                        model: measurementMode.availableModes
                         NavigationTabButton {
                             required property int index
                             required property var modelData
-                            objectName: "measurementTab" + index
+                            objectName: "measurementTab" + modelData.id
                             width: implicitWidth
                             text: modelData.title
+                            onClicked: window.backend.measurement.mode = modelData.id
                         }
                     }
                 }

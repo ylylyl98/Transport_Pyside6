@@ -6,13 +6,16 @@ from unittest.mock import patch
 from PySide6 import QtCore, QtTest, QtWidgets
 from app.ui.main_window import MainWindow
 from app.app_identity import configure_qapp
+from utils.config import cfg
 
 
 class PySide6StartupTests(unittest.TestCase):
     def test_window_draws_plots_and_closes_without_connections(self):
         app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
         configure_qapp(app)
-        with patch("app.ui.dock.ConnDock._start_scan"):
+        with (patch("app.ui.dock.ConnDock._start_scan"),
+              patch.object(cfg.setup, "magnet_backend", "1000"),
+              patch.object(cfg.setup, "temperature_source", "ls335")):
             window = MainWindow()
             try:
                 window.show()
@@ -36,7 +39,7 @@ class PySide6StartupTests(unittest.TestCase):
                 # Exercise real thread teardown without bypassing that safety gate.
                 window.magnet1000.shutdown()
                 window.lakeshore335.shutdown()
-                self.assertTrue(window.magnet2100.shutdown())
+                self.assertFalse(hasattr(window.magnet2100, "_thread"))
                 window.device_manager.shutdown()
                 self.assertFalse(window.magnet1000._thread.isRunning())
                 self.assertFalse(window.lakeshore335._thread.isRunning())

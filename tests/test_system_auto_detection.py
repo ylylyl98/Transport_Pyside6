@@ -244,28 +244,27 @@ class SystemAutoDetectionTests(unittest.TestCase):
 
 
 class SystemDetectionMeasurementTests(unittest.TestCase):
-    def test_window_holds_system_selection_until_running_measurement_finishes(self):
+    def test_window_keeps_configured_system_during_measurement(self):
         app = QtWidgets.QApplication.instance()
-        with patch("app.ui.dock.ConnDock._start_scan"):
+        with (patch.object(cfg.setup, "magnet_backend", "2100"),
+              patch.object(cfg.setup, "temperature_source", "2100"),
+              patch("app.ui.dock.ConnDock._start_scan")):
             w = MainWindow()
-        try:
-            w.tab_dual.run_panel.set_running(True)
-            self.assertFalse(w.magnet_panel.detect_system_button.isEnabled())
-            w.magnet_panel._on_connected("2100", SDK)
-            w.magnet_panel._temp_timer.stop()
-            self.assertEqual(w.magnet_panel._backend, "1000")
-            self.assertEqual(w.magnet_panel._deferred_auto_backend, "2100")
-            self.assertFalse(w.magnet_panel.detect_system_button.isEnabled())
-            w.tab_dual.run_panel.set_running(False)
-            w.magnet_panel._retry_auto_selection()
-            self.assertEqual(w.magnet_panel._backend, "2100")
-            self.assertIn("attoDRY2100 / SDK", w.temperature_summary_label.text())
-        finally:
-            w.magnet1000.shutdown()
-            w.lakeshore335.shutdown()
-            w.magnet2100.shutdown()
-            w.device_manager.shutdown()
-            w.hide()
-            w.deleteLater()
-            app.sendPostedEvents(None, QtCore.QEvent.Type.DeferredDelete)
-            app.processEvents()
+            try:
+                self.assertEqual(w.magnet_panel.backend_combo.count(), 1)
+                self.assertEqual(w.magnet_panel._backend, "2100")
+                self.assertFalse(hasattr(w.magnet1000, "_thread"))
+                self.assertFalse(hasattr(w.lakeshore335, "_thread"))
+                self.assertIn("attoDRY2100 / SDK", w.temperature_summary_label.text())
+                self.assertIn("Disconnected", w.temperature_summary_label.text())
+                w.tab_dual.run_panel.set_running(True)
+                self.assertFalse(w.magnet_panel.detect_system_button.isEnabled())
+                w.tab_dual.run_panel.set_running(False)
+                self.assertEqual(w.magnet_panel._backend, "2100")
+            finally:
+                w.magnet2100.shutdown()
+                w.device_manager.shutdown()
+                w.hide()
+                w.deleteLater()
+                app.sendPostedEvents(None, QtCore.QEvent.Type.DeferredDelete)
+                app.processEvents()

@@ -14,7 +14,7 @@ python transport_UI.py
 
 `main.py` is an equivalent direct entry point. On Windows, double-clicking [`Transport_App.bat`](../Transport_App.bat) creates and reuses a project-local `.venv`, checks the pinned `requirements.txt` locally, and installs dependencies only when needed. It runs a hardware-blocked offscreen startup check after source or environment changes, reuses a matching successful check, and launches the UI. The project shortcut also runs this launcher so dependency setup is not skipped. Python must be available on `PATH` for the first launch. An incompatible existing environment is preserved and reported; the launcher does not delete it.
 
-The launcher also creates/repairs `Transport_App - Shortcut.lnk` in the project folder. This shortcut runs Transport_App.bat to check dependencies before starting the UI, uses the bundled `assets/transport.ico`, and shares the application's Windows taskbar identity. Use it for subsequent launches and taskbar pinning. After moving the checkout, run `Transport_App.bat` again to refresh its paths. To repair only the shortcut without starting the app, run `powershell -NoProfile -ExecutionPolicy RemoteSigned -File .\tools\Update-TransportShortcut.ps1`. This execution-policy setting applies only to that PowerShell process. If an old taskbar pin still shows a generic icon, unpin it and pin the repaired shortcut again. Restart the app when convenient to apply window-icon changes; reloading analysis applies them to the history viewer only.
+The launcher creates or repairs a checkout-specific **Transport Measurement (Source - <id>)** shortcut on the current user desktop. It runs `tools/Start-Transport.ps1`, which checks for an existing instance and, when safe, updates the checkout before starting the app. Source and installed releases have different Windows taskbar identities. Pin the running Source window to use the same entry point from the taskbar. After moving the checkout, rerun `Transport_App.bat` and replace the old taskbar pin. To repair only the shortcut without launching the app, run `powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\Update-TransportShortcut.ps1`. See [Windows source launcher](source-launcher.md) for update conditions, logs, and pinning details.
 
 The launcher reuses a successful offline startup check only when source and environment match. Set `TRANSPORT_VALIDATE_STARTUP=1` to force a fresh preflight. The startup checks block hardware and use an offscreen UI; they do not replace instrument acceptance.
 
@@ -23,7 +23,7 @@ The launcher reuses a successful offline startup check only when source and envi
 ```text
 00_启动说明.txt          Quick Chinese guide to the correct launcher and folders
 Transport_App.bat       Normal Windows measurement launcher
-Transport_App - Shortcut.lnk  Local shortcut to the same launcher
+tools/Start-Transport.ps1  Source update and launch entry point
 app/                    PySide6 UI, application models, workers, and device manager
 app/quick/              Qt Quick presenters, native plotting and QML views
 app/ui/tabs/            Retained Widgets measurement tabs for --widgets fallback

@@ -7,6 +7,7 @@ from datetime import datetime
 
 from PySide6 import QtCore, QtWidgets
 
+from utils.config import cfg
 from app.engine.gate_scan_field_batch import GateScanFieldBatch
 from app.gate_scan_summary import format_gate_scan_condition
 from app.models import GateScanCondition
@@ -781,6 +782,9 @@ class BFieldGateScanTab(GateScanTab):
         self._update_connection_hint()
 
     def start_series(self):
+        if cfg.setup.magnet_backend != "1000":
+            self._show_series_error("B-field batch requires the configured attoDRY1000")
+            return
         if self._bfield_orchestrator is not None and self._bfield_orchestrator.active:
             self._bfield_orchestrator.continue_after_temperature_check()
             return
@@ -804,6 +808,9 @@ class BFieldGateScanTab(GateScanTab):
         self._bfield_orchestrator.start(self.bfield_fields.text())
 
     def resume_series(self):
+        if cfg.setup.magnet_backend != "1000" or self._bfield_backend != "1000":
+            self._show_series_error("B-field batch requires the configured attoDRY1000")
+            return
         if self._bfield_orchestrator is None or self._bfield_orchestrator.active:
             return
         if self._editor_is_modified():

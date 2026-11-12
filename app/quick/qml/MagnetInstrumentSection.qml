@@ -25,11 +25,10 @@ ColumnLayout {
     ColumnLayout {
         Layout.fillWidth: true; spacing: 6
         Label { text: "Selected system"; color: Theme.muted; Layout.fillWidth: true }
-        SelectBox { Accessible.name: "Selected magnet and temperature system"; model: ["attoDRY1000 / APS100", "attoDRY2100 / SDK"]; currentIndex: section.magnet.backend === "1000" ? 0 : 1; enabled: !section.magnet.busy; wheelEnabled: false; Layout.fillWidth: true; onActivated: section.magnet.selectBackend(index === 0 ? "1000" : "2100") }
+        Label { Accessible.name: "Configured magnet and temperature system"; text: section.magnet.systemName; color: Theme.text; Layout.fillWidth: true }
         Flow {
             Layout.fillWidth: true; spacing: 6
-            ActionButton { text: "Detect && connect"; enabled: !section.magnet.busy; onClicked: section.magnet.command("detect") }
-            ActionButton { tone: "primary"; text: "Connect selected"; enabled: !section.magnet.busy; onClicked: section.magnet.command("connect") }
+            ActionButton { tone: "primary"; text: "Connect"; enabled: !section.magnet.busy; onClicked: section.magnet.command("connect") }
             ActionButton { text: "Disconnect"; enabled: !section.magnet.busy; onClicked: section.magnet.command("disconnect") }
             ActionButton { text: "Read status"; enabled: !section.magnet.busy; onClicked: section.magnet.command("refresh") }
         }

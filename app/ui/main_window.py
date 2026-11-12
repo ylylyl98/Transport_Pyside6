@@ -24,6 +24,7 @@ from app.ui.instrument_workspace import InstrumentWorkspace
 from app.ui.measurement_workflow import MeasurementWorkflow
 from app.ui.lockin_panel import LockinPanel
 from app.ui.magnet_panel import MagnetPanel
+from app.ui.unavailable_controller import UnavailableController
 from app.ui.style_manager import apply_app_style, install_style_reload
 from app.ui.workspace_state import save_workspace, restore_workspace, reset_workspace
 from utils.config import cfg
@@ -69,29 +70,33 @@ class MainWindow(QtWidgets.QMainWindow):
         self._runtime_settings_dialog = None
         self._last_measurement_page = "Vds Sweep"
 
-        # One owner per physical magnet system for the lifetime of the window.
-        # Controllers start worker threads but do not open hardware until the
-        # operator passes the panel's commissioning review gate.
-        self.magnet1000 = MagnetController(parent=self)
-        self.magnet2100 = AttoDRY2100Controller(config=cfg.attodry2100, parent=self)
+        cfg.setup.validate()
+        self.setup_backend = cfg.setup.magnet_backend
+        self.magnet1000 = (MagnetController(parent=self) if self.setup_backend == "1000"
+                           else UnavailableController(self))
+        self.magnet2100 = (AttoDRY2100Controller(config=cfg.attodry2100, parent=self)
+                           if self.setup_backend == "2100" else UnavailableController(self))
         self._experiment_2100_field = None
         self._experiment_2100_temperature = None
         self.magnet2100.snapshot_updated.connect(lambda value: setattr(self, "_experiment_2100_field", value))
         self.magnet2100.temperature_updated.connect(lambda value: setattr(self, "_experiment_2100_temperature", value))
         self.magnet2100.disconnected.connect(lambda: setattr(self, "_experiment_2100_temperature", None))
-        # The 1000 uses LS335 for sample control and thermal monitoring.
-        # The 2100 uses its own SDK temperature controller.
-        self.lakeshore335 = LakeShore335Controller(parent=self, interlock=self.magnet1000.heating_interlock)
+        self.lakeshore335 = (LakeShore335Controller(parent=self, interlock=self.magnet1000.heating_interlock)
+                             if self.setup_backend == "1000" else UnavailableController(self))
         self.thermal_safety = ThermalSafetyEvaluator(cfg.lakeshore335)
-        self.magnet1000._worker.thermal_source = self.thermal_safety
-        self.magnet1000._worker.thermal_field_updated.connect(self.thermal_safety.note_magnet_snapshot)
-        self.magnet1000.snapshot_updated.connect(self.thermal_safety.note_magnet_snapshot)
-        self.magnet1000.disconnected.connect(lambda: self.thermal_safety.note_magnet_snapshot(None))
+        if self.setup_backend == "1000":
+            self.magnet1000._worker.thermal_source = self.thermal_safety
+            self.magnet1000._worker.thermal_field_updated.connect(self.thermal_safety.note_magnet_snapshot)
+            self.magnet1000.snapshot_updated.connect(self.thermal_safety.note_magnet_snapshot)
+            self.magnet1000.disconnected.connect(lambda: self.thermal_safety.note_magnet_snapshot(None))
         self.sample_temperature_bar = SampleTemperatureBar(
             self.lakeshore335, cfg.lakeshore335, self, save_config=cfg.save, compact=True)
         self.magnet_panel = MagnetPanel(
             self.magnet1000, self.magnet2100, self, self.lakeshore335, self.thermal_safety,
-            sample_temperature_control=self.sample_temperature_bar)
+            sample_temperature_control=self.sample_temperature_bar, configured_backend=self.setup_backend)
+        if self.setup_backend == "none":
+            self.magnet_panel._backend = "none"
+            self.magnet_panel._connected["none"] = False
         self.conn_dock = ConnDock()
         self.conn_dock.load_settings()
         self.conn_dock.stop_requested.connect(self.on_emergency_stop)
@@ -182,7 +187,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tab_bfield_gate_scan = BFieldGateScanTab(self.save_root, self.connections, self.device_manager, get_global_rates_callable=self.conn_dock.get_rates, get_ao_items_callable=self.tab_dual.get_ao_items_if_available, get_signal_chain_callable=self.signal_chain_snapshot)
         self.tab_bfield_transport = BFieldTransportTab(self.save_root, self.connections, self.device_manager, get_global_rates_callable=self.conn_dock.get_rates, get_signal_chain_callable=self.signal_chain_snapshot)
         self.bfield_transport_controller = BFieldTransportRouter(
-            self.magnet1000, self.magnet2100, self.tab_bfield_transport, self.device_manager,
+            self.magnet1000 if self.setup_backend == "1000" else None,
+            self.magnet2100 if self.setup_backend == "2100" else None,
+            self.tab_bfield_transport, self.device_manager,
             thermal_safety=self.thermal_safety, parent=self,
             selected_backend_callable=lambda: self.magnet_panel._backend,
             review_valid_callable=self.magnet_panel._review_valid,
@@ -236,8 +243,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tab_bfield_gate_scan.set_batch_magnet_context(self.magnet_panel._backend)
         self.tabs.addTab(self.tab_dual, "Vds Sweep")
         self.tabs.addTab(self.tab_gate_scan, "Gate Scan")
-        self.tabs.addTab(self.tab_bfield_gate_scan, "B-field Gate Scan")
-        self.tabs.addTab(self.tab_bfield_transport, "B-field Sweep")
+        if self.setup_backend == "1000":
+            self.tabs.addTab(self.tab_bfield_gate_scan, "B-field Gate Scan")
+        if self.setup_backend != "none":
+            self.tabs.addTab(self.tab_bfield_transport, "B-field Sweep")
+        else:
+            self.temperature_summary.hide()
+            self.instrument_workspace.pages.setTabVisible(1, False)
+            for tab in (self.tab_gate_scan, self.tab_bfield_gate_scan):
+                if tab.exp_bfield_batch is not None:
+                    tab.exp_bfield_batch.hide()
+            for tab in (self.tab_bfield_gate_scan, self.tab_bfield_transport):
+                tab.run_panel.set_start_blocked("setup", True)
         self.tabs.addTab(self.tab_cosweep, "2D Map")
         self.tabs.addTab(self.tab_photocurrent, "Photocurrent")
         self.tab_curve_compare = HistoryViewerLauncher(
@@ -587,7 +604,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         context = {"captured_at": timestamp(), "source": "cached application telemetry",
                    "scope": "run-start conditions; not per-point telemetry",
-                   "magnet_backend": getattr(self.magnet_panel, "_backend", None),
+                   "magnet_backend": self.setup_backend,
+                   "temperature_source": cfg.setup.temperature_source,
                    "device_states": dict(self.device_manager.states),
                    "ls335_input_configurations": deepcopy(getattr(self.lakeshore335, "input_configurations", None)),
                    "ls335_input_configurations_monotonic_s": getattr(self.lakeshore335, "input_configurations_monotonic_s", None)}
@@ -701,7 +719,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tab_bfield_transport.stop_run()
         # Stop field control before a Keithley cleanup can fail. This owner
         # acknowledgement does not disconnect the SDK or destroy its thread.
-        if not self.magnet2100.prepare_shutdown():
+        if self.setup_backend == "2100" and not self.magnet2100.prepare_shutdown():
             if controller is not None:
                 controller.cancel_shutdown_preparation()
             QtWidgets.QMessageBox.critical(
@@ -732,7 +750,7 @@ class MainWindow(QtWidgets.QMainWindow):
             cancel_pending_install()
             event.ignore()
             return
-        safe_2100 = self.magnet2100.shutdown()
+        safe_2100 = self.magnet2100.shutdown() if self.setup_backend == "2100" else None
         if safe_2100 is False:
             if controller is not None:
                 controller.cancel_shutdown_preparation()
@@ -745,8 +763,9 @@ class MainWindow(QtWidgets.QMainWindow):
             cancel_pending_install()
             event.ignore()
             return
-        self.magnet1000.shutdown()
-        self.lakeshore335.shutdown()
+        if self.setup_backend == "1000":
+            self.magnet1000.shutdown()
+            self.lakeshore335.shutdown()
         self.png_coordinator.shutdown()
         self.png_exporter.shutdown()
         self._png_close_pending = True
@@ -854,8 +873,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.device_manager.emergency_stop()
         # Keep this path synchronous only in the sense of issuing requests;
         # both controllers perform hardware work on their dedicated threads.
-        self.magnet1000.pause()
-        self.magnet2100.request_stop()
+        if self.setup_backend == "1000":
+            self.magnet1000.pause()
+        elif self.setup_backend == "2100":
+            self.magnet2100.request_stop()
 
         msg = "Stop signal sent to all workers.\n\n"
         msg += "Safe ramp started:\n"

@@ -14,6 +14,7 @@ from app.devices.attodry2100_adapter import (
 )
 from app.keithley_modes import KEITHLEY_MODE_VOLTAGE_2W
 from app.ui.main_window import MainWindow
+from utils.config import cfg
 
 
 class Recoverable2100Adapter:
@@ -91,6 +92,9 @@ class MainWindowShutdownRecoveryTests(unittest.TestCase):
         cls.app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
     def setUp(self):
+        self.backend_patch = patch.object(cfg.setup, "magnet_backend", "2100")
+        self.source_patch = patch.object(cfg.setup, "temperature_source", "2100")
+        self.backend_patch.start(); self.source_patch.start()
         self.window = MainWindow()
         self.sdk = Recoverable2100Adapter()
         self.window.magnet2100._owner.adapter_factory = lambda _config: self.sdk
@@ -102,14 +106,13 @@ class MainWindowShutdownRecoveryTests(unittest.TestCase):
         gate = manager.sessions.get("g1")
         if isinstance(gate, RecoverableGate):
             gate.fail_zero = False
-        self.window.magnet1000.shutdown()
-        self.window.lakeshore335.shutdown()
         self.window.magnet2100.shutdown(1.0)
         manager.shutdown()
         self.window.png_coordinator.shutdown()
         self.window.png_exporter.shutdown()
         self.window.deleteLater()
         self.app.processEvents()
+        self.source_patch.stop(); self.backend_patch.stop()
 
     def wait_for(self, predicate):
         deadline = time.monotonic() + 2.0
@@ -121,15 +124,10 @@ class MainWindowShutdownRecoveryTests(unittest.TestCase):
         self.fail("Expected controller acknowledgement did not arrive")
 
     def assert_other_controllers_can_connect(self):
-        window = self.window
-        self.assertTrue(window.magnet1000._thread.isRunning())
-        self.assertTrue(window.lakeshore335._thread.isRunning())
-        connected = set()
-        window.magnet1000.connected.connect(lambda *_: connected.add("aps"))
-        window.lakeshore335.connected.connect(lambda *_: connected.add("ls335"))
-        window.magnet1000.connect_instrument(use_mock=True)
-        window.lakeshore335.connect_instrument(use_mock=True)
-        self.wait_for(lambda: connected == {"aps", "ls335"})
+        # This setup has no APS100 or LS335 owner; the SDK owner remains alive.
+        self.assertFalse(hasattr(self.window.magnet1000, "_thread"))
+        self.assertFalse(hasattr(self.window.lakeshore335, "_thread"))
+        self.assertTrue(self.window.magnet2100._thread.isRunning())
 
     def assert_device_manager_can_reconnect(self):
         manager = self.window.device_manager
@@ -147,11 +145,8 @@ class MainWindowShutdownRecoveryTests(unittest.TestCase):
         window.magnet2100.connect_async().result(1.0)
         self.app.processEvents()
         self.sdk.fail_close = True
-        window.bfield_transport_controller._engines["1000"]._shutdown_complete = True
         event = QtGui.QCloseEvent()
-        with patch("app.ui.main_window.QtWidgets.QMessageBox.critical",
-                   side_effect=lambda *_: self.assertFalse(
-                       window.bfield_transport_controller._engines["1000"]._shutdown_complete)) as message:
+        with patch("app.ui.main_window.QtWidgets.QMessageBox.critical") as message:
             window.closeEvent(event)
         self.assertFalse(event.isAccepted())
         self.assertTrue(window.isEnabled())
@@ -171,11 +166,8 @@ class MainWindowShutdownRecoveryTests(unittest.TestCase):
         gate = RecoverableGate()
         manager.sessions["g1"] = gate
         manager._connected_modes["g1"] = KEITHLEY_MODE_VOLTAGE_2W
-        window.bfield_transport_controller._engines["1000"]._shutdown_complete = True
         event = QtGui.QCloseEvent()
-        with patch("app.ui.main_window.QtWidgets.QMessageBox.critical",
-                   side_effect=lambda *_: self.assertFalse(
-                       window.bfield_transport_controller._engines["1000"]._shutdown_complete)) as message:
+        with patch("app.ui.main_window.QtWidgets.QMessageBox.critical") as message:
             window.closeEvent(event)
         self.assertFalse(event.isAccepted())
         self.assertTrue(window.isEnabled())
@@ -205,9 +197,7 @@ class MainWindowShutdownRecoveryTests(unittest.TestCase):
             self.window.closeEvent(final_event)
             self.assertTrue(final_event.isAccepted())
         message.assert_not_called()
-        for controller in (self.window.magnet1000, self.window.lakeshore335,
-                           self.window.magnet2100):
-            self.assertFalse(controller._thread.isRunning())
+        self.assertFalse(self.window.magnet2100._thread.isRunning())
 
     def test_active_2100_stops_before_gate_zero_failure_and_owner_remains_usable(self):
         window = self.window
@@ -249,7 +239,6 @@ class MainWindowShutdownRecoveryTests(unittest.TestCase):
         window.magnet2100.set_h_setpoint_async(.01).result(1.0)
         window.magnet2100.start_field_control_async().result(1.0)
         self.sdk.fail_stop = True
-        window.bfield_transport_controller._engines["1000"]._shutdown_complete = True
         event = QtGui.QCloseEvent()
         with (
             patch.object(window.device_manager, "shutdown") as manager_shutdown,
@@ -261,10 +250,9 @@ class MainWindowShutdownRecoveryTests(unittest.TestCase):
         manager_shutdown.assert_not_called()
         self.assertTrue(self.sdk.field_active)
         self.assertEqual(self.sdk.close_calls, 0)
-        self.assertFalse(window.bfield_transport_controller._engines["1000"]._shutdown_complete)
         self.assertTrue(window.isEnabled())
-        for controller in (window.magnet1000, window.magnet2100, window.lakeshore335):
-            self.assertTrue(controller._thread.isRunning())
+        self.assertTrue(window.magnet2100._thread.isRunning())
+        self.assert_other_controllers_can_connect()
         self.sdk.fail_stop = False
         final_event = QtGui.QCloseEvent()
         with patch("app.ui.main_window.QtWidgets.QMessageBox.critical") as message:
@@ -274,8 +262,7 @@ class MainWindowShutdownRecoveryTests(unittest.TestCase):
         self.assertFalse(self.sdk.field_active)
         self.assertEqual(self.sdk.stop_calls, 2)
         self.assertEqual(self.sdk.close_calls, 1)
-        for controller in (window.magnet1000, window.magnet2100, window.lakeshore335):
-            self.assertFalse(controller._thread.isRunning())
+        self.assertFalse(window.magnet2100._thread.isRunning())
 
 
 if __name__ == "__main__":

@@ -20,6 +20,37 @@ class AppIdentityTests(unittest.TestCase):
         self.original_icon = self.application.windowIcon()
         self.addCleanup(self.application.setWindowIcon, self.original_icon)
 
+    def test_source_relaunch_quotes_unicode_root_and_retains_widgets(self):
+        root = Path(r"D:\测试 folder\Transport")
+        command = app_identity.source_relaunch(root, "widgets")
+        self.assertIn(f'"{root / "tools" / "Start-Transport.ps1"}"', command)
+        self.assertTrue(command.endswith(" -Frontend widgets"))
+        self.assertEqual(app_identity.APP_ID, "MyLab.TransportMeasurement")
+
+    def test_process_identity_distinguishes_source_and_frozen(self):
+        from app.source_runtime import ROOT, root_hash
+        with patch.object(sys, "frozen", False, create=True):
+            self.assertEqual(app_identity.process_app_id(), app_identity.APP_ID + ".Source." + root_hash(ROOT))
+        with patch.object(sys, "frozen", True, create=True):
+            self.assertEqual(app_identity.process_app_id(), app_identity.APP_ID)
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows shell properties")
+    def test_source_window_shell_properties_accept_unicode_paths(self):
+        import ctypes
+        from ctypes import wintypes
+        user = ctypes.WinDLL("user32", use_last_error=True)
+        user.CreateWindowExW.argtypes = [wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD,
+                                        ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                                        wintypes.HWND, wintypes.HMENU, wintypes.HINSTANCE, ctypes.c_void_p]
+        user.CreateWindowExW.restype = wintypes.HWND
+        user.DestroyWindow.argtypes = [wintypes.HWND]
+        hwnd = user.CreateWindowExW(0, "STATIC", "test", 0, 0, 0, 1, 1, None, None, None, None)
+        self.assertTrue(hwnd)
+        try:
+            app_identity.set_source_window_identity(hwnd, Path(r"D:\测试 folder\Transport"), "0123456789abcdef", "widgets")
+        finally:
+            user.DestroyWindow(hwnd)
+
     def test_packaged_icon_has_small_taskbar_and_high_dpi_images(self):
         path = Path(__file__).resolve().parents[1] / "assets" / "transport.ico"
         self.assertTrue(path.is_file(), "Windows shortcuts need a persistent icon file")
@@ -89,7 +120,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
                 self.assertTrue(result["window_icons"], result)
                 self.assertEqual(result["name"], "Transport History")
                 if sys.platform == "win32":
-                    self.assertEqual(result["app_id"], app_identity.APP_ID)
+                    self.assertEqual(result["app_id"], app_identity.process_app_id())
                 ready = next(message for message in messages if message.get("event") == "ready")
                 self.assertEqual(ready["hardware_modules"], [])
             finally:

@@ -98,7 +98,7 @@ class BFieldTransportTab(BaseMeasurementTab):
         self._redraw_plot()
 
     def _redraw_plot(self):
-        if self._execution_controller is not None:
+        if self._execution_controller is not None and hasattr(self._execution_controller, "refresh_plot"):
             self._execution_controller.refresh_plot(force=True)
         else:
             channels = (self.plot.compare_channels() if self.plot.current_plot_mode() == '4-Channel Compare'
@@ -1147,6 +1147,9 @@ class BFieldTransportTab(BaseMeasurementTab):
 
     def start_run(self):
         """Validate and freeze the recipe before a transport controller runs it."""
+        if cfg.setup.magnet_backend == "none":
+            self.lbl_preview.setText("Cannot start: no magnet is configured")
+            return False
         if self._execution_controller is not None and self._execution_controller.active:
             self._execution_controller.continue_after_temperature_check()
             return False

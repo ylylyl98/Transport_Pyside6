@@ -16,6 +16,7 @@ import os
 from PySide6.QtCore import QObject, Property, Signal, Slot, QTimer
 
 from app.models import LineSweepParams, BFIELD_MT_FIELDS
+from utils.config import cfg
 from app.constants import V_LIMIT
 from app.experiment_metadata import capture_run_signal_chain
 from app.signal_chain import SignalChainSnapshot, signal_chain_metadata
@@ -65,7 +66,7 @@ class MeasurementService(QObject):
         self.get_signal_chain = get_signal_chain or SignalChainSnapshot
         self._context_provider = context_provider
         self._temperature_ready = temperature_ready_callable or (lambda: True)
-        self._selected_backend = selected_backend_callable or (lambda: "1000")
+        self._selected_backend = selected_backend_callable or (lambda: cfg.setup.magnet_backend)
         self._review_valid_callback = review_valid_callable or (lambda: False)
         self._values = [defaults(i) for i in range(len(MODES))]
         self._recipe_models = {}
@@ -84,6 +85,7 @@ class MeasurementService(QObject):
         self._selected_rows = [{} for _ in MODES]
         self._field_errors = [{} for _ in MODES]
         self._mode = 0
+        self._mode_selection_rejected = False
         self._phase, self._message, self._progress = "idle", "Ready", 0.
         self._continuation = (False, False, "")
         self._logs = []
@@ -117,6 +119,7 @@ class MeasurementService(QObject):
         self._factories = {0: DualGateWorker, 1: LineSweepWorker, 2: CoSweepWorker, 3: PhotocurrentWorker, 4: LineSweepWorker}
         self._factories.update(worker_factories or {})
         self._load_settings()
+        self._validate_2100_saved_options()
         self.fieldsChanged.connect(self.outputPreviewChanged)
         self.fieldsChanged.connect(self._invalidate_sweep_preview)
         self.fieldsChanged.connect(self.resolutionSummaryChanged)
@@ -128,44 +131,57 @@ class MeasurementService(QObject):
                 signal.connect(lambda *_: self.resolutionSummaryChanged.emit())
         if magnet1000 is not None:
             from app.engine.gate_scan_field_batch import GateScanFieldBatch
-            from app.engine.bfield_transport_router import BFieldTransportRouter
             self._batch = GateScanFieldBatch(magnet1000, self, self,
                 selected_backend_callable=self._selected_backend, thermal_safety=thermal_safety,
                 lakeshore_controller=lakeshore_controller)
             self._batch.set_review_validator(self._review_valid_callback)
             self._batch.measurement_temperature_provider = temperature_provider
+        if magnet1000 is not None or magnet2100 is not None:
+            from app.engine.bfield_transport_router import BFieldTransportRouter
             self._transport = BFieldTransportRouter(magnet1000, magnet2100, self, manager, thermal_safety, self,
                 selected_backend_callable=self._selected_backend, review_valid_callable=self._review_valid_callback)
             self._transport.lakeshore_controller = lakeshore_controller
-            for engine in (self._batch, self._transport):
+        for engine in (self._batch, self._transport):
+            if engine is not None:
                 engine.state_changed.connect(self._engine_state)
                 engine.progress_changed.connect(self._engine_progress)
                 engine.error.connect(self._engine_error)
                 engine.continuation_changed.connect(self._on_continuation)
+        if self._transport is not None:
             self._transport.finished.connect(self._engine_finished)
             self._transport.stopped.connect(self._engine_stopped)
             self._transport.shutdown_ready.connect(self.shutdownReady)
+        if self._batch is not None:
             self._batch.cleanup_finished.connect(self._batch_finished)
             self._batch.activity.connect(lambda e: self.append_log(e.get("message", str(e))))
-            if lakeshore_controller is not None:
-                signal = getattr(lakeshore_controller, "snapshot_updated", None)
-                if signal is not None:
+        if lakeshore_controller is not None:
+            signal = getattr(lakeshore_controller, "snapshot_updated", None)
+            if signal is not None:
+                if self._transport is not None:
                     signal.connect(self._transport.on_lakeshore_snapshot)
-                signal = getattr(lakeshore_controller, "disconnected", None)
-                if signal is not None:
-                    signal.connect(self._transport.on_lakeshore_disconnected)
-                    signal.connect(self._batch.on_lakeshore_disconnected)
-                signal = getattr(lakeshore_controller, "snapshot_updated", None)
-                if signal is not None:
+                if self._batch is not None:
                     signal.connect(self._batch.on_lakeshore_snapshot)
-                signal = getattr(lakeshore_controller, "fault", None)
-                if signal is not None:
-                    signal.connect(self._thermal_fault)
-                signal = getattr(lakeshore_controller, "error", None)
-                if signal is not None:
-                    signal.connect(self._thermal_error)
+            signal = getattr(lakeshore_controller, "disconnected", None)
+            if signal is not None:
+                if self._transport is not None:
+                    signal.connect(self._transport.on_lakeshore_disconnected)
+                if self._batch is not None:
+                    signal.connect(self._batch.on_lakeshore_disconnected)
+            signal = getattr(lakeshore_controller, "fault", None)
+            if signal is not None:
+                signal.connect(self._thermal_fault)
+            signal = getattr(lakeshore_controller, "error", None)
+            if signal is not None:
+                signal.connect(self._thermal_error)
 
     modes = Property("QVariantList", lambda self: [{"id": i, "key": m[0], "title": m[1]} for i, m in enumerate(MODES)], constant=True)
+
+    def _mode_available(self, mode):
+        backend = self._selected_backend()
+        return mode < 4 or (mode == 4 and backend == "1000") or (
+            mode == 5 and backend in ("1000", "2100"))
+
+    availableModes = Property("QVariantList", lambda self: [entry for entry in self.modes if self._mode_available(entry["id"])], notify=changed)
 
     def _set_mode(self, mode):
         mode = int(mode)
@@ -175,6 +191,15 @@ class MeasurementService(QObject):
         if self.active:
             self._fail("Wait for measurement cleanup before changing mode")
             return
+        if not self._mode_available(mode):
+            self._mode_selection_rejected = True
+            self._fail("Measurement mode is unavailable for the configured magnet")
+            return
+        selection_was_rejected = self._mode_selection_rejected
+        self._mode_selection_rejected = False
+        if mode == self._mode and selection_was_rejected:
+            self._phase, self._message = "idle", "Ready"
+            self.changed.emit()
         if mode != self._mode:
             if not self._flush_recipes():
                 return
@@ -355,7 +380,7 @@ class MeasurementService(QObject):
     active = Property(bool, lambda self: bool(self.worker_thread is not None or self._preflight_thread is not None or self._batch_claimed or
         self._confirmation is not None or (self._batch and self._batch.active) or
         (self._transport and (self._transport.active or self._transport._cleanup_in_progress))), notify=changed)
-    canStart = Property(bool, lambda self: not self.active and not self._field_errors[self._mode] and not self.device_manager.is_busy() and not getattr(self._lakeshore, "input_configuration_pending", False), notify=changed)
+    canStart = Property(bool, lambda self: not self.active and not self._mode_selection_rejected and self._mode_available(self._mode) and not self._field_errors[self._mode] and not self.device_manager.is_busy() and not getattr(self._lakeshore, "input_configuration_pending", False), notify=changed)
     canStop = Property(bool, lambda self: self.active, notify=changed)
     continuationRequired = Property(bool, lambda self: self._continuation[0], notify=changed)
     canContinue = Property(bool, lambda self: self._continuation[1], notify=changed)
@@ -462,11 +487,14 @@ class MeasurementService(QObject):
 
     def _load_settings(self):
         if self._settings is None:
+            if self._selected_backend() == "2100":
+                self._values[5]["measurement_mode"] = "stepped"
             return
         import json
         for i, (key, _, _) in enumerate(MODES):
             self._values[i] = legacy_values(self._settings, i)
             saved = self._settings.value(f"quick/measurements/{key}", "")
+            values = {}
             try:
                 values = json.loads(saved) if isinstance(saved, str) and saved else {}
                 for name, value in values.items():
@@ -475,7 +503,22 @@ class MeasurementService(QObject):
             except (TypeError, ValueError):
                 pass
             if i == 5:
+                if (self._selected_backend() == "2100" and "measurement_mode" not in values
+                        and self._settings.value("tabs/bfield_transport/measurement_mode", None) is None):
+                    self._values[i]["measurement_mode"] = "stepped"
                 normalize_transport_spacing(self._values[i])
+
+    def _validate_2100_saved_options(self):
+        if self._selected_backend() != "2100":
+            return
+        for key, supported in (("measurement_mode", "stepped"), ("sample_reversal_mode", "unchanged")):
+            identity = ("", -1, key)
+            value = self._values[5][key]
+            if value != supported:
+                self._field_errors[5][identity] = (
+                    f"Saved value {value!r} is unsupported on attoDRY2100; choose {supported}.")
+            else:
+                self._field_errors[5].pop(identity, None)
 
     def _save_settings(self):
         if self._settings is not None:
@@ -625,6 +668,10 @@ class MeasurementService(QObject):
                 raise ValueError("Unknown parameter: " + key)
             model = self._recipe_models.get((self._mode, key))
             converted = self._convert_input(value, original[key], key, self._mode)
+            if self._mode == 5 and self._selected_backend() == "2100":
+                supported = {"measurement_mode": "stepped", "sample_reversal_mode": "unchanged"}
+                if key in supported and converted != supported[key]:
+                    raise ValueError(f"attoDRY2100 requires {supported[key]} for {label(key)}")
             if self._mode == 5 and key in BFIELD_MT_FIELDS:
                 converted /= 1000.  # The editor uses mT; recipes and hardware retain T.
             if self._mode == 2 and key in {"coordinate_mode", "axis_fast", "axis_slow"} and not self._flush_recipes():
@@ -1090,6 +1137,8 @@ class MeasurementService(QObject):
             self._fail("Wait for the current hardware operation to finish")
             return
         try:
+            if self._mode_selection_rejected or not self._mode_available(self._mode):
+                raise ValueError("Measurement mode is unavailable for the configured magnet; select an available mode")
             if getattr(self._lakeshore, "input_configuration_pending", False):
                 raise ValueError("Wait for LS335 input configuration readback before starting a measurement")
             ready = self._temperature_ready()
@@ -1373,8 +1422,15 @@ class MeasurementService(QObject):
         self.changed.emit()
 
     def _start_magnetic(self):
-        if self._batch is None or self._transport is None:
+        if not self._mode_available(self._mode):
+            raise ValueError("Magnetic measurement is unavailable for the configured magnet")
+        if self._selected_backend() == "2100" and self._values[5]["sample_reversal_mode"] != "unchanged":
+            raise ValueError("attoDRY2100 requires unchanged sample current reversal")
+        if self._mode == 4 and self._batch is None:
             raise ValueError("APS100 controller is unavailable")
+        if self._mode == 5 and (self._transport is None or
+                                self._selected_backend() not in self._transport._engines):
+            raise ValueError("Configured magnet controller is unavailable")
         if self._selected_backend() != "1000":
             if self._mode == 4:
                 raise ValueError("B-field Gate Scan requires attoDRY1000 / APS100")
@@ -1382,7 +1438,7 @@ class MeasurementService(QObject):
                 raise ValueError("attoDRY2100 supports stepped B-field transport only")
         if not self._review_valid_callback():
             raise ValueError("Commissioning review for the selected magnet is required")
-        thermal = self._batch.thermal_safety
+        thermal = self._batch.thermal_safety if self._batch is not None else None
         if self._selected_backend() == "1000" and (thermal is None or not bool(getattr(thermal, "is_armed", getattr(thermal, "armed", False)))):
             raise ValueError("A commissioned, armed Lake Shore thermal evaluator is required")
         snapshot = getattr(self._magnet, "latest_snapshot", None)

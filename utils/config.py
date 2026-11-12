@@ -225,6 +225,23 @@ class RotationConfig:
 
 
 @dataclass
+class SetupConfig:
+    """Hardware capabilities selected for this installation at startup."""
+
+    magnet_backend: str = "1000"
+    temperature_source: str = "ls335"
+
+    def validate(self) -> None:
+        supported = (("1000", "ls335"), ("2100", "2100"), ("none", "external"))
+        if (self.magnet_backend, self.temperature_source) not in supported:
+            raise ValueError(
+                "Invalid setup: supported magnet_backend / temperature_source pairs are "
+                "1000 / ls335, 2100 / 2100, and none / external; got "
+                f"{self.magnet_backend!r} / {self.temperature_source!r}"
+            )
+
+
+@dataclass
 class MagnetConfig:
     """Attocube APS100 defaults for the attoDRY1000 9 T solenoid."""
 
@@ -437,6 +454,7 @@ class SessionConfig:
 @dataclass
 class AppConfig:
     """Top-level config object.  Holds all sub-configs plus misc app settings."""
+    setup: SetupConfig = field(default_factory=SetupConfig)
     lf6: LF6Config = field(default_factory=LF6Config)
     smu: SMUConfig = field(default_factory=SMUConfig)
     ramp: RampConfig = field(default_factory=RampConfig)
@@ -506,10 +524,26 @@ class AppConfig:
         try:
             with target.open("r", encoding="utf-8") as fh:
                 data = json.load(fh)
-        except (json.JSONDecodeError, OSError):
-            return  # corrupt / unreadable — keep defaults
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Invalid JSON configuration in {target} (line {exc.lineno}, column {exc.colno})") from exc
+        except (OSError, UnicodeError) as exc:
+            raise ValueError(f"Unable to read configuration file {target}: {type(exc).__name__}") from exc
         if not isinstance(data, dict):
-            return
+            raise ValueError(f"Invalid configuration in {target}: expected a JSON object")
+
+        setup_data = data.get("setup", {})
+        if not isinstance(setup_data, dict):
+            raise ValueError(f"Invalid setup in {target}: expected a JSON object")
+        unknown = set(setup_data) - {"magnet_backend", "temperature_source"}
+        if unknown:
+            raise ValueError(f"Invalid setup in {target}: unknown fields {sorted(unknown)}")
+        setup = SetupConfig(**setup_data)
+        try:
+            setup.validate()
+        except ValueError as exc:
+            raise ValueError(f"Invalid setup in {target}: {exc}") from exc
+        self.setup.magnet_backend = setup.magnet_backend
+        self.setup.temperature_source = setup.temperature_source
 
         lf6_data = data.get("lf6", {})
         _update_dataclass(self.lf6, lf6_data)

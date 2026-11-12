@@ -126,6 +126,8 @@ cd Transport_Pyside6
 .\Transport_App.bat
 ```
 
+The first launch (including a double-click on `Transport_App.bat`) creates or repairs a desktop Source shortcut. Subsequent launches check for updates only when the checkout can be updated safely; see [Windows source launcher](docs/source-launcher.md).
+
 The root launcher creates/reuses `.venv`, installs the pinned
 [requirements](requirements.txt) when needed, and performs an isolated startup
 check after relevant changes. Use the root checkout for development; utilities

@@ -16,9 +16,10 @@ class BFieldTransportRouter(QtCore.QObject):
                  parent=None, selected_backend_callable=None, review_valid_callable=None):
         super().__init__(parent)
         self._backend = selected_backend_callable or (lambda: '1000')
-        self._engines = {
-            '1000': BFieldTransportController(magnet1000, tab, device_manager, thermal_safety, self),
-        }
+        self._engines = {}
+        if magnet1000 is not None:
+            self._engines['1000'] = BFieldTransportController(
+                magnet1000, tab, device_manager, thermal_safety, self)
         if magnet2100 is not None:
             from app.engine.bfield2100_transport_controller import BField2100TransportController
             self._engines['2100'] = BField2100TransportController(
@@ -35,24 +36,32 @@ class BFieldTransportRouter(QtCore.QObject):
     def _selected(self):
         if not self._starting and self._locked_engine is not None and not self._locked_engine.active and not self._locked_engine._cleanup_in_progress:
             self._locked_engine = None
-        return self._locked_engine or self._engines[self._backend()]
+        return self._locked_engine or self._engines.get(self._backend())
 
     def __getattr__(self, name):
         # QObject construction may probe Python attributes before our engines exist.
         if name.startswith("__") or "_engines" not in self.__dict__:
             raise AttributeError(name)
-        return getattr(self._selected(), name)
+        engine = self._selected()
+        if engine is None:
+            raise AttributeError(name)
+        return getattr(engine, name)
 
     @property
     def lakeshore_controller(self):
-        return self._engines['1000'].lakeshore_controller
+        engine = self._engines.get('1000')
+        return engine.lakeshore_controller if engine is not None else None
 
     @lakeshore_controller.setter
     def lakeshore_controller(self, value):
-        self._engines['1000'].lakeshore_controller = value
+        engine = self._engines.get('1000')
+        if engine is not None:
+            engine.lakeshore_controller = value
 
     def start(self, *, verified_calibration=None):
-        engine = self._engines[self._backend()]
+        engine = self._engines.get(self._backend())
+        if engine is None:
+            raise ValueError('Configured magnet controller is unavailable')
         self._locked_engine = engine
         self._starting = True
         try:
@@ -71,16 +80,24 @@ class BFieldTransportRouter(QtCore.QObject):
         return any(e._cleanup_in_progress for e in self._engines.values())
 
     def stop(self):
-        return self._selected().stop()
+        engine = self._selected()
+        if engine is not None:
+            return engine.stop()
 
     def on_lakeshore_snapshot(self, *args):
-        return self._engines['1000'].on_lakeshore_snapshot(*args)
+        engine = self._engines.get('1000')
+        if engine is not None:
+            return engine.on_lakeshore_snapshot(*args)
 
     def on_lakeshore_disconnected(self, *args):
-        return self._engines['1000'].on_lakeshore_disconnected(*args)
+        engine = self._engines.get('1000')
+        if engine is not None:
+            return engine.on_lakeshore_disconnected(*args)
 
     def _on_fault(self, *args):
-        return self._engines['1000']._on_fault(*args)
+        engine = self._engines.get('1000')
+        if engine is not None:
+            return engine._on_fault(*args)
 
     def prepare_shutdown(self):
         results = [engine.prepare_shutdown() for engine in self._engines.values()]

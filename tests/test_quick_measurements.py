@@ -126,6 +126,7 @@ class QuickMeasurementTests(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.manager = FakeManager()
         self.service = MeasurementService(self.manager, SaveRoot(base=self.directory.name),
+            magnet1000=FakeMagnet(), selected_backend_callable=lambda: "1000",
             worker_factories={k: FakeWorker for k in range(5)})
 
     def spin(self, predicate, timeout=3.):
@@ -804,10 +805,10 @@ class QuickMeasurementTests(unittest.TestCase):
         service.mode = 4
         service.start()
         self.assertFalse(service.active)
-        self.assertIn("APS100", service.message)
+        self.assertIn("unavailable", service.message)
         service.mode = 5
         service.start()
-        self.assertIn("stepped", service.message)
+        self.assertIn("controller is unavailable", service.message)
         service._selected_backend = lambda: "1000"
         service.start()
         self.assertFalse(service.active)

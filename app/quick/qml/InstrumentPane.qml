@@ -20,6 +20,10 @@ ColumnLayout {
     Component.onCompleted: rememberSection()
     property var visitedSections: [true, false, false, false, false, false, false, false]
     onSectionChanged: {
+        if (section === 2 && !magnet.magnetEnabled) {
+            section = 0
+            return
+        }
         rememberSection()
         if (!visitedSections[section]) {
             const visited = visitedSections.slice()
@@ -68,7 +72,7 @@ ColumnLayout {
             NavigationTabButton {
                 required property var modelData
                 objectName: "instrumentPage" + modelData.section
-                visible: modelData.group === pane.currentGroup
+                visible: modelData.group === pane.currentGroup && (modelData.section !== 2 || pane.magnet.magnetEnabled)
                 width: Math.min(implicitWidth, parent.width)
                 text: modelData.label
                 checkable: false
@@ -124,7 +128,7 @@ ColumnLayout {
             objectName: "instrumentLoader2"
             Layout.fillWidth: true; Layout.fillHeight: true
             // Keep visited pages alive so edits, dialogs and scroll positions survive navigation.
-            active: pane.visitedSections[2]
+            active: pane.visitedSections[2] && pane.magnet.magnetEnabled
             sourceComponent: Component {
                 ScrollView {
                     id: magnetScroll; objectName: "instrumentScroller2"

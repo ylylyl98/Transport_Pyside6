@@ -1,7 +1,20 @@
 @echo off
-setlocal EnableExtensions
+setlocal EnableExtensions DisableDelayedExpansion
 title Transport Measurement App
 cd /d "%~dp0"
+
+:: One public entry: create the source shortcut, safely update, then bootstrap.
+:: Only the coordinator's child comes back here to set up Python and launch Qt.
+for %%I in ("%~dp0.") do set "TRANSPORT_THIS_ROOT=%%~fI"
+if /I "%TRANSPORT_SOURCE_MANAGED_ROOT%"=="%TRANSPORT_THIS_ROOT%" goto bootstrap
+if /I "%~1"=="--widgets" (
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\Start-Transport.ps1" -Frontend widgets
+) else (
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\Start-Transport.ps1"
+)
+exit /b %errorlevel%
+
+:bootstrap
 
 echo Starting Transport UI...
 echo ---------------------------------------
@@ -16,7 +29,6 @@ if not exist "%PYTHON_EXE%" (
     if errorlevel 1 (
         echo [ERROR] Python was not found on PATH.
         echo Install Python 3.12 to 3.14, then run this launcher again.
-        pause
         exit /b 1
     )
 
@@ -24,7 +36,6 @@ if not exist "%PYTHON_EXE%" (
     python -m venv "%VENV_DIR%"
     if errorlevel 1 (
         echo [ERROR] Could not create the virtual environment.
-        pause
         exit /b 1
     )
 )
@@ -33,13 +44,11 @@ if not exist "%PYTHON_EXE%" (
 if errorlevel 1 (
     echo [ERROR] This release needs Python 3.12 to 3.14. The existing .venv was preserved.
     echo See docs\qt-quick-migration.md for environment migration and rollback.
-    pause
     exit /b 1
 )
 
 if not exist requirements.txt (
     echo [ERROR] requirements.txt not found. Cannot install application dependencies.
-    pause
     exit /b 1
 )
 
@@ -50,7 +59,6 @@ if errorlevel 1 (
     "%PYTHON_EXE%" -m pip install --disable-pip-version-check -r "%~dp0requirements.txt"
     if errorlevel 1 (
         echo [ERROR] Dependency installation failed.
-        pause
         exit /b 1
     )
 )
@@ -64,15 +72,7 @@ if /I "%~1"=="--widgets" (
 )
 if errorlevel 1 (
     echo [ERROR] Application startup check failed.
-    pause
     exit /b 1
-)
-
-:: Keep the local shortcut's icon and taskbar identity in sync with this checkout.
-:: Allow this local helper in its own process without changing system policy.
-powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File "%~dp0tools\Update-TransportShortcut.ps1"
-if errorlevel 1 (
-    echo [WARN] Could not update the Transport shortcut. Application startup will continue.
 )
 
 :: Launch as a windowed Windows app. The app itself sets its Windows AppUserModelID.
@@ -80,7 +80,7 @@ if exist "%PYTHONW_EXE%" (
     start "Transport Measurement" "%PYTHONW_EXE%" "%~dp0transport_UI.py" %*
 ) else (
     echo [WARN] pythonw.exe not found; starting with python.exe.
-    "%PYTHON_EXE%" "%~dp0transport_UI.py" %*
+    start "Transport Measurement" "%PYTHON_EXE%" "%~dp0transport_UI.py" %*
 )
 
 exit /b 0

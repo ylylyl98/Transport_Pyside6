@@ -254,6 +254,10 @@ def measurement_sections(values, mode, selected=None, errors=None, *, transport_
         if key in ("axis_fast", "axis_slow"):
             axes = ["Doping", "E-field", "Vds"] if current["coordinate_mode"] == "Derived" else ["Vtg", "Vbg", "Vds"]
             item["options"] = ([{"value": "None", "label": "None — 1D"}] if key == "axis_slow" and current["coordinate_mode"] == "Raw" else []) + axes
+        if mode == 5 and magnet_backend == "2100" and key == "measurement_mode":
+            item["options"] = ["stepped"]
+        if mode == 5 and magnet_backend == "2100" and key == "sample_reversal_mode":
+            item["options"] = ["unchanged"]
         if key == "cooldown_policy":
             item["options"] = [{"value": k, "label": v} for k, v in (
                 ("adaptive", "Adaptive (thermal permission)"), ("stay_driven", "Stay driven between conditions"),
@@ -421,8 +425,12 @@ def measurement_sections(values, mode, selected=None, errors=None, *, transport_
                 equivalent = "invalid input"
             add("Sweep rate", ["rate_t_per_min"], columns=1,
                 description=f"Configured maximum: {limit_text}. Current request: {equivalent}. Stored RATE 0–4 and voltage limits may be slower; the final approach also slows down.")
-        add("Sample B current reversal", ["sample_reversal_mode", "sample_reversal_settle_s"],
+        if magnet_backend == "1000":
+            add("Sample B current reversal", ["sample_reversal_mode", "sample_reversal_settle_s"],
             description="Unchanged preserves B. Automatic modes require APS100 Stepped and A already ON; A is never changed. Per point: qualify a full ON temperature window, confirm OFF and wait, acquire, then confirm ON, wait and qualify a new ON window. Before/after ON temperatures must differ by no more than the configured temperature span before the point is saved. OFF readings remain safety monitored but are not mixed into ON windows. Whole sweep: B OFF with the existing target, span and drift checks. The configured wait does not certify transient removal. Monitoring or thermal interruptions end the run; B is restored after cleanup. If restoration fails, ownership is retained and Stop retries.")
+        elif current.get("sample_reversal_mode") != "unchanged":
+            add("Unsupported saved sample reversal", ["sample_reversal_mode"],
+                description="This saved setting requires APS100. Choose unchanged to use attoDRY2100.")
         if current.get("measurement_mode") == "stepped":
             if magnet_backend == "1000":
                 add("Hysteresis: set, wait, measure", list(BFIELD_HYSTERESIS_LABELS),

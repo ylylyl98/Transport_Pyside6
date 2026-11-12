@@ -170,7 +170,8 @@ measurements and safe cleanup.
    second lock-in and its wiring are present. See
    [lock-in control](lockin-control.md) and [Drag / Drive](drag-drive.md).
 6. If using a magnet or temperature controller, complete its configuration below
-   first. In **Magnet & temperature**, select the correct system, read
+   first. Configure the system in the local setup JSON as described below and
+   restart. In **Magnet & temperature**, read
    **Review commissioning details**, and acknowledge
    **I reviewed the configured limits and connections** only after checking the
    real installation. This review is required before connection/control.
@@ -222,7 +223,8 @@ For attoDRY2100:
    configuration file does not exist, create its parent folder and a valid JSON
    object, then add the settings required for your installation. Set the actual
    host and channel and review all limits; do not copy another system's limits.
-3. Restart Transport, select **attoDRY2100 / SDK**, and review the displayed
+3. Set the setup pair to **2100 / 2100** as described below, restart Transport,
+   and review the displayed
    connection/limit details before connecting. SDK temperature controls depend
    on the capabilities available from that SDK and device.
 
@@ -320,6 +322,39 @@ verify, and install the pinned Inno Setup 7.1.1 x64 compiler for the current use
 then use `tools/build_installer.py` and `tools/verify_installer.py` as documented there.
 Inno Setup is only needed for packaging, not for using the application.
 For frontend fallback details, see [Qt Quick migration](qt-quick-migration.md).
+
+## Setup capability selection
+
+Each computer uses its own JSON configuration. On Windows the default is
+`%APPDATA%\SpectralSweep\config.json`; `SPECTRALSWEEP_CONFIG_PATH` overrides
+this location. If the per-user file does not yet exist, an existing project-root
+`config.json` is read as a compatibility fallback. Back up the file and add or
+edit its top-level `setup` object, preserving the other settings. Restart the
+application to apply the selection. An older file without `setup` defaults to
+the first pair below.
+
+attoDRY1000 with Lake Shore 335:
+
+```json
+{"setup": {"magnet_backend": "1000", "temperature_source": "ls335"}}
+```
+
+attoDRY2100:
+
+```json
+{"setup": {"magnet_backend": "2100", "temperature_source": "2100"}}
+```
+
+No magnet, with temperature managed externally (for example a Montana setup):
+
+```json
+{"setup": {"magnet_backend": "none", "temperature_source": "external"}}
+```
+
+These are the currently supported pairs; invalid combinations are rejected.
+External means the application does not read or control that temperature
+system. No magnet does not establish a measured field of 0 T. Future systems
+such as Bluefors require their own supported driver and configuration type.
 
 ## 7. Common problems
 
