@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import "NumberFormat.js" as NumberFormat
 
 ColumnLayout {
     id: cell
@@ -12,16 +13,7 @@ ColumnLayout {
     property bool compact: false
     readonly property string acceptedValue: spec.value === undefined || spec.value === null ? "" : String(spec.value)
     readonly property bool readOnly: locked || Boolean(spec.readOnly)
-    readonly property string displayValue: {
-        // Format calculated coordinates only; editable values and their drafts retain
-        // their original text and precision even when the form is locked.
-        if (spec.readOnly && ["vtg", "vbg", "doping", "efield"].indexOf(spec.key) >= 0
-                && typeof spec.value === "number" && isFinite(spec.value)) {
-            const rounded = spec.value.toFixed(6).replace(/\.?0+$/, "")
-            return rounded === "" || rounded === "-0" ? "0" : rounded
-        }
-        return acceptedValue
-    }
+    readonly property string displayValue: (spec.kind === "number" || spec.kind === "integer") ? NumberFormat.compact(acceptedValue) : acceptedValue
     spacing: 2
     function commit() { return inputLoader.item && inputLoader.item.applyDraft ? inputLoader.item.applyDraft() : true }
     Component.onDestruction: if (cell.owner && cell.owner.activeEditor === cell) cell.owner.activeEditor = null
@@ -47,27 +39,31 @@ ColumnLayout {
             id: field
             objectName: "recipeCell_" + cell.owner.rowKey + "_" + cell.uid + "_" + cell.spec.key
             // A recycled delegate always reads the draft belonging to this UID.
-            text: { cell.uid; return cell.spec.readOnly ? cell.displayValue : cell.spec.draft === undefined ? cell.acceptedValue : String(cell.spec.draft) }
+            text: { cell.uid; return cell.spec.draft !== undefined ? String(cell.spec.draft) : (activeFocus && !cell.spec.readOnly ? cell.acceptedValue : cell.displayValue) }
             property var editModel: null
             property string editUid: ""
             property string editKey: ""
+            property bool userEdited: false
             readOnly: cell.readOnly
             selectByMouse: true
             color: Theme.text
             Accessible.name: cell.spec.label || cell.spec.key
             Accessible.description: cell.spec.error || (readOnly ? "Read-only calculated value" : "Enter or Tab to apply")
             function applyDraft() {
-                if (!editModel || readOnly || (text === cell.acceptedValue && cell.spec.draft === undefined && !cell.spec.error)) return true
-                return editModel.commit(editUid, editKey, text)
+                if (!editModel || readOnly || (!userEdited && cell.spec.draft === undefined && !cell.spec.error)) return true
+                const ok = editModel.commit(editUid, editKey, text)
+                if (ok) userEdited = false
+                return ok
             }
             onActiveFocusChanged: {
                 if (activeFocus) {
                     editModel = cell.rowModel; editUid = cell.uid; editKey = cell.spec.key
+                    userEdited = false
                     cell.owner.selectVisible(editUid)
                     cell.owner.activeEditor = cell
                 } else applyDraft()
             }
-            onTextEdited: if (editModel && !readOnly) editModel.rememberDraft(editUid, editKey, text)
+            onTextEdited: if (editModel && !readOnly) { userEdited = true; editModel.rememberDraft(editUid, editKey, text) }
             onEditingFinished: applyDraft()
             background: Rectangle {
                 color: field.readOnly ? Theme.readOnlyFill : Theme.surface
@@ -75,8 +71,8 @@ ColumnLayout {
                 border.width: field.activeFocus ? 2 : 1
                 border.color: cell.spec.error ? Theme.danger : field.activeFocus ? Theme.focus : Theme.controlBorder
             }
-            ToolTip.visible: hovered && Boolean(cell.spec.error)
-            ToolTip.text: cell.spec.error || ""
+            ToolTip.visible: hovered && (Boolean(cell.spec.error) || cell.spec.kind === "number" || cell.spec.kind === "integer")
+            ToolTip.text: cell.spec.error || cell.acceptedValue
         }
     }
     Component {

@@ -78,9 +78,11 @@ class ConnDock(QtWidgets.QWidget):
         self.cbo_g1 = ResourceComboBox()
         self.cbo_g2 = ResourceComboBox()
         self.cbo_g3 = ResourceComboBox()
+        self.cbo_g4 = ResourceComboBox()
         self.cbo_g1_mode = SafeComboBox()
         self.cbo_g2_mode = SafeComboBox()
         self.cbo_g3_mode = SafeComboBox()
+        self.cbo_g4_mode = SafeComboBox()
         self.cbo_daq = ResourceComboBox()
         self.cbo_mono = ResourceComboBox()
         self.cbo_lockin = ResourceComboBox()
@@ -88,24 +90,28 @@ class ConnDock(QtWidgets.QWidget):
         self.ed_g1 = self.cbo_g1
         self.ed_g2 = self.cbo_g2
         self.ed_g3 = self.cbo_g3
+        self.ed_g4 = self.cbo_g4
         self.ed_daq = self.cbo_daq
         self.ed_mono = self.cbo_mono
         self.ed_lockin = self.cbo_lockin
         self.cbo_g1.setCurrentText(self.conns.gate1)
         self.cbo_g2.setCurrentText(self.conns.gate2)
         self.cbo_g3.setCurrentText(self.conns.gate3)
+        self.cbo_g4.setCurrentText(self.conns.gate4)
         for value, label in keithley_mode_options():
             self.cbo_g1_mode.addItem(label, value)
             self.cbo_g2_mode.addItem(label, value)
             self.cbo_g3_mode.addItem(label, value)
+            self.cbo_g4_mode.addItem(label, value)
         self._set_combo_data(self.cbo_g1_mode, self.conns.gate1_mode)
         self._set_combo_data(self.cbo_g2_mode, self.conns.gate2_mode)
         self._set_combo_data(self.cbo_g3_mode, self.conns.gate3_mode)
+        self._set_combo_data(self.cbo_g4_mode, self.conns.gate4_mode)
         self.cbo_daq.setCurrentText(self.conns.daq_dev)
         self.cbo_mono.setCurrentText(self.conns.mono)
         self.cbo_lockin.setCurrentText(self.conns.lockin)
         self.cbo_drive_lockin.setCurrentText(self.conns.drive_lockin)
-        for widget in (self.cbo_g1, self.cbo_g2, self.cbo_g3, self.cbo_daq, self.cbo_mono, self.cbo_lockin, self.cbo_drive_lockin, self.cbo_g1_mode, self.cbo_g2_mode, self.cbo_g3_mode):
+        for widget in (self.cbo_g1, self.cbo_g2, self.cbo_g3, self.cbo_g4, self.cbo_daq, self.cbo_mono, self.cbo_lockin, self.cbo_drive_lockin, self.cbo_g1_mode, self.cbo_g2_mode, self.cbo_g3_mode, self.cbo_g4_mode):
             widget.currentTextChanged.connect(self._update_reconnect_indicators)
 
         lbl_g1 = QtWidgets.QLabel("G1 / Vtg:")
@@ -118,6 +124,7 @@ class ConnDock(QtWidgets.QWidget):
         form_hw.addRow(lbl_g1, self._make_address_mode_row(self.cbo_g1, self.cbo_g1_mode))
         form_hw.addRow(lbl_g2, self._make_address_mode_row(self.cbo_g2, self.cbo_g2_mode))
         form_hw.addRow(lbl_g3, self._make_address_mode_row(self.cbo_g3, self.cbo_g3_mode))
+        form_hw.addRow("G4 / Bias2:", self._make_address_mode_row(self.cbo_g4, self.cbo_g4_mode))
         form_hw.addRow(lbl_daq, self.cbo_daq)
         form_hw.addRow(lbl_mono, self.cbo_mono)
         lbl_lockin.setText("Drag / primary lock-in:")
@@ -143,6 +150,7 @@ class ConnDock(QtWidgets.QWidget):
             "g1": (self.conns.gate1_max_voltage_v, self.conns.gate1_current_compliance_a, "G1 / Vtg"),
             "g2": (self.conns.gate2_max_voltage_v, self.conns.gate2_current_compliance_a, "G2 / Vbg"),
             "g3": (self.conns.gate3_max_voltage_v, self.conns.gate3_current_compliance_a, "G3 / Vds"),
+            "g4": (self.conns.gate4_max_voltage_v, self.conns.gate4_current_compliance_a, "G4 / Bias2"),
         }
         for name, (max_voltage, current_compliance, title) in protection_defaults.items():
             box = QtWidgets.QGroupBox(title)
@@ -224,7 +232,8 @@ class ConnDock(QtWidgets.QWidget):
         self.sp_lkn.setValue(0.1)
         self.sp_amp.valueChanged.connect(self._on_preamp_sensitivity_changed)
         self.sp_lkn.valueChanged.connect(self._on_manual_lockin_sensitivity_changed)
-        lbl_amp = QtWidgets.QLabel("Pre-amp (A):")
+        lbl_amp = QtWidgets.QLabel("SR570 sensitivity (A/V):")
+        self.lbl_amp = lbl_amp
         self.lbl_lkn = lbl_lkn = QtWidgets.QLabel("Lock-in sensitivity (V):")
         self.ed_lkn_readback = QtWidgets.QLineEdit('--')
         self.ed_lkn_readback.setObjectName('lockinSensitivityReadback')
@@ -318,7 +327,7 @@ class ConnDock(QtWidgets.QWidget):
         status_row.addWidget(self.lbl_connection_status, 1)
         status_row.addWidget(self.btn_connection_details)
         self._connection_detail = "Connect hardware from here. Tabs will reuse the same sessions."
-        self.dock_status_panel = StatusPanel(["g1", "g2", "g3", "daq", "mono", "lockin", "lockin_drive"], columns=1)
+        self.dock_status_panel = StatusPanel(["g1", "g2", "g3", "g4", "daq", "mono", "lockin", "lockin_drive"], columns=1)
         lay_conn.addLayout(status_row)
         lay_conn.addWidget(self.dock_status_panel)
         self.exp_connections = CollapsibleSection("Connections", grp_conn, expanded=True)
@@ -337,18 +346,22 @@ class ConnDock(QtWidgets.QWidget):
         self.sp_manual_g1 = SafeDoubleSpinBox()
         self.sp_manual_g2 = SafeDoubleSpinBox()
         self.sp_manual_g3 = SafeDoubleSpinBox()
-        for spinbox in (self.sp_manual_g1, self.sp_manual_g2, self.sp_manual_g3):
+        self.sp_manual_g4 = SafeDoubleSpinBox()
+        for spinbox in (self.sp_manual_g1, self.sp_manual_g2, self.sp_manual_g3, self.sp_manual_g4):
             configure_volt_spinbox(spinbox, 0.0)
         self.btn_manual_g1_set = QtWidgets.QPushButton("Ramp")
         self.btn_manual_g2_set = QtWidgets.QPushButton("Ramp")
         self.btn_manual_g3_set = QtWidgets.QPushButton("Ramp")
+        self.btn_manual_g4_set = QtWidgets.QPushButton("Ramp")
         self.btn_manual_g1_zero = QtWidgets.QPushButton("Zero")
         self.btn_manual_g2_zero = QtWidgets.QPushButton("Zero")
         self.btn_manual_g3_zero = QtWidgets.QPushButton("Zero")
+        self.btn_manual_g4_zero = QtWidgets.QPushButton("Zero")
         self._manual_gate_controls = {
             "g1": (self.sp_manual_g1, self.btn_manual_g1_set, self.btn_manual_g1_zero),
             "g2": (self.sp_manual_g2, self.btn_manual_g2_set, self.btn_manual_g2_zero),
             "g3": (self.sp_manual_g3, self.btn_manual_g3_set, self.btn_manual_g3_zero),
+            "g4": (self.sp_manual_g4, self.btn_manual_g4_set, self.btn_manual_g4_zero),
         }
         self._manual_gate_dirty = {name: False for name in self._manual_gate_controls}
         for name, (spinbox, set_button, zero_button) in self._manual_gate_controls.items():
@@ -369,7 +382,7 @@ class ConnDock(QtWidgets.QWidget):
         self._manual_gate_step_buttons: dict[str, tuple[QtWidgets.QPushButton, QtWidgets.QPushButton]] = {}
         self._manual_gate_read_buttons: dict[str, QtWidgets.QPushButton] = {}
         self.gate_readback_labels: dict[str, dict[str, QtWidgets.QLabel]] = {}
-        for name, title in (("g1", "G1 / Vtg"), ("g2", "G2 / Vbg"), ("g3", "G3 / Vds")):
+        for name, title in (("g1", "G1 / Vtg"), ("g2", "G2 / Vbg"), ("g3", "G3 / Vds"), ("g4", "G4 / Bias2")):
             form_manual.addRow(self._make_gate_control_card(name, title))
         self.sp_manual_step.valueChanged.connect(self._update_manual_step_labels)
         self._update_manual_step_labels()
@@ -449,14 +462,14 @@ class ConnDock(QtWidgets.QWidget):
         layout.addWidget(self.btn_stop)
         layout.addStretch()
 
-        for widget in [self.cbo_g1, self.cbo_g2, self.cbo_g3, self.cbo_g1_mode, self.cbo_g2_mode, self.cbo_g3_mode, self.cbo_daq, self.cbo_mono, self.cbo_lockin, self.cbo_drive_lockin, self.ed_user, self.ed_device_id, self.ed_base]:
+        for widget in [self.cbo_g1, self.cbo_g2, self.cbo_g3, self.cbo_g4, self.cbo_g1_mode, self.cbo_g2_mode, self.cbo_g3_mode, self.cbo_g4_mode, self.cbo_daq, self.cbo_mono, self.cbo_lockin, self.cbo_drive_lockin, self.ed_user, self.ed_device_id, self.ed_base]:
             set_standard_input_height(widget, 26)
             widget.setMinimumWidth(0)
             widget.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
 
         protection_widgets = [widget for controls in self._protection_controls.values() for widget in controls]
         daq_widgets = [controls[0] for controls in self._manual_daq_controls.values()]
-        for widget in (self.sp_amp, self.sp_lkn, self.sp_manual_g1, self.sp_manual_g2, self.sp_manual_g3, self.sp_manual_wavelength, *protection_widgets, *daq_widgets):
+        for widget in (self.sp_amp, self.sp_lkn, self.sp_manual_g1, self.sp_manual_g2, self.sp_manual_g3, self.sp_manual_g4, self.sp_manual_wavelength, *protection_widgets, *daq_widgets):
             widget.setMinimumWidth(0)
             widget.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
 
@@ -484,7 +497,7 @@ class ConnDock(QtWidgets.QWidget):
             apply_tooltip("Decrease the source setpoint by the selected step; continuous clicks are combined.", down_button)
             apply_tooltip("Increase the source setpoint by the selected step; continuous clicks are combined.", up_button)
             apply_tooltip("Read this gate's set voltage, measured voltage, current, and compliance state.", self._manual_gate_read_buttons[name])
-        apply_tooltip("Safely ramp this gate from its current source setpoint to 0 V.", self.btn_manual_g1_zero, self.btn_manual_g2_zero, self.btn_manual_g3_zero)
+        apply_tooltip("Safely ramp this gate from its current source setpoint to 0 V.", self.btn_manual_g1_zero, self.btn_manual_g2_zero, self.btn_manual_g3_zero, self.btn_manual_g4_zero)
         for ao_index, (spinbox, ramp_button, zero_button, state_label) in self._manual_daq_controls.items():
             apply_tooltip(f"Safely ramp only DAQ AO{ao_index}; other AO channels remain unchanged.", spinbox, ramp_button)
             apply_tooltip(f"Safely ramp DAQ AO{ao_index} to 0 V.", zero_button)
@@ -492,7 +505,7 @@ class ConnDock(QtWidgets.QWidget):
         apply_tooltip("Move the connected monochromator to this wavelength.", lbl_manual_wavelength, self.sp_manual_wavelength, self.btn_manual_wavelength)
         apply_tooltip("Read all connected gates now.", self.btn_read_gate_currents)
         apply_tooltip("Immediately request stop and ramp outputs back to 0 V where supported.", self.btn_stop)
-        for combo in (self.cbo_g1_mode, self.cbo_g2_mode, self.cbo_g3_mode):
+        for combo in (self.cbo_g1_mode, self.cbo_g2_mode, self.cbo_g3_mode, self.cbo_g4_mode):
             combo.currentIndexChanged.connect(self._update_protection_controls)
         self._update_protection_controls()
         self._update_manual_controls()
@@ -539,10 +552,13 @@ class ConnDock(QtWidgets.QWidget):
     def update_ac_voltage_estimate(self, sine_out_v):
         self._ac_sine_out_v = sine_out_v
         ratio = self.sp_ac_ratio.value() or None
-        value = sample_ac_voltage_estimate({'ac_voltage_ratio': ratio,
+        source = self.drag_drive_settings.configuration()['excitation_source']
+        value = sample_ac_voltage_estimate({'excitation_source': source, 'ac_voltage_ratio': ratio,
             'lockin_settings': {'values': {'sine_out_v': sine_out_v}}})
         if ratio is None:
             text = "Sample AC estimate: ratio not specified"
+        elif source != "primary":
+            text = "Sample AC estimate unavailable for external or unspecified excitation"
         elif value is None:
             text = "Sample AC estimate: Sine Out unavailable"
         else:
@@ -614,7 +630,11 @@ class ConnDock(QtWidgets.QWidget):
         label.style().polish(label)
 
     def _update_sensitivity_mode(self, *_args):
-        dual = self.drag_drive_settings.configuration()['enabled']
+        config = self.drag_drive_settings.configuration()
+        dual = config['enabled']
+        self._signal_chain_form.setRowVisible(self.lbl_amp, config['mode'] != 'single_drive')
+        self._signal_chain_form.setRowVisible(self.lbl_amp_status, config['mode'] != 'single_drive')
+        self.update_ac_voltage_estimate(getattr(self, '_ac_sine_out_v', None))
         self.lbl_lkn.setText('Drag sensitivity:' if dual else 'Lock-in sensitivity (V):')
         self.sp_lkn.setVisible(not dual)
         self.ed_lkn_readback.setVisible(dual)
@@ -806,15 +826,19 @@ class ConnDock(QtWidgets.QWidget):
             gate1=self.cbo_g1.current_address(),
             gate2=self.cbo_g2.current_address(),
             gate3=self.cbo_g3.current_address(),
+            gate4=self.cbo_g4.current_address(),
             gate1_mode=self.cbo_g1_mode.currentData(),
             gate2_mode=self.cbo_g2_mode.currentData(),
             gate3_mode=self.cbo_g3_mode.currentData(),
+            gate4_mode=self.cbo_g4_mode.currentData(),
             gate1_max_voltage_v=float(self._protection_controls["g1"][0].value()),
             gate2_max_voltage_v=float(self._protection_controls["g2"][0].value()),
             gate3_max_voltage_v=float(self._protection_controls["g3"][0].value()),
+            gate4_max_voltage_v=float(self._protection_controls["g4"][0].value()),
             gate1_current_compliance_a=float(self._protection_controls["g1"][1].value()),
             gate2_current_compliance_a=float(self._protection_controls["g2"][1].value()),
             gate3_current_compliance_a=float(self._protection_controls["g3"][1].value()),
+            gate4_current_compliance_a=float(self._protection_controls["g4"][1].value()),
             daq_dev=self.cbo_daq.current_address(),
             mono=self.cbo_mono.current_address(),
             lockin=self.cbo_lockin.current_address(),
@@ -830,9 +854,11 @@ class ConnDock(QtWidgets.QWidget):
         s.setValue("addr/g1", self.cbo_g1.current_address())
         s.setValue("addr/g2", self.cbo_g2.current_address())
         s.setValue("addr/g3", self.cbo_g3.current_address())
+        s.setValue("addr/g4", self.cbo_g4.current_address())
         s.setValue("mode/g1", self.cbo_g1_mode.currentData())
         s.setValue("mode/g2", self.cbo_g2_mode.currentData())
         s.setValue("mode/g3", self.cbo_g3_mode.currentData())
+        s.setValue("mode/g4", self.cbo_g4_mode.currentData())
         for name, (voltage, current) in self._protection_controls.items():
             s.setValue(f"protection/{name}/max_voltage_v", float(voltage.value()))
             s.setValue(f"protection/{name}/current_compliance_a", float(current.value()))
@@ -872,10 +898,12 @@ class ConnDock(QtWidgets.QWidget):
         self.cbo_g1.setCurrentText(str(s.value("addr/g1", self.conns.gate1)))
         self.cbo_g2.setCurrentText(str(s.value("addr/g2", self.conns.gate2)))
         self.cbo_g3.setCurrentText(str(s.value("addr/g3", self.conns.gate3)))
+        self.cbo_g4.setCurrentText(str(s.value("addr/g4", self.conns.gate4)))
         self._set_combo_data(self.cbo_g1_mode, str(s.value("mode/g1", self.conns.gate1_mode)))
         self._set_combo_data(self.cbo_g2_mode, str(s.value("mode/g2", self.conns.gate2_mode)))
         self._set_combo_data(self.cbo_g3_mode, str(s.value("mode/g3", self.conns.gate3_mode)))
-        for index, name in enumerate(("g1", "g2", "g3"), start=1):
+        self._set_combo_data(self.cbo_g4_mode, str(s.value("mode/g4", self.conns.gate4_mode)))
+        for index, name in enumerate(("g1", "g2", "g3", "g4"), start=1):
             voltage, current = self._protection_controls[name]
             voltage.setValue(
                 float(s.value(f"protection/{name}/max_voltage_v", getattr(self.conns, f"gate{index}_max_voltage_v")))
@@ -932,7 +960,7 @@ class ConnDock(QtWidgets.QWidget):
         self.device_manager.gate_currents_read.connect(self._on_gate_currents_read)
         self.device_manager.daq_output_finished.connect(self._on_daq_output_finished)
         self.device_manager.protection_changed.connect(self._on_protection_changed)
-        for name in ("g1", "g2", "g3", "daq", "mono", "lockin", "lockin_drive"):
+        for name in ("g1", "g2", "g3", "g4", "daq", "mono", "lockin", "lockin_drive"):
             self._on_device_status_changed(name, self.device_manager.state(name), self.device_manager.detail(name))
         self._update_reconnect_indicators()
         self._update_manual_controls()
@@ -982,7 +1010,7 @@ class ConnDock(QtWidgets.QWidget):
             return
         self._pending_protection_apply_names = [
             name
-            for name in ("g1", "g2", "g3")
+            for name in ("g1", "g2", "g3", "g4")
             if self.device_manager.is_connected(name)
             and self.device_manager.is_voltage_source_mode(name)
         ]
@@ -1298,7 +1326,7 @@ class ConnDock(QtWidgets.QWidget):
             enabled
             and any(
                 self.device_manager.is_connected(name)
-                for name in ("g1", "g2", "g3")
+                for name in ("g1", "g2", "g3", "g4")
             )
         )
         daq = self.device_manager.get_session("daq") if self.device_manager.is_connected("daq") else None
@@ -1384,6 +1412,7 @@ class ConnDock(QtWidgets.QWidget):
             "g1": self.cbo_g1_mode.currentData(),
             "g2": self.cbo_g2_mode.currentData(),
             "g3": self.cbo_g3_mode.currentData(),
+            "g4": self.cbo_g4_mode.currentData(),
         }
         busy = bool(self.device_manager and self.device_manager.is_busy())
         any_applicable = False
@@ -1430,6 +1459,7 @@ class ConnDock(QtWidgets.QWidget):
             "g1": self.cbo_g1,
             "g2": self.cbo_g2,
             "g3": self.cbo_g3,
+            "g4": self.cbo_g4,
             "daq": self.cbo_daq,
             "mono": self.cbo_mono,
             "lockin": self.cbo_lockin,
@@ -1439,6 +1469,7 @@ class ConnDock(QtWidgets.QWidget):
             "g1": self.cbo_g1_mode,
             "g2": self.cbo_g2_mode,
             "g3": self.cbo_g3_mode,
+            "g4": self.cbo_g4_mode,
         }
         changed = []
         for name, widget in mapping.items():
@@ -1448,7 +1479,7 @@ class ConnDock(QtWidgets.QWidget):
                 changed.append(name.upper())
                 tooltip = (
                     f"Live session still uses {self.device_manager.connected_address(name)}"
-                    f" in {keithley_mode_label(self.device_manager.connected_mode(name)) if name in {'g1','g2','g3'} else 'its current mode'}. "
+                    f" in {keithley_mode_label(self.device_manager.connected_mode(name)) if name in {'g1','g2','g3','g4'} else 'its current mode'}. "
                     "Reconnect from Devices to apply the edited address or mode."
                 )
             self._set_reconnect_state(widget, needs, tooltip)
@@ -1479,6 +1510,7 @@ class ConnDock(QtWidgets.QWidget):
             ("G1", self.cbo_g1),
             ("G2", self.cbo_g2),
             ("G3", self.cbo_g3),
+            ("G4", self.cbo_g4),
             ("lock-in", self.cbo_lockin),
             ("Drive lock-in", self.cbo_drive_lockin),
         ):

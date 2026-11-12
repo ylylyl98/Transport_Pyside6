@@ -35,6 +35,9 @@ class PhotocurrentWorker(RunWorker):
         # Widgets retains its existing recipe-only reservation contract.
         self.apply_connected_gate_biases = bool(kw.get("apply_connected_gate_biases", False))
         self.g3 = kw.get("g3")
+        self.g4 = kw.get("g4")
+        self.device_manager = kw.get("device_manager")
+        self._outputs_started = False
         self.daq = kw.get("daq")
         self.mono = kw.get("mono")
         self.plot_choice = kw.get("plot_choice")
@@ -111,11 +114,19 @@ class PhotocurrentWorker(RunWorker):
                 for label, value in values:
                     if abs(float(value)) > V_LIMIT:
                         raise RuntimeError(
-                            f"Condition {condition_number} {label} is {value:.3f} V, above the {V_LIMIT:.1f} V limit."
+                            f"Condition {condition_number} {label} is {value:.9g} V, above the {V_LIMIT:.1f} V limit."
                         )
                 if condition.settle_s < 0:
                     raise RuntimeError(f"Condition {condition_number} settle time must be zero or greater.")
 
+            trajectory = [{"vtg": c.vtg, "vbg": c.vbg, "vds": c.vds} for c in conditions]
+            self.validate_source_trajectory(trajectory, gate_ramp=GATE_BIAS_RAMP_STEP_V,
+                                            vds_ramp=min(SAFE_RAMP_STEP_V, self.p.vds_ramp),
+                                            use_g1=self._uses_g1, use_g2=self._uses_g2,
+                                            use_g3=self.p.use_vds and self.p.vds_source == "Keithley 2400")
+            for condition in conditions:
+                bias2 = condition
+                self.validate_bias2(bias2, [condition.vds], self.p.use_vds and self.p.vds_source != "None")
             wavelengths = self._wavelengths()
             total_points = len(conditions) * len(wavelengths)
 
@@ -147,13 +158,23 @@ class PhotocurrentWorker(RunWorker):
                     },
                 )
 
+            self._outputs_started = True
             point_index = 0
             for condition_number, (condition, condition_path) in enumerate(zip(conditions, condition_paths), start=1):
                 self.check_abort_pause()
                 self.status.emit(f"Condition {condition_number}/{len(conditions)}: applying biases")
                 self._ramp_gate(self.g1, "G1/Vtg", condition.vtg, self._uses_g1)
                 self._ramp_gate(self.g2, "G2/Vbg", condition.vbg, self._uses_g2)
-                vds_now = self._ramp_vds(condition.vds)
+                bias2 = condition
+                if bias2.bias2_mode == "Disabled":
+                    self.apply_bias2(condition.vds, bias2)
+                if bias2.bias2_mode == "Follow":
+                    self.move_pair(condition.vds, bias2)
+                    vds_now = float(condition.vds)
+                else:
+                    vds_now = self._ramp_vds(condition.vds)
+                    if bias2.bias2_mode != "Disabled":
+                        self.apply_bias2(condition.vds, bias2)
                 if condition.settle_s:
                     self.status.emit(f"Condition {condition_number}/{len(conditions)}: settling for {condition.settle_s:g} s")
                     self._wait_with_abort(condition.settle_s)
@@ -201,6 +222,8 @@ class PhotocurrentWorker(RunWorker):
                         self.point.emit(float(wl), y)
                         self.point_data.emit({
                             **sample,
+                "Bias2": getattr(self, "_bias2_voltage", None),
+                "Ibias2_Keithley": getattr(self, "_bias2_current", None),
                             "x": float(wl),
                             "condition": condition_number,
                             "Vtg": condition.vtg,
@@ -215,29 +238,26 @@ class PhotocurrentWorker(RunWorker):
                         self.progress.emit(point_index / total_points)
             run_status = "finished"
             run_detail = f"Saved {len(generated_paths)} condition CSV file(s) in: {os.path.dirname(csv_path)}"
-            self.finished.emit(os.path.dirname(csv_path))
         except RunStopped as ex:
             run_status = "stopped"
             run_detail = f"{ex}. Partial condition files saved: {', '.join(generated_paths)}" if generated_paths else str(ex)
-            self.stopped.emit(run_detail)
         except Exception as ex:
             run_status = "error"
             run_detail = str(ex)
-            self.error.emit(run_detail)
         finally:
             failures = []
             try:
-                if getattr(self, "_uses_g1", False) and self.g1 is not None:
+                if self._outputs_started and getattr(self, "_uses_g1", False) and self.g1 is not None:
                     safe_ramp(self.g1.set_voltage, self._source_voltage(self.g1), 0.0, SAFE_RAMP_STEP_V, SAFE_RAMP_STEP_T)
             except Exception as ex:
                 failures.append(f"G1/Vtg zero failed: {ex}")
             try:
-                if getattr(self, "_uses_g2", False) and self.g2 is not None:
+                if self._outputs_started and getattr(self, "_uses_g2", False) and self.g2 is not None:
                     safe_ramp(self.g2.set_voltage, self._source_voltage(self.g2), 0.0, SAFE_RAMP_STEP_V, SAFE_RAMP_STEP_T)
             except Exception as ex:
                 failures.append(f"G2/Vbg zero failed: {ex}")
             try:
-                if self.p.use_vds:
+                if self._outputs_started and self.p.use_vds:
                     if self.p.vds_source == "Keithley 2400":
                         if self.g3 is not None:
                             safe_ramp(self.g3.set_voltage, self._source_voltage(self.g3), 0.0, SAFE_RAMP_STEP_V, SAFE_RAMP_STEP_T)
@@ -245,8 +265,20 @@ class PhotocurrentWorker(RunWorker):
                         self.daq.ramp_voltage(self.p.ao_channel, 0.0, SAFE_RAMP_STEP_V, SAFE_RAMP_STEP_T)
             except Exception as ex:
                 failures.append(f"Vds zero failed: {ex}")
+            try:
+                self.cleanup_bias2()
+            except Exception as ex:
+                failures.append(f"Bias2 zero failed: {ex}")
             self.emit_safe_state_report(failures)
-            update_run_metadata_status(self.p.output_metadata_path, run_status, run_detail, failures)
+            if failures:
+                run_status, run_detail = "error", "Output cleanup failed: " + "; ".join(failures)
+            try:
+                update_run_metadata_status(self.p.output_metadata_path, run_status, run_detail, failures)
+            except Exception as ex:
+                run_status, run_detail = "error", f"Run metadata save failed: {ex}"
+            if run_status == "finished": self.finished.emit(os.path.dirname(csv_path))
+            elif run_status == "stopped": self.stopped.emit(run_detail)
+            else: self.error.emit(run_detail)
 
     def _active_conditions(self) -> list[PhotocurrentBiasCondition]:
         if self.p.bias_conditions:
@@ -256,6 +288,8 @@ class PhotocurrentWorker(RunWorker):
                 vtg=self.p.vtg_set,
                 vbg=self.p.vbg_set,
                 vds=self.p.vds_set,
+                bias2_mode=self.p.bias2_mode, bias2_voltage=self.p.bias2_voltage,
+                bias2_offset=self.p.bias2_offset, bias2_ramp=self.p.bias2_ramp,
             )
         ]
 
@@ -283,7 +317,7 @@ class PhotocurrentWorker(RunWorker):
             raise RuntimeError(f"{label} is required by the selected bias recipe.")
         start = self._source_voltage(session)
         self.log.emit(
-            f"Ramping {label} from {start:.3f} V to {target:.3f} V "
+            f"Ramping {label} from {start:.9g} V to {target:.9g} V "
             f"({GATE_BIAS_RAMP_STEP_V:g} V/step, {GATE_BIAS_RAMP_STEP_T:g} s/step)"
         )
         safe_ramp(
@@ -297,7 +331,7 @@ class PhotocurrentWorker(RunWorker):
 
     def _ramp_vds(self, target: float) -> float:
         if not self.p.use_vds:
-            return 0.0
+            return None
         target = float(target)
         if self.p.vds_source == "Keithley 2400":
             if self.g3 is None:
@@ -331,13 +365,14 @@ class PhotocurrentWorker(RunWorker):
             return None
         try:
             values = self.g3.acquire()
-            return values.get("current", self.g3.current)
+            return values.get("current", getattr(self.g3, "current", None))
         except Exception:
             return None
 
     def _plot_value(self, ids_dc, ids_x, ids_y, ids_keithley):
         if self.plot_choice in getattr(self, "_current_sample", {}):
-            return self._current_sample[self.plot_choice]
+            value = self._current_sample[self.plot_choice]
+            return value if value is not None else float("nan")
         if self.plot_choice == "Ids_X":
             return ids_x
         if self.plot_choice == "Ids_Y":

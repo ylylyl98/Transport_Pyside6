@@ -113,13 +113,23 @@ class QuickFormTests(unittest.TestCase):
         self.directory.cleanup()
         self.assertEqual(self.warnings, [])
 
+    def type_input(self, item, value):
+        item.forceActiveFocus()
+        QtTest.QTest.keyClick(self.window, QtCore.Qt.Key_A, QtCore.Qt.ControlModifier)
+        for character in str(value):
+            QtTest.QTest.keyClick(self.window, ord(character.upper()))
+
     def test_hysteresis_field_tolerance_editor_commits_mt_as_tesla(self):
         self.service.mode = 5
         self.service.setValue("measurement_mode", "stepped")
         self.load()
+        header = self.find("measurement_section_Hysteresis: set, wait, measure")
+        header.forceActiveFocus()
+        QtTest.QTest.keyClick(self.window, QtCore.Qt.Key_Space)
+        self.app.processEvents()
         editor = self.find("field_field_tolerance_t")
         editor.forceActiveFocus()
-        editor.setProperty("text", "0.3")
+        self.type_input(editor, "0.3")
         QtTest.QTest.keyClick(self.window, QtCore.Qt.Key_Return)
         self.app.processEvents()
         self.assertAlmostEqual(self.service.collect_params().field_tolerance_t, .0003)
@@ -131,7 +141,7 @@ class QuickFormTests(unittest.TestCase):
         self.load()
         original = self.find("field_vds_stop")
         original.forceActiveFocus()
-        original.setProperty("text", "0.12345")
+        self.type_input(original, "0.12345")
         for n in range(30):
             self.service.setValue("n_sample", n + 1)
             self.manager.status_changed.emit("g1", "connected", "telemetry")
@@ -156,7 +166,7 @@ class QuickFormTests(unittest.TestCase):
         self.assertIn("Doping = Vtg + r*Vbg", help_label.property("text"))
         self.assertTrue(help_label.isVisible())
         field.forceActiveFocus()
-        field.setProperty("text", "-2")
+        self.type_input(field, "-2")
         QtTest.QTest.keyClick(self.window, QtCore.Qt.Key.Key_Return)
         self.app.processEvents()
         self.assertIn("Requested start: Vtg = -1 V; Vbg = -1 V", preview.property("text"))
@@ -173,7 +183,7 @@ class QuickFormTests(unittest.TestCase):
         self.load()
         original = self.find("field_n_sample")
         original.forceActiveFocus()
-        original.setProperty("text", "1.5")
+        self.type_input(original, "1.5")
         QtTest.QTest.keyClick(self.window, QtCore.Qt.Key.Key_Return)
         self.app.processEvents()
         self.assertEqual(self.find("field_n_sample"), original)
@@ -184,7 +194,7 @@ class QuickFormTests(unittest.TestCase):
             self.service.start()
             preflight.assert_not_called()
         # Returning to the previously accepted value must also clear rejection.
-        original.setProperty("text", str(defaults(0)["n_sample"]))
+        self.type_input(original, str(defaults(0)["n_sample"]))
         QtTest.QTest.keyClick(self.window, QtCore.Qt.Key.Key_Return)
         self.app.processEvents()
         self.assertEqual(self.service.collect_params().n_sample, defaults(0)["n_sample"])
@@ -199,7 +209,7 @@ class QuickFormTests(unittest.TestCase):
         QtTest.QTest.qWait(40)
         original = self.recipe_cell("conditions", 0, "raw_vtg_start")
         original.forceActiveFocus()
-        original.setProperty("text", "4.5")
+        self.type_input(original, "4.5")
         self.service.setRowValue("conditions", 1, "raw_vtg_start", 3.)
         self.app.processEvents()
         self.assertIs(self.recipe_cell("conditions", 0, "raw_vtg_start"), original)
@@ -276,7 +286,7 @@ class QuickFormTests(unittest.TestCase):
         self.app.processEvents()
         self.assertTrue(ramp.isVisible())
         ramp.forceActiveFocus()
-        ramp.setProperty("text", "0.125")
+        self.type_input(ramp, "0.125")
         self.service.setValue("n_sample", 5)
         self.app.processEvents()
         self.assertEqual(self.find("field_vg_ramp"), ramp)
@@ -358,7 +368,7 @@ class QuickFormTests(unittest.TestCase):
         self.app.processEvents()
         ratio = self.find("field_ratio")
         ratio.forceActiveFocus()
-        ratio.setProperty("text", "1.2345")
+        self.type_input(ratio, "1.2345")
         self.service.setValue("coordinate_mode", "Derived")
         self.app.processEvents()
         self.assertEqual(self.find("field_ratio"), ratio)
@@ -380,7 +390,7 @@ class QuickFormTests(unittest.TestCase):
         self.load("FieldForm")
         original = self.find("field_vds_stop")
         original.forceActiveFocus()
-        original.setProperty("text", "0.654")
+        self.type_input(original, "0.654")
         self.service.setValue("n_sample", 3)
         self.app.processEvents()
         self.assertEqual(self.find("field_vds_stop"), original)
@@ -394,6 +404,12 @@ class QuickFormTests(unittest.TestCase):
             self.service.mode = mode
             QtTest.QTest.qWait(30)
             editor = self.find("field_base_name")
+            if not editor.isVisible():
+                header = self.find("measurement_section_File output")
+                header.forceActiveFocus()
+                QtTest.QTest.keyClick(self.window, QtCore.Qt.Key_Space)
+                self.app.processEvents()
+            self.assertTrue(editor.isVisible())
             editor.forceActiveFocus()
             editor.setProperty("text", name)
             self.app.processEvents()
@@ -427,7 +443,12 @@ class QuickFormTests(unittest.TestCase):
 
     def test_filename_card_previews_drafts_copies_full_names_and_collapses(self):
         self.load(width=366)
+        header = self.find("measurement_section_File output")
+        header.forceActiveFocus()
+        QtTest.QTest.keyClick(self.window, QtCore.Qt.Key_Space)
+        self.app.processEvents()
         editor = self.find("field_base_name")
+        self.assertTrue(editor.isVisible())
         accepted = self.service.collect_params().base_name
         draft = "sample_draft_" + "long_name_" * 15
         editor.forceActiveFocus()
@@ -464,6 +485,9 @@ class QuickFormTests(unittest.TestCase):
         self.service.duplicateRow("conditions", 0)
         self.service.selectRow("conditions", 1)
         self.load(width=366)
+        header = self.find("measurement_section_File output")
+        header.forceActiveFocus()
+        QtTest.QTest.keyClick(self.window, QtCore.Qt.Key_Space)
         QtTest.QTest.qWait(160)
         self.assertTrue(self.find("filenameEditingScope").isVisible())
         self.assertIn("Condition 2", self.find("filenameEditingScope").property("text"))

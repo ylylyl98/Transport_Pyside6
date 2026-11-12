@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import "NumberFormat.js" as NumberFormat
 
 ColumnLayout {
     id: section
@@ -15,7 +16,7 @@ ColumnLayout {
     }
     Repeater {
         // Readback values change frequently; keep the three editable gate rows alive.
-        model: ["g1", "g2", "g3"]
+        model: ["g1", "g2", "g3", "g4"]
         delegate: ColumnLayout {
             id: gate
             required property string modelData
@@ -24,10 +25,10 @@ ColumnLayout {
             spacing: 6
             Rectangle { Layout.fillWidth: true; implicitHeight: 1; color: Theme.border }
             Label { text: gate.device.label + " · " + gate.device.state; font.bold: true; color: Theme.text; Layout.fillWidth: true }
-            Label { text: "Commanded " + gate.device.setVoltage + " V  ·  measured " + gate.device.measuredVoltage + " V\nCurrent " + gate.device.current + " A"; color: Theme.text; wrapMode: Text.Wrap; Layout.fillWidth: true }
+            Label { text: "Commanded " + NumberFormat.quantity(gate.device.setVoltage, "V") + "  ·  measured " + NumberFormat.quantity(gate.device.measuredVoltage, "V") + "\nCurrent " + NumberFormat.quantity(gate.device.current, "A"); color: Theme.text; wrapMode: Text.Wrap; Layout.fillWidth: true }
             Label { text: gate.device.protectionApplied ? "Source protection verified" : "Source protection unverified"; color: gate.device.protectionApplied ? Theme.muted : Theme.warning; wrapMode: Text.Wrap; Layout.fillWidth: true }
             Label {
-                text: "Limit " + gate.device.maxVoltage + " V / " + gate.device.currentCompliance + " A · compliance " + (!gate.device.connected || gate.device.complianceTripped === null ? "unknown" : gate.device.complianceTripped ? "TRIPPED" : "clear")
+                text: "Limit " + NumberFormat.quantity(gate.device.maxVoltage, "V") + " / " + NumberFormat.quantity(gate.device.currentCompliance, "A") + " · compliance " + (!gate.device.connected || gate.device.complianceTripped === null ? "unknown" : gate.device.complianceTripped ? "TRIPPED" : "clear")
                 color: gate.device.complianceTripped ? Theme.danger : Theme.muted; wrapMode: Text.Wrap; Layout.fillWidth: true
             }
             RowLayout {
@@ -53,7 +54,7 @@ ColumnLayout {
         Label { text: "DAQ analog output"; font.bold: true; color: Theme.text }
         Repeater {
             model: section.instruments.daqOutputs
-            delegate: Label { required property var modelData; text: "AO" + modelData.channel + ": commanded " + modelData.commanded + " V · measured " + modelData.measured + " V" + (modelData.error ? "\n" + modelData.error : ""); wrapMode: Text.Wrap; Layout.fillWidth: true; color: modelData.error ? Theme.danger : Theme.muted }
+            delegate: Label { required property var modelData; text: "AO" + modelData.channel + ": commanded " + NumberFormat.quantity(modelData.commanded, "V") + " · measured " + NumberFormat.quantity(modelData.measured, "V") + (modelData.error ? "\n" + modelData.error : ""); wrapMode: Text.Wrap; Layout.fillWidth: true; color: modelData.error ? Theme.danger : Theme.muted }
         }
         RowLayout {
             Layout.fillWidth: true
@@ -83,7 +84,7 @@ ColumnLayout {
         Rectangle { Layout.fillWidth: true; implicitHeight: 1; color: Theme.border }
         Label { text: "Other instrument connections"; font.bold: true; color: Theme.text; Layout.fillWidth: true }
         Repeater {
-            model: section.instruments.devices.filter(item => ["g1", "g2", "g3"].indexOf(item.name) < 0)
+            model: section.instruments.devices.filter(item => ["g1", "g2", "g3", "g4"].indexOf(item.name) < 0)
             delegate: Label { required property var modelData; text: modelData.label + " · " + modelData.state + (modelData.reconnect ? " · reconnect required" : "") + (modelData.detail ? " · " + modelData.detail : ""); wrapMode: Text.Wrap; color: Theme.muted; Layout.fillWidth: true }
         }
     }

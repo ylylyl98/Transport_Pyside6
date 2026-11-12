@@ -195,6 +195,31 @@ def build_sweep_preview(mode, params, connections):
             summary = 'Continuous field sweep: range only; acquisition point count depends on timing.'
     else:
         raise ValueError('Unknown measurement mode')
+    from app.bias_control import bias2_target
+    if mode in (0, 1, 2, 4) and getattr(params, 'bias2_mode', 'Disabled') != 'Disabled':
+        if params.bias2_mode == 'Follow' and params.vds_source == 'None':
+            raise ValueError('Bias 2 Follow requires a Bias 1 source')
+        targets = [bias2_target(params, p if mode == 0 else p['vds']) for p in points]
+        if any(not math.isfinite(v) or abs(v) > 20 for v in targets):
+            raise ValueError('Bias 2 preview exceeds ±20 V')
+        summary += f' Bias 2 ({params.bias2_mode}): {min(targets):g} to {max(targets):g} V; start {targets[0]:g}, end {targets[-1]:g} V.'
+        if mode in (1, 4):
+            vertices = list(zip(xs, targets))
+            traces.append(_trace(vertices, 'Bias 2', 'preview_curve_3'))
+            if len(points) <= MAX_SCATTER_POINTS:
+                samples.append(_sample_trace(vertices, 'preview_curve_3'))
+    elif mode in (3, 5):
+        conditions = [c for c in (params.bias_conditions if mode == 3 else params.conditions) if c.enabled]
+        for index, condition in enumerate(conditions, 1):
+            if condition.bias2_mode == 'Disabled':
+                continue
+            bias1 = params.use_vds and params.vds_source != 'None' if mode == 3 else condition.vds_source != 'None'
+            if condition.bias2_mode == 'Follow' and not bias1:
+                raise ValueError(f'Condition {index}: Bias 2 Follow requires a Bias 1 source')
+            target = bias2_target(condition, condition.vds)
+            if not math.isfinite(target) or abs(target) > 20:
+                raise ValueError(f'Condition {index}: Bias 2 exceeds ±20 V')
+            summary += f' Condition {index}: Bias 2 {target:g} V ({condition.bias2_mode}).'
     traces.extend(samples)
     if mode != 5:
         if len(points) <= MAX_SCATTER_POINTS:

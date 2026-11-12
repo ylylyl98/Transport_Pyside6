@@ -42,6 +42,14 @@ class SafeDoubleSpinBox(_TypedEntryOnlyMixin, QtWidgets.QDoubleSpinBox):
         super().__init__(*args, **kwargs)
         self._configure_typed_entry_only()
 
+    def textFromValue(self, value: float) -> str:
+        # Trim padding only; Qt still owns precision and locale-aware parsing.
+        text = super().textFromValue(value)
+        decimal = self.locale().decimalPoint()
+        if decimal in text:
+            text = text.rstrip(self.locale().zeroDigit()).removesuffix(decimal)
+        return text
+
 
 class TrimmedDoubleSpinBox(SafeDoubleSpinBox):
     """Fixed-point numeric entry without scientific notation or trailing zeros."""

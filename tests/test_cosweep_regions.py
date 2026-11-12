@@ -25,6 +25,9 @@ def example(**overrides):
 class RegionTests(unittest.TestCase):
     def test_worker_runs_merged_rows_into_one_csv(self):
         class Gate:
+            identity = "KEITHLEY INSTRUMENTS INC.,MODEL 2400,x,y"
+            cached_source_voltage_range_v = 20.0
+            def refresh_source_voltage_range(self): return self.cached_source_voltage_range_v
             voltage = 0.0
             def __init__(self):
                 self.calls = []

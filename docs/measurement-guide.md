@@ -8,6 +8,20 @@ The application coordinates Keithley 2400 source meters, an NI DAQ device and an
 
 ## Measurement modes and live plots
 
+Quick numeric fields use compact display text while idle. Focus a field to edit
+its full value, or hover to inspect it. Display rounding does not change recipe
+values, instrument commands or saved measurement precision. Small nonzero values
+remain nonzero; manual readouts use engineering units such as nA, µA and mV.
+The retained Widgets frontend trims decimal padding while preserving each
+control's configured precision.
+
+File output, acquisition options and other low-frequency settings start
+collapsed with a short summary. Expand their headings to edit them. Scan ranges,
+bias modes and the stepped scan's target temperature remain directly accessible.
+Errors retain their section indicator and can be revealed from validation.
+Long explanations have a **Show explanation** action. Stop controls and
+protection/connection status remain visible independently of these groups.
+
 | Measurement page | Purpose |
 | --- | --- |
 | **Vds Sweep** | Sweep drain-source bias while holding top- and back-gate biases. Vds can come from Keithley G3 or an NI-DAQ analog-output channel. |
@@ -27,7 +41,7 @@ Sampling controls show **Points / pass** alongside **Step**. Gate Scan keeps one
 
 Use **Preview sweep range** above the parameters, or **Sweep preview** beside **Live data**, to inspect a sweep without applying outputs. The preview commits the focused field and pending condition edits, plans in the background, and uses a separate plot. Return to Live data to see the retained acquired traces. While visible, the preview automatically follows the current page, selected condition and committed edits; rapid changes are combined before rebuilding, and obsolete background results are discarded. **Refresh** remains available for an immediate rebuild. Map previews use Fast axis horizontally and Slow axis vertically; a 1D map keeps the swept coordinate horizontally and shows point order vertically. Vds and wavelength previews likewise use their physical sweep coordinate horizontally. Gate Scan follows its swept coordinate; when several raw axes sweep together, it explicitly uses their shared Step Index. A Start circle and an End square have separate labels, including when both occupy the same position; a forward Stop / turn diamond is shown for return scans. Map previews also show physical gate bounds and rectangle outlines for merged regions. Very large paths explicitly report any display truncation; acquisition still uses the complete plan. B-field Gate Scan previews the selected condition, and continuous B-field Sweep shows only its field range, not a predicted sample count.
 
-For an L-shaped or stepped map, use **2D Map → Additional gate regions → Use Vtg / Vbg regions** if needed. Set the primary Vtg/Vbg ranges for Region 1, then **Add region** for each extra rectangle and edit its start, stop and step inline. This section is beside the map ranges and opens by default. Preview to confirm the combined region and scan order. Overlapping coordinates are measured once; disconnected rectangles are rejected by the existing planner. This supports unions of axis-aligned rectangles, rather than arbitrary polygon vertices.
+For an L-shaped or stepped map, use **2D Map → Additional gate regions → Use Vtg / Vbg regions** if needed. Set the primary Vtg/Vbg ranges for Region 1, then **Add region** for each extra rectangle and edit its start, stop and step inline. This section is beside the map ranges; expand its heading to edit additional regions. Preview to confirm the combined region and scan order. Overlapping coordinates are measured once; disconnected rectangles are rejected by the existing planner. This supports unions of axis-aligned rectangles, rather than arbitrary polygon vertices.
 
 Plot ticks use readable intervals such as 0.5 V rather than equal subdivisions of the padded view bounds. Point order and Step Index ticks are nonnegative integers. This affects only tick labels and grid lines, not sweep values or zoom limits. Start, End and Stop / turn are labeled at their actual positions and are omitted from the trace legend to avoid duplicate labels.
 
@@ -54,7 +68,39 @@ Use **Analysis** to open the separate read-only viewer for saved scans, maps and
 
 The application owns the instrument connections: address or Keithley-mode changes require reconnection before they apply to a measurement.
 
-For **2D Map**, the **Keithley 2400** source option supports both 2400 and 2401 instruments. The app checks the detected model and confirmed source range before starting, including fixed Vds values. If a supported source has no cached range, Start refreshes its readback in the background; review the result and press Start again. Resolution messages show which source, model, range or readback error needs attention. The 2401 uses the 0.2, 2 and 20 V source ranges; its resolution check does not accept a 200 V range.
+The **Keithley 2400** source option supports both 2400 and 2401 instruments.
+Numeric input precision does not imply that the instrument can program every
+entered value. The source's voltage range determines its programming resolution:
+
+| Source range | Voltage programming increment |
+| --- | --- |
+| 200 mV | 5 µV (`0.000005 V`) |
+| 2 V | 50 µV (`0.00005 V`) |
+| 20 V | 500 µV (`0.0005 V`) |
+| 200 V (2400 only) | 5 mV (`0.005 V`) |
+
+These are **source programming** resolutions, not voltage measurement resolutions
+or output accuracy. See the [Keithley 2400/2401 specifications](https://download.tek.com/document/SPEC-2400LV_C_L_May2013.pdf).
+The application's existing voltage limits still apply; this table does not extend them.
+
+All measurement modes check the physical Keithley targets, including fixed gates,
+derived-coordinate conversions and Bias 2 offset targets. The scan start and each
+generated point must lie on the source's programming grid; choosing a step larger
+than the minimum is insufficient if it is not a compatible multiple. For example,
+on the 20 V source range a `0.0001 V` scan step is too small, and `0.0007 V` is not
+a multiple of the `0.0005 V` increment. Requested sample targets are never silently
+rounded and the app does not automatically switch source range to fit a recipe.
+
+Quick previews use cached model/range information. Missing range information may
+require refreshing readback and pressing Start again. Execution checks refresh the
+source range after reserving the device and before applying outputs. Unknown
+models, unavailable ranges and incompatible targets stop the run with an explanation.
+Ramp steps are maximum increments: intermediate ramp points are aligned to the
+source grid without exceeding that increment; a ramp smaller than one programming
+increment is rejected. The final target remains exact. DAQ outputs retain their
+own limits rather than using the Keithley resolution table.
+Manual targets and relative steps follow the same source-grid rules. An invalid
+manual request is reported without sending that unsupported target.
 
 **Instruments → Magnet & temperature** contains separate controls for **attoDRY1000 / LS335** and **attoDRY2100 / SDK**. **Detect & connect** tries the configured connections and selects the only connected system; if both are online, choose one manually. The header shows the selected system's read-only summary. The 1000 supports verified sample targets, heater ranges, ramps, optional stability waiting and automatic ranges from commissioned temperature bands. See [sample-temperature instructions](guides/SAMPLE_TEMPERATURE_1000.md).
 
@@ -130,6 +176,42 @@ Doping/E-field (or Vtg/Vbg) and Vds share this syntax; scalar values repeat and 
 Quick-added Vds uses Keithley 2400; the source remains editable in the conditions table. Connected voltage protections are checked during preview, and full instrument validation still runs before starting a sweep.
 
 ## Data output
+
+### Optional second bias source
+
+The original Vds source is **Bias 1**. Configure an additional Keithley 2400/2401
+as **G4 / Bias 2** in Connections & protection, with its own address, voltage
+limit and current compliance. Its address is empty by default. Existing saved
+recipes load with Bias 2 **Disabled** and need no additional instrument.
+
+Each measurement offers **Disabled**, **Fixed**, and **Follow**. Fixed holds the
+entered voltage independently of Bias 1. Follow uses the commanded trajectory:
+`Bias 2 = Bias 1 + offset`, including reverse passes and map row changes. Follow
+requires an enabled Bias 1; Fixed can be used with Bias 1 disabled. Vds Sweep
+itself still requires a Bias 1 source. Photocurrent and magnetic workflows save
+the Bias 2 settings per condition. In Widgets, select a Photocurrent or B-field
+condition to edit its Bias 2 settings below the table.
+
+An enabled Bias 2 must be connected with verified protection and representable
+targets before acquisition starts. Paired moves interleave bounded voltage steps,
+then apply the measurement's settling delay before sampling. Two independent
+instruments are not hardware-synchronous: the offset is a target-point relation,
+not a guarantee during each individual write or startup transition. Stop and
+cleanup return participating sources to zero independently, rather than retaining
+the offset. Disabled Bias 2 is not written or read by the measurement; disabling
+it is not a manual zero command. Use its explicit Zero control when needed.
+
+The extra CSV fields are `Bias2` (commanded volts) and `Ibias2_Keithley` (measured
+amps). Original `Vds` and `Ids_Keithley` retain their Bias 1 meaning. Unused
+channels are blank, not a measured zero. Keithley currents are read sequentially,
+so they are associated with one scan point but are not simultaneous measurements.
+The second source is currently Keithley-only; Bias 1 retains its DAQ AO option.
+Dual-bias map ETA uses a model allowance and live timing; older single-bias
+historical calibration is not applied to it.
+
+For one Lock-in serving either Drag or Drive, select its role in the global
+Signal chain settings before starting; see [single Lock-in roles](drag-drive.md).
+This AC role is independent of the two Keithley bias-current measurements.
 
 Files are written under:
 

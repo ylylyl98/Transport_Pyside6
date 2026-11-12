@@ -22,8 +22,9 @@ MODES = [("vds_sweep", "Vds Sweep", DualGateParams),
          ("bfield_transport", "B-field Sweep", BFieldTransportParams)]
 
 CHOICES = {
+    "bias2_mode": ["Disabled", "Fixed", "Follow"],
     "vds_source": ["Keithley 2400", "NI DAQ AO", "None"],
-    "plot_choice": ["Ids_DC", "Ids_X", "Ids_Y", "Ids_Keithley", "I_drag_X", "I_drag_Y", "I_drag_R", "I_drive_X", "I_drive_Y", "I_drive_R"],
+    "plot_choice": ["Ids_DC", "Ids_X", "Ids_Y", "Ids_Keithley", "Ibias2_Keithley", "I_drag_X", "I_drag_Y", "I_drag_R", "I_drive_X", "I_drive_Y", "I_drive_R"],
     "plot_x_axis": ["Follow Sweep", "Step Index", "Vtg", "Vbg", "Vds", "Doping", "E-field"],
     "ratio_target": ["Vbg", "Vtg"], "derived_ratio_target": ["Vbg", "Vtg"],
     "derived_axis": ["Doping", "E-field"], "derived_vds_mode": ["Fixed", "Swept"],
@@ -54,6 +55,8 @@ def label(key):
     if key in BFIELD_HYSTERESIS_LABELS:
         return BFIELD_HYSTERESIS_LABELS[key]
     special = {"n_sample": "Averages", "n_points": "Number of points", "delay": "Acquisition delay (s)",
+               "bias2_mode": "Bias 2 mode", "bias2_voltage": "Bias 2 voltage (V)",
+               "bias2_offset": "Bias 2 − Bias 1 offset (V)", "bias2_ramp": "Bias 2 ramp step (V)",
                "vg_ramp": "Gate ramp step (V)", "vds_ramp": "Vds ramp step (V)",
                "fields_t": "B-field targets (T)", "resume_checkpoint": "Resume checkpoint path",
                "wl_start": "Start (nm)", "wl_stop": "Stop (nm)", "wl_step": "Step (nm)",
@@ -98,6 +101,26 @@ def row_default(key, mode):
     if mode == 4:
         return {"enabled": True, "name": "Condition", **{k: v for k, v in asdict(LineSweepParams()).items() if k not in HIDDEN}}
     return asdict(BFieldTransportCondition())
+
+
+def bias2_keys(values):
+    mode = values.get("bias2_mode", "Disabled")
+    return ["bias2_mode"] + (["bias2_voltage"] if mode == "Fixed" else
+                             ["bias2_offset"] if mode == "Follow" else []) + (
+                             ["bias2_ramp"] if mode != "Disabled" else [])
+
+
+def bias2_summary(values, bias1=None):
+    mode = values.get("bias2_mode", "Disabled")
+    if mode == "Disabled":
+        return "Bias 2 not used; no connection required."
+    if mode == "Fixed":
+        return f"Bias 2 = {values.get('bias2_voltage', 0):g} V (G4 / Keithley)."
+    offset = values.get("bias2_offset", 0)
+    text = f"Bias 2 = Bias 1 + ({offset:g} V); follows every forward/reverse point."
+    if bias1 is not None:
+        text += f" Target: {float(bias1) + offset:g} V."
+    return text
 
 
 def descriptor(key, value, mode):
@@ -182,6 +205,8 @@ def schema(values, mode, errors=None):
                 item["visible"] = values["mode"] == "Derived" or key in ("derived_ratio", "derived_ratio_target")
         if key == "ao_channel":
             item["visible"] = values.get("vds_source") == "NI DAQ AO"
+        if key.startswith("bias2_"):
+            item["visible"] = key in bias2_keys(values) and mode != 3
         if mode == 5 and key in BFIELD_HYSTERESIS_LABELS:
             item["visible"] = (values.get("measurement_mode") == "stepped"
                                and values.get("magnet_backend", "1000") == "1000")
@@ -266,6 +291,8 @@ def measurement_sections(values, mode, selected=None, errors=None, *, transport_
                 details = f"Vtg {row['vtg_start']:g} → {row['vtg_stop']:g}; Vbg {row['vbg_start']:g} → {row['vbg_stop']:g} V"
             else:
                 details = f"Vtg={row['vtg']:g}, Vbg={row['vbg']:g} V" + (f"; Vds={row['vds']:g} V" if values.get("use_vds") else "")
+            if key != "regions" and row.get("bias2_mode", "Disabled") != "Disabled":
+                details += " · " + bias2_summary(row, row.get("vds"))
             entries.append(dict(index=i, name=name, enabled=enabled, detail=details))
         section = dict(title=title, rowKey=key, selectedIndex=index, rows=entries,
                        fields=[], advanced=advanced, description=description, columns=2,
@@ -368,6 +395,7 @@ def measurement_sections(values, mode, selected=None, errors=None, *, transport_
             current = values["bias_conditions"][index]
             row_key, row_index = "bias_conditions", index
             section["fields"] = [field(k) for k in ("enabled", "vtg", "vbg", "vds", "settle_s") if k != "vds" or values["use_vds"]]
+            add("Bias 2", bias2_keys(current), description=bias2_summary(current, current.get("vds") if values["use_vds"] else None))
             row_key, row_index, current = "", -1, values
     else:
         field_limit_text = ""
@@ -399,11 +427,12 @@ def measurement_sections(values, mode, selected=None, errors=None, *, transport_
             if magnet_backend == "1000":
                 add("Hysteresis: set, wait, measure", list(BFIELD_HYSTERESIS_LABELS),
                     description="Stable offset points are measured at their readback field. Passed nominal points are logged, never revisited. History reversal, endpoint or actual-gap violations end the run. Gap 0 means twice the largest planned interval. Field and temperature have separate timeouts; protection holds still require review. Commission these limits on the magnet.")
-            step_section = add("Stepped field and temperature", ["field_step_t", "field_points"] +
-                ["temperature_target_k", "temperature_tolerance_k", "temperature_window_s", "temperature_span_k", "temperature_drift_k_per_min", "temperature_timeout_s"],
+            step_section = add("Stepped field and temperature", ["field_step_t", "field_points", "temperature_target_k"],
                 description=("All points use one sample target; passive waiting only." if magnet_backend == "1000" else "SDK temperature control stays enabled at one sample target throughout the sweep.") + (" Temperature timeout ends the run; protection holds require review." if magnet_backend == "1000" else " Timeout pauses the run."))
+            stability_section = add("Temperature stability and timeout", ["temperature_tolerance_k", "temperature_window_s", "temperature_span_k", "temperature_drift_k_per_min", "temperature_timeout_s"],
+                description="Temperature qualification limits remain active for every point.")
             if magnet_backend == "1000":
-                for item in step_section["fields"]:
+                for item in stability_section["fields"]:
                     if item["key"] == "temperature_timeout_s":
                         item["label"] = "Temperature qualification timeout (s)"
             try:
@@ -437,6 +466,7 @@ def measurement_sections(values, mode, selected=None, errors=None, *, transport_
             if current["vds_source"] == "NI DAQ AO":
                 keys.append("ao_channel")
             keys += ["settle_s", "vtg", "vbg"]
+            keys += [key for key in bias2_keys(current) if key in current]
             section["fields"] = [field(k) for k in keys]
             for item in section["fields"]:
                 if item["key"] in ("vtg", "vbg"):
@@ -450,6 +480,7 @@ def measurement_sections(values, mode, selected=None, errors=None, *, transport_
 
     if mode in (0, 1, 2, 4):
         add("Vds source", ["vds_source"] + (["ao_channel"] if current["vds_source"] == "NI DAQ AO" else []))
+        add("Bias 2", bias2_keys(current), description=bias2_summary(current))
     add("Acquisition", ["n_sample", "delay", "averages", "acquisition_delay_s"])
     ramp_keys = ["vg_ramp"] + (["vds_ramp"] if current.get("vds_source") != "None" and (mode != 3 or values["use_vds"]) else [])
     if mode in (1, 4) and current["mode"] == "Raw":
@@ -474,6 +505,38 @@ def measurement_sections(values, mode, selected=None, errors=None, *, transport_
             section["fields"] = [field(k) for k in REGION_DEFAULT]
         sections.remove(section)
         sections.insert(next(i for i, item in enumerate(sections) if item["title"] == "Gate conversion"), section)
+    # Keep the operational trajectory and bias controls open. Less frequently
+    # edited detail remains available by expanding its section; this flag is
+    # presentation-only and never changes the underlying recipe.
+    collapsed = {
+        0: {"Acquisition"},
+        1: {"Acquisition"},
+        2: {"Acquisition", "Additional gate regions", "Gate conversion"},
+        3: {"Acquisition"},
+        4: {"Acquisition"},
+        5: {"Acquisition", "Shared gate conversion", "Sample B current reversal",
+            "Hysteresis: set, wait, measure", "Temperature stability and timeout"},
+    }.get(mode, set())
+    for section in sections:
+        if section["title"] in collapsed or section.get("advanced"):
+            if section["title"] in collapsed:
+                section["collapsedByDefault"] = True
+            parts = []
+            for item in section.get("fields", []):
+                value = item.get("value")
+                if isinstance(value, bool):
+                    shown = "On" if value else "Off"
+                elif isinstance(value, (int, float)):
+                    shown = f"{value:g}"
+                elif isinstance(value, str) and len(value) <= 28:
+                    shown = value
+                else:
+                    continue
+                parts.append(f"{item.get('label', item['key'])}: {shown}")
+                if len(parts) == 2:
+                    break
+            if parts:
+                section["summary"] = " · ".join(parts)
     return sections
 
 

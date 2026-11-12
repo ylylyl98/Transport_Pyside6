@@ -69,6 +69,21 @@ class DisconnectWorker(QtCore.QThread):
             self.failed.emit(str(ex))
 
 
+def _manual_grid_step(current, target, step, quantum):
+    """Next representable level towards target without exceeding step."""
+    ticks = math.floor((step + quantum * 1e-9) / quantum)
+    if ticks < 1:
+        raise ValueError("Manual ramp step is smaller than the source resolution")
+    current_ticks = current / quantum
+    nearest = round(current_ticks)
+    target_tick = round(target / quantum)
+    if abs(current_ticks - nearest) > 1e-7:
+        tick = math.floor(current_ticks) if target < current else math.ceil(current_ticks)
+    else:
+        tick = nearest + (min(ticks, abs(target_tick - nearest)) if target > current else -min(ticks, abs(target_tick - nearest)))
+    return target if tick == target_tick else round(tick * quantum, 12)
+
+
 class ManualControlWorker(QtCore.QThread):
     """Perform one manual hardware operation without blocking the Qt UI."""
 
@@ -103,16 +118,22 @@ class ManualControlWorker(QtCore.QThread):
 
     def run(self):
         try:
-            if self.name in {"g1", "g2", "g3"}:
+            if self.name in {"g1", "g2", "g3", "g4"}:
                 from app.constants import (
                     GATE_BIAS_RAMP_STEP_T,
                     GATE_BIAS_RAMP_STEP_V,
                     SAFE_RAMP_STEP_T,
                     SAFE_RAMP_STEP_V,
                 )
+                from app.voltage_resolution import validate_source_targets
+                self._check_cancelled()
+                quantum = validate_source_targets(self.session, (), self.name.upper(),
+                                                  min(GATE_BIAS_RAMP_STEP_V, SAFE_RAMP_STEP_V), refresh=True)
                 # Query the source directly so the ramp begins at the present
                 # programmed level even if the software cache is stale.
                 start = float(self.session.get_voltage_setpoint())
+                if not math.isfinite(start):
+                    raise ValueError("Instrument source setpoint is not finite")
                 current = start
                 set_voltage = getattr(self.session, "set_voltage_fast", None)
                 if set_voltage is None:
@@ -125,6 +146,7 @@ class ManualControlWorker(QtCore.QThread):
                 while True:
                     self._check_cancelled()
                     requested = self.target
+                    validate_source_targets(self.session, (requested,), self.name.upper())
                     if not math.isclose(current, requested, abs_tol=1e-9):
                         zeroing = math.isclose(requested, 0.0, abs_tol=1e-9)
                         step_v, step_t = (
@@ -132,11 +154,8 @@ class ManualControlWorker(QtCore.QThread):
                             if zeroing
                             else (GATE_BIAS_RAMP_STEP_V, GATE_BIAS_RAMP_STEP_T)
                         )
-                        direction = 1.0 if requested > current else -1.0
-                        current = round(
-                            current + direction * min(step_v, abs(requested - current)),
-                            9,
-                        )
+                        current = _manual_grid_step(current, requested, step_v, quantum)
+                        self._check_cancelled()
                         set_voltage(current)
                         time.sleep(step_t)
                         continue
@@ -147,9 +166,14 @@ class ManualControlWorker(QtCore.QThread):
                     if not math.isclose(self.target, requested, abs_tol=1e-9):
                         continue
                     confirmed = float(self.session.get_voltage_setpoint())
-                    if not math.isclose(self.target, confirmed, abs_tol=1e-9):
+                    self._check_cancelled()
+                    if not math.isfinite(confirmed):
+                        raise ValueError("Source setpoint confirmation is not finite")
+                    if not math.isclose(self.target, requested, abs_tol=1e-9):
                         current = confirmed
                         continue
+                    if not math.isclose(requested, confirmed, abs_tol=1e-9):
+                        raise RuntimeError("Source setpoint changed during manual adjustment; read again before retrying")
                     current = confirmed
                     break
 
@@ -191,7 +215,7 @@ class ManualControlWorker(QtCore.QThread):
                 self.message = f"Monochromator moved to {self.target:g} nm."
             self.success = True
         except Exception as ex:
-            if self.name in {"g1", "g2", "g3"}:
+            if self.name in {"g1", "g2", "g3", "g4"}:
                 try:
                     confirmed = float(self.session.get_voltage_setpoint())
                 except Exception:
@@ -213,7 +237,7 @@ class GateCurrentReadWorker(QtCore.QThread):
         self.sessions = dict(sessions)
         self.modes = dict(modes)
         self.quiet = bool(quiet)
-        self.names = tuple(names or ("g1", "g2", "g3"))
+        self.names = tuple(names or ("g1", "g2", "g3", "g4"))
         self.readbacks: dict[str, dict[str, object]] = {}
         self.message = ""
 
@@ -338,7 +362,7 @@ class EmergencyRampWorker(QtCore.QThread):
         from app.utils import safe_ramp
 
         failures: list[str] = []
-        for name in ("g1", "g2", "g3"):
+        for name in ("g1", "g2", "g3", "g4"):
             session = self._sessions.get(name)
             if session is not None:
                 try:
@@ -376,6 +400,8 @@ class GateStepWorker(ManualControlWorker):
     def __init__(self, name, session, delta, voltage_limit, parent=None):
         super().__init__(name, session, 0.0, parent)
         self._delta = float(delta)
+        self._relative_deltas = [self._delta]
+        self._quantum = None
         self._resolved = False
         self._absolute = False
         self._limit = float(voltage_limit)
@@ -386,13 +412,25 @@ class GateStepWorker(ManualControlWorker):
         if not math.isfinite(value) or abs(value) > self._limit + 1e-12:
             raise ValueError(f"{self.name.upper()} target exceeds its applied voltage limit or is not finite")
 
+    def _validate_relative_step(self, delta):
+        if delta == 0:
+            return
+        quantum = self._quantum
+        ticks = delta / quantum
+        if abs(delta) < quantum * (1 - 1e-9) or abs(ticks - round(ticks)) > 1e-7:
+            raise ValueError(f"{self.name.upper()} relative step {delta:g} V is not representable at {quantum:g} V resolution")
+
     def add_step(self, delta):
         delta = float(delta)
         if not math.isfinite(delta):
             raise ValueError("Step must be finite")
         with self._target_lock:
+            if self._quantum is not None:
+                self._validate_relative_step(delta)
+            else:
+                self._relative_deltas.append(delta)
             if self._resolved or self._absolute:
-                target = round(self._target + delta, 9)
+                target = self._target + delta
                 self._validate(target)
                 self._target = target
             else:
@@ -406,6 +444,8 @@ class GateStepWorker(ManualControlWorker):
         with self._target_lock:
             self._target = target
             self._absolute = True
+            if self._quantum is None:
+                self._relative_deltas.clear()
             self._revision += 1
             self._wake.set()
 
@@ -415,15 +455,22 @@ class GateStepWorker(ManualControlWorker):
 
     def run(self):
         from app.constants import GATE_BIAS_RAMP_STEP_V, GATE_BIAS_RAMP_STEP_T, SAFE_RAMP_STEP_V, SAFE_RAMP_STEP_T
+        from app.voltage_resolution import validate_source_targets
         current = None
         try:
             self._check_cancelled()
+            quantum = validate_source_targets(self.session, (), self.name.upper(),
+                                              min(GATE_BIAS_RAMP_STEP_V, SAFE_RAMP_STEP_V), refresh=True)
             current = float(self.session.get_voltage_setpoint())
             if not math.isfinite(current):
                 raise ValueError("Instrument source setpoint is not finite")
             with self._target_lock:
+                self._quantum = quantum
+                for delta in self._relative_deltas:
+                    self._validate_relative_step(delta)
+                self._relative_deltas.clear()
                 if not self._absolute:
-                    self._target = round(current + self._delta, 9)
+                    self._target = current + self._delta
                 self._validate(self._target)
                 self._resolved = True
             setter = getattr(self.session, "set_voltage_fast", None) or self.session.set_voltage
@@ -433,12 +480,13 @@ class GateStepWorker(ManualControlWorker):
                     self._wake.clear()
                     target, revision = self._target, self._revision
                 self._validate(target)
+                validate_source_targets(self.session, (target,), self.name.upper())
                 self.progress.emit(target, current)
                 if not math.isclose(current, target, abs_tol=1e-9):
                     zeroing = math.isclose(target, 0.0, abs_tol=1e-9)
                     step, delay = ((SAFE_RAMP_STEP_V, SAFE_RAMP_STEP_T) if zeroing
                                    else (GATE_BIAS_RAMP_STEP_V, GATE_BIAS_RAMP_STEP_T))
-                    level = round(current + math.copysign(min(step, abs(target-current)), target-current), 9)
+                    level = _manual_grid_step(current, target, step, quantum)
                     self._check_cancelled()
                     setter(level)
                     current = level
@@ -487,7 +535,7 @@ class DeviceManager(QtCore.QObject):
     def __init__(self, connections: Connections):
         super().__init__()
         self.connections = connections
-        self.sessions: Dict[str, object | None] = {"g1": None, "g2": None, "g3": None, "daq": None, "mono": None, "lockin": None, "lockin_drive": None}
+        self.sessions: Dict[str, object | None] = {"g1": None, "g2": None, "g3": None, "g4": None, "daq": None, "mono": None, "lockin": None, "lockin_drive": None}
         self.states: Dict[str, str] = {name: "idle" for name in self.sessions}
         self.details: Dict[str, str] = {name: "" for name in self.sessions}
         self._connected_addresses: Dict[str, str] = {name: self._address_for(name) for name in self.sessions}
@@ -513,6 +561,7 @@ class DeviceManager(QtCore.QObject):
             "g1": self.connections.gate1,
             "g2": self.connections.gate2,
             "g3": self.connections.gate3,
+            "g4": self.connections.gate4,
             "daq": self.connections.daq_dev,
             "mono": self.connections.mono,
             "lockin": self.connections.lockin,
@@ -524,6 +573,7 @@ class DeviceManager(QtCore.QObject):
             "g1": self.connections.gate1_mode,
             "g2": self.connections.gate2_mode,
             "g3": self.connections.gate3_mode,
+            "g4": self.connections.gate4_mode,
             "daq": "",
             "mono": "",
             "lockin": "",
@@ -531,7 +581,7 @@ class DeviceManager(QtCore.QObject):
         }[name]
 
     def _protection_for(self, name: str) -> tuple[float, float]:
-        if name not in {"g1", "g2", "g3"}:
+        if name not in {"g1", "g2", "g3", "g4"}:
             return (0.0, 0.0)
         number = name[-1]
         return (
@@ -556,12 +606,20 @@ class DeviceManager(QtCore.QObject):
     def connected_mode(self, name: str) -> str:
         return self._connected_modes.get(name, "")
 
+    def _daq_ai_indexes(self):
+        mode = getattr(self.connections, "signal_chain_mode", "dual" if self.connections.drag_drive_enabled else "ordinary")
+        if mode == "dual":
+            return list(range(5))
+        if mode in ("single_drag", "single_drive"):
+            return [0, 1, 2] if getattr(self.connections, "dc_enabled", True) else [0, 1]
+        return list(range(4))
+
     def needs_reconnect(self, name: str) -> bool:
         session = self.sessions.get(name)
         if session is None:
             return False
         if name == "daq":
-            desired = list(range(5 if self.connections.drag_drive_enabled else 4))
+            desired = self._daq_ai_indexes()
             if list(getattr(session, "ai_channel_indexes", [])) != desired:
                 return True
         return (
@@ -570,7 +628,7 @@ class DeviceManager(QtCore.QObject):
         )
 
     def protection_is_applied(self, name: str) -> bool:
-        if name not in {"g1", "g2", "g3"} or self.sessions.get(name) is None:
+        if name not in {"g1", "g2", "g3", "g4"} or self.sessions.get(name) is None:
             return False
         if self.connected_mode(name) != KEITHLEY_MODE_VOLTAGE_2W:
             return True
@@ -592,7 +650,7 @@ class DeviceManager(QtCore.QObject):
 
     def mode_summary(self, name: str) -> str:
         mode = self.connected_mode(name)
-        if name in {"g1", "g2", "g3"} and mode:
+        if name in {"g1", "g2", "g3", "g4"} and mode:
             return keithley_mode_label(mode)
         return ""
 
@@ -624,7 +682,7 @@ class DeviceManager(QtCore.QObject):
         unapplied = sorted(
             name
             for name in requested
-            if name in {"g1", "g2", "g3"}
+            if name in {"g1", "g2", "g3", "g4"}
             and self.is_connected(name)
             and self.is_voltage_source_mode(name)
             and not self.protection_is_applied(name)
@@ -721,7 +779,7 @@ class DeviceManager(QtCore.QObject):
 
     def ramp_gate(self, name: str, target: float) -> bool:
         """Safely ramp one connected gate source to a requested voltage."""
-        if name not in {"g1", "g2", "g3"}:
+        if name not in {"g1", "g2", "g3", "g4"}:
             raise ValueError(f"Unknown gate: {name}")
         if not math.isfinite(float(target)):
             self.operation_changed.emit(False, "Manual target must be finite.")
@@ -766,7 +824,7 @@ class DeviceManager(QtCore.QObject):
 
     def step_gate(self, name: str, delta: float) -> bool:
         """Relative adjustment independent of the unapplied target editor."""
-        if name not in {"g1", "g2", "g3"}:
+        if name not in {"g1", "g2", "g3", "g4"}:
             raise ValueError(f"Unknown gate: {name}")
         if not math.isfinite(float(delta)):
             self.operation_changed.emit(False, "Manual step must be finite.")
@@ -805,7 +863,7 @@ class DeviceManager(QtCore.QObject):
 
     def can_accept_gate_target(self, name: str) -> bool:
         """Return whether a gate can start or update a manual voltage ramp."""
-        if name not in {"g1", "g2", "g3"}:
+        if name not in {"g1", "g2", "g3", "g4"}:
             return False
         blockers = (
             self._operation_thread,
@@ -820,7 +878,7 @@ class DeviceManager(QtCore.QObject):
         return self._manual_worker is None or self._manual_worker.name == name
 
     def apply_gate_protection(self, name: str, max_voltage: float, current_compliance: float) -> bool:
-        if name not in {"g1", "g2", "g3"}:
+        if name not in {"g1", "g2", "g3", "g4"}:
             raise ValueError(f"Unknown gate: {name}")
         if self.is_busy():
             self.operation_changed.emit(False, "Wait for the current hardware operation to finish.")
@@ -879,9 +937,9 @@ class DeviceManager(QtCore.QObject):
             if not quiet:
                 self.operation_changed.emit(False, "Gate readback cannot be refreshed while a measurement is running.")
             return False
-        requested_names = tuple(names or ("g1", "g2", "g3"))
-        if any(name not in {"g1", "g2", "g3"} for name in requested_names):
-            raise ValueError("Gate readback names must be g1, g2, or g3.")
+        requested_names = tuple(names or ("g1", "g2", "g3", "g4"))
+        if any(name not in {"g1", "g2", "g3", "g4"} for name in requested_names):
+            raise ValueError("Gate readback names must be g1, g2, g3, or g4.")
         sessions = {
             name: self.sessions[name] if self.is_connected(name) else None
             for name in requested_names
@@ -909,7 +967,7 @@ class DeviceManager(QtCore.QObject):
         if not self.is_connected(name):
             self.operation_changed.emit(False, f"Connect {name.upper()} before using manual control.")
             return False
-        if name in {"g1", "g2", "g3"} and not self.is_voltage_source_mode(name):
+        if name in {"g1", "g2", "g3", "g4"} and not self.is_voltage_source_mode(name):
             self.operation_changed.emit(False, f"{name.upper()} must use 2-wire voltage source mode for manual voltage control.")
             return False
         return True
@@ -918,7 +976,7 @@ class DeviceManager(QtCore.QObject):
         worker = ManualControlWorker(name, session, target, self)
         self._manual_worker = worker
         worker.finished.connect(self._finish_manual_worker)
-        if name in {"g1", "g2", "g3"}:
+        if name in {"g1", "g2", "g3", "g4"}:
             action = "safely ramping to 0 V" if abs(target) < 1e-9 else f"ramping to {target:g} V"
             message = f"{name.upper()} {action}..."
         elif name.startswith("daq_ao"):
@@ -953,14 +1011,14 @@ class DeviceManager(QtCore.QObject):
         # without dropping the click or publishing an intermediate completion.
         if (
             worker.success
-            and worker.name in {"g1", "g2", "g3"}
+            and worker.name in {"g1", "g2", "g3", "g4"}
             and result.get("set_voltage") is not None
             and not math.isclose(float(result["set_voltage"]), worker.target, abs_tol=1e-9)
             and self._pending_emergency_daq_channels is None
         ):
             self._start_manual_worker(worker.name, worker.session, worker.target)
             return
-        if worker.success and worker.name in {"g1", "g2", "g3"} and self._pending_emergency_daq_channels is None:
+        if worker.success and worker.name in {"g1", "g2", "g3", "g4"} and self._pending_emergency_daq_channels is None:
             self._manual_readback_names.add(worker.name)
             self._manual_readback_timer.start(0 if isinstance(worker, GateStepWorker) else 200)
         self.manual_control_finished.emit(worker.name, worker.success, worker.message, result)
@@ -1015,13 +1073,14 @@ class DeviceManager(QtCore.QObject):
         self._queue_gate_readback()
 
     def _queue_gate_readback(self):
-        if any(self.sessions.get(name) is not None for name in ("g1", "g2", "g3")):
+        if any(self.sessions.get(name) is not None for name in ("g1", "g2", "g3", "g4")):
             QtCore.QTimer.singleShot(0, lambda: self.read_gate_currents(quiet=True))
 
     def _connect_all_in_thread(self, emitter):
         self._connect_keithley("g1", emitter=emitter)
         self._connect_keithley("g2", emitter=emitter)
         self._connect_keithley("g3", emitter=emitter)
+        self._connect_keithley("g4", emitter=emitter)
         self._connect_daq(emitter=emitter)
         self._connect_mono(emitter=emitter)
         self._connect_lockin(emitter=emitter)
@@ -1029,7 +1088,7 @@ class DeviceManager(QtCore.QObject):
 
     def _disconnect_all_in_thread(self, emitter):
         zero_failures: list[str] = []
-        for session_name in ("g1", "g2", "g3"):
+        for session_name in ("g1", "g2", "g3", "g4"):
             try:
                 self._safe_zero_keithley_before_close(session_name)
             except Exception as ex:
@@ -1044,13 +1103,34 @@ class DeviceManager(QtCore.QObject):
         # Do not change DAQ AO on a normal disconnect. The last held values
         # may belong to equipment outside this run; only explicit Ramp/Zero
         # controls or Emergency Stop are allowed to modify them.
-        for name in ("g1", "g2", "g3", "daq", "mono", "lockin", "lockin_drive"):
+        for name in ("g1", "g2", "g3", "g4", "daq", "mono", "lockin", "lockin_drive"):
             self._close_device(name)
             emitter.emit(name, "idle", "")
 
     def _connect_keithley(self, name: str, emitter):
         address = self._address_for(name)
         mode = self._mode_for(name)
+        if address:
+            try:
+                from pyvisa.rname import ResourceName
+                def resource_key(value):
+                    resource = ResourceName.from_string(value.strip())
+                    if resource.interface_type == "GPIB":
+                        return ("GPIB", int(resource.board), int(resource.primary_address),
+                                int(resource.secondary_address) if resource.secondary_address else None)
+                    return str(resource).upper()
+                key = resource_key(address)
+                for other in ("g1", "g2", "g3", "g4"):
+                    if other == name:
+                        continue
+                    # Check both configured and live addresses: an edited address
+                    # must never open a second session to an existing source.
+                    for candidate in (self._address_for(other), self._connected_addresses.get(other, "") if self.sessions.get(other) else ""):
+                        if candidate and resource_key(candidate) == key:
+                            raise ValueError(f"{name.upper()} and {other.upper()} use the same VISA resource")
+            except Exception as ex:
+                emitter.emit(name, "err", str(ex))
+                return
         if not address:
             try:
                 self._safe_zero_keithley_before_close(name)
@@ -1159,7 +1239,7 @@ class DeviceManager(QtCore.QObject):
             self._close_device("daq")
             emitter.emit("daq", "idle", "")
             return
-        ai_indexes = list(range(5 if self.connections.drag_drive_enabled else 4))
+        ai_indexes = self._daq_ai_indexes()
         if (self.sessions["daq"] is not None and self._connected_addresses.get("daq") == address
                 and list(getattr(self.sessions["daq"], "ai_channel_indexes", [])) == ai_indexes):
             emitter.emit("daq", "ok", self._daq_detail(self.sessions["daq"]))
@@ -1269,7 +1349,7 @@ class DeviceManager(QtCore.QObject):
         self._connected_protections[name] = (0.0, 0.0)
 
     def _safe_zero_keithley_before_close(self, name: str):
-        if name not in {"g1", "g2", "g3"}:
+        if name not in {"g1", "g2", "g3", "g4"}:
             return
         session = self.sessions.get(name)
         if session is None or self.connected_mode(name) != KEITHLEY_MODE_VOLTAGE_2W:
@@ -1363,6 +1443,6 @@ class DeviceManager(QtCore.QObject):
         if self._emergency_worker is not None and self._emergency_worker.isRunning():
             self._emergency_worker.wait()
         self._disconnect_all_in_thread(self.status_changed)
-        for name in ("g1", "g2", "g3", "daq", "mono", "lockin", "lockin_drive"):
+        for name in ("g1", "g2", "g3", "g4", "daq", "mono", "lockin", "lockin_drive"):
             self._close_device(name)
             self._emit_status(name, "idle", "")

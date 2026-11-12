@@ -84,6 +84,23 @@ class QuickRecipeUiTests(unittest.TestCase):
         self.app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
         self.assertEqual(self.warnings, [])
 
+    def test_numeric_display_focus_does_not_round_recipe_value(self):
+        self.service.mode = 3
+        self.service.setRowValue("bias_conditions", 0, "vtg", .123456789123)
+        self.load()
+        uid = self.uid()
+        cell = self.cell(uid, "vtg")
+        self.assertEqual(cell.property("text"), "0.123457")
+        cell.forceActiveFocus()
+        self.app.processEvents()
+        self.assertEqual(cell.property("text"), "0.123456789123")
+        self.cell(uid, "vbg").forceActiveFocus()
+        self.app.processEvents()
+        self.assertEqual(self.service._values[3][self.key][0]["vtg"], .123456789123)
+        self.edit(cell, "2.25")
+        QtTest.QTest.keyClick(self.window, QtCore.Qt.Key_Tab)
+        self.assertEqual(self.service._values[3][self.key][0]["vtg"], 2.25)
+
     def test_inline_checkbox_numeric_and_disabled_vds_retention(self):
         self.service.mode = 3
         self.service.setValue("use_vds", True)

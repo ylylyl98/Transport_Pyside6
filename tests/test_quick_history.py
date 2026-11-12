@@ -65,6 +65,72 @@ class QuickHistoryTests(unittest.TestCase):
             time.sleep(.005)
         self.fail("History worker did not settle: " + self.backend.status)
 
+    def test_coverage_counts_only_rendered_files_and_tracks_hidden_selection(self):
+        first = self.write('first.csv', text='Vds,Ids_DC,Direction\nV,A,\n0,1,forward\n1,2,forward\n')
+        second = self.write('second.csv', text='Vds,Ids_X,Direction\nV,A,\n0,3,forward\n1,4,forward\n')
+        self.backend.refresh(); self.drain()
+        self.backend.setChecked(str(first), True); self.backend.setChecked(str(second), True); self.drain()
+        self.backend.setOption('signal', 'Ids_DC'); self.drain()
+        self.assertEqual(self.backend.coverageSummary, '1 / 2 files displayed')
+        self.assertIn('second.csv', self.backend.coverageDetails)
+        self.backend._plot_pending = True
+        self.backend.changed.emit()
+        self.assertEqual(self.backend.coverageSummary, 'Updating file coverage…')
+        self.assertEqual(self.backend.coverageDetails, '')
+        self.backend._plot_pending = False
+        self.backend.changed.emit()
+        self.backend.setOption('search', 'first')
+        self.assertEqual(self.backend.hiddenSelectedCount, 1)
+        self.assertEqual(self.backend.coverageSummary, '1 / 2 files displayed')
+
+    def test_coverage_distinguishes_nan_cut_and_each_panel(self):
+        first = self.write('first.csv')
+        second = self.write('second.csv')
+        self.backend.refresh(); self.drain()
+        self.backend.setChecked(str(first), True); self.backend.setChecked(str(second), True); self.drain()
+        valid = {'path': str(first), 'x': np.array([0., 1.]), 'y': np.array([1., 2.])}
+        empty = {'path': str(second), 'x': np.array([0., 1.]), 'y': np.array([np.nan, np.nan])}
+        self.backend._snapshot = {'map': {'path': str(second)}, 'traces': [valid, empty], 'warnings': []}
+        self.backend.changed.emit()
+        self.assertIn('Measured cut: 1/2 files', self.backend.coverageSummary)
+        self.assertIn('no finite overlapping', self.backend.coverageDetails)
+        self.assertIn(str(first) + ': displayed', self.backend.coverageDetails)
+        self.assertIn('Heatmap source: ' + str(second), self.backend.coverageDetails)
+        self.backend._snapshot = {'panels': {'I_drag_X': {'traces': [valid], 'warnings': []},
+                                              'I_drive_X': {'traces': [empty], 'warnings': []}}}
+        self.backend.changed.emit()
+        self.assertIn('I_drag_X: 1/2 files', self.backend.coverageSummary)
+        self.assertIn('I_drive_X: 0/2 files', self.backend.coverageSummary)
+
+    def test_coverage_does_not_misattribution_for_same_basename(self):
+        one = self.root / 'day1' / 'same.csv'
+        two = self.root / 'day2' / 'same.csv'
+        for path in (one, two):
+            path.parent.mkdir()
+            path.write_text('Vds,Ids_DC\nV,A\n0,1\n', encoding='utf-8')
+            path.with_name('same_metadata.json').write_text(json.dumps({'measurement': 'vds_sweep'}), encoding='utf-8')
+        self.backend.refresh(); self.drain()
+        self.backend.setChecked(str(one), True); self.backend.setChecked(str(two), True); self.drain()
+        self.backend._snapshot = {'traces': [], 'warnings': ['same.csv: missing signal', 'same.csv: incompatible units']}
+        self.backend.changed.emit()
+        with patch.object(self.backend, '_coverage_text', wraps=self.backend._coverage_text) as calculate:
+            summary = self.backend.coverageSummary
+            details = self.backend.coverageDetails
+            self.assertEqual(calculate.call_count, 1)
+        self.assertEqual(summary, '0 / 2 files displayed')
+        self.assertIn(str(one), details)
+        self.assertIn(str(two), details)
+        self.assertNotIn('missing signal', details)
+        self.assertNotIn('incompatible units', details)
+        self.assertIn('cannot be attributed safely', details)
+
+    def test_legacy_session_preserves_saved_signal_as_explicit(self):
+        state = self.backend.capture_session()
+        state['views']['vds_sweep'].pop('signal_explicit', None)
+        state['views']['vds_sweep']['signal'] = 'Ids_DC'
+        self.backend.restore_session(state)
+        self.assertTrue(self.backend.state['signal_explicit'])
+
     def test_six_types_are_isolated_filters_keep_checked_paths(self):
         first = self.write()
         second = self.write("gate.csv", "gate_scan", "Doping,Ids_DC,Direction\nV,A,\n0,3,forward\n")
@@ -419,7 +485,7 @@ class QuickHistoryTests(unittest.TestCase):
         self.backend._plot_active = False
         self.backend.exportView("both", str(self.root / "custom"))
         self.assertEqual(self.exporter.jobs[-1][1].suffix, ".png")
-        self.assertIn("1 selected files", self.backend.selectionSummary)
+        self.assertEqual("1 / 1 files displayed", self.backend.coverageSummary)
         self.assertEqual(self.backend.axisLabel("B_measured_T"), "Measured B (T)")
 
     def test_old_selection_result_cannot_publish_after_newer_revision(self):
@@ -641,11 +707,13 @@ class QuickHistoryTests(unittest.TestCase):
         self.backend.setRange("x", False, "-2", "2")
         lower = window.findChild(QtCore.QObject, "historyRange_x_lower")
         lower.setProperty("text", "3")
+        QtCore.QMetaObject.invokeMethod(lower, "textEdited")
         QtCore.QMetaObject.invokeMethod(lower, "editingFinished")
         self.assertEqual(lower.property("text"), "3")
         self.assertTrue(self.backend.rangeState["x"]["error"])
         self.assertEqual(self.backend.capture_view()["map_xlim"], [-2, 2])
         lower.setProperty("text", "-1")
+        QtCore.QMetaObject.invokeMethod(lower, "textEdited")
         QtCore.QMetaObject.invokeMethod(lower, "editingFinished")
         self.assertEqual(self.backend.rangeState["x"]["error"], "")
         self.assertEqual(warnings, [])

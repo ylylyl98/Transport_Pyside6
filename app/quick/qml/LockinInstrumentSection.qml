@@ -11,7 +11,7 @@ ColumnLayout {
     spacing: 14
     ColumnLayout {
         Layout.fillWidth: true; spacing: 6
-        Label { text: section.drive ? "Drive lock-in · drive-current reference" : "Primary / Drag lock-in · measured signal"; font.bold: true; color: Theme.text; wrapMode: Text.Wrap; Layout.fillWidth: true }
+        Label { text: section.drive ? "Second lock-in · Drive in dual mode" : "Primary lock-in · role selected in Signal chain"; font.bold: true; color: Theme.text; wrapMode: Text.Wrap; Layout.fillWidth: true }
         Label { text: "Read settings to refresh the instrument. Edited fields remain pending until Apply settings verifies readback."; color: Theme.muted; wrapMode: Text.Wrap; Layout.fillWidth: true }
         Label { text: section.lockin.identity; color: Theme.muted; wrapMode: Text.Wrap; Layout.fillWidth: true }
         GridLayout {

@@ -68,6 +68,35 @@ class CurveMapTests(unittest.TestCase):
         self.assertTrue(all("Vbg=20" in trace.label for trace in traces))
         self.assertEqual(warnings, [])
 
+    def test_nan_only_cut_is_skipped_but_map_and_other_traces_remain(self):
+        bad = self.make_map("bad")
+        good = self.make_map("good")
+        bad.write_text(bad.read_text().replace("1,20,4,0,backward", "1,20,nan,0,backward")
+                       .replace("0,20,3,0,backward", "0,20,nan,0,backward"))
+        records, _ = discover_history(self.root)
+        result = map_comparison(records, "Vtg", "Vbg", "Ids_DC", primary_path=str(bad),
+                                fixed_axis="Vbg", fixed_value=20)
+        self.assertIsNotNone(result.primary)
+        self.assertEqual([trace.path for trace in result.traces], [good])
+        self.assertTrue(any("bad.csv: no finite paired samples for Vbg=20.0; cut skipped" in warning
+                            for warning in result.warnings))
+        self.assertTrue(np.isnan(result.primary.z[1]).all())
+        only_bad = map_comparison([r for r in records if r.path == bad], "Vtg", "Vbg", "Ids_DC",
+                                  primary_path=str(bad), fixed_axis="Vbg", fixed_value=20)
+        self.assertIsNotNone(only_bad.primary)
+        self.assertEqual(only_bad.traces, [])
+        self.assertTrue(any("no finite paired samples" in warning for warning in only_bad.warnings))
+
+    def test_nan_only_column_cut_is_skipped(self):
+        path = self.make_map()
+        path.write_text(path.read_text().replace("1,10,2,0,forward", "1,10,nan,0,forward")
+                        .replace("1,20,4,0,backward", "1,20,nan,0,backward"))
+        records, _ = discover_history(self.root)
+        result = map_comparison(records, "Vtg", "Vbg", "Ids_DC", fixed_axis="Vtg", fixed_value=1)
+        self.assertEqual(result.traces, [])
+        self.assertIsNotNone(result.primary)
+        self.assertIn("no finite paired samples for Vtg=1.0", result.warnings[0])
+
     def test_missing_fixed_value_does_not_snap_to_other_condition(self):
         path = self.make_map()
         records, _ = discover_history(self.root)

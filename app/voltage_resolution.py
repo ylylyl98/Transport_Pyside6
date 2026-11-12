@@ -63,3 +63,41 @@ def validate_voltage_points(points, resolutions):
                 raise ValueError(f"{labels[axis]} target {value:.9g} V is not representable on the cached source range: "
                                  f"resolution {quantum:.9g} V. Nearest target {nearest:.9g} V. "
                                  "Adjust Start/Stop/Step (or derived ratio); no rounding was applied.")
+
+
+def validate_source_targets(session, targets, label, ramp_step=None, refresh=False):
+    """Validate the physical setpoints of one Keithley against its active range.
+
+    When requested, perform one read-only range query before validating the
+    complete trajectory. No target is silently rounded.
+    """
+    if session is None:
+        raise ValueError(f"{label}: source is not connected.")
+    if refresh:
+        reader = getattr(session, "refresh_source_voltage_range", None)
+        if not callable(reader):
+            raise ValueError(f"{label}: source range refresh is unavailable.")
+        try:
+            reader()
+        except Exception as exc:
+            raise ValueError(f"{label}: source range refresh failed: {exc}") from exc
+    status = source_resolution_status(session)
+    quantum = status.quantum
+    if quantum is None:
+        raise ValueError(f"{label}: {status.message}")
+    source_range = float(session.cached_source_voltage_range_v)
+    if ramp_step is not None:
+        step = float(ramp_step)
+        if not math.isfinite(step) or step <= 0 or step + quantum * 1e-9 < quantum:
+            raise ValueError(f"{label}: ramp step must be finite and at least {quantum:g} V source resolution.")
+    for target in targets:
+        value = float(target)
+        ticks = value / quantum
+        if not math.isfinite(ticks):
+            raise ValueError(f"{label} target must be finite.")
+        if abs(value) > source_range + quantum * 1e-7:
+            raise ValueError(f"{label} target {value:.9g} V exceeds the {source_range:g} V source range.")
+        if abs(ticks - round(ticks)) > 1e-7:
+            nearest = round(ticks) * quantum
+            raise ValueError(f"{label} target {value:.9g} V is not representable at {quantum:g} V source resolution. Nearest target {nearest:.9g} V; no rounding was applied.")
+    return quantum

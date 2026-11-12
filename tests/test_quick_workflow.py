@@ -67,6 +67,14 @@ class QuickWorkflowTests(unittest.TestCase):
         QtTest.QTest.mouseClick(self.window, QtCore.Qt.LeftButton, QtCore.Qt.NoModifier, center)
         QtTest.QTest.qWait(50)
 
+    def type_text(self, text):
+        QtTest.QTest.keyClick(self.window, QtCore.Qt.Key_A, QtCore.Qt.ControlModifier)
+        for char in text:
+            modifier = QtCore.Qt.ShiftModifier if char.isupper() else QtCore.Qt.NoModifier
+            key = ord(char.upper())
+            QtCore.QCoreApplication.sendEvent(self.window, QtGui.QKeyEvent(QtCore.QEvent.KeyPress, key, modifier, char))
+            QtCore.QCoreApplication.sendEvent(self.window, QtGui.QKeyEvent(QtCore.QEvent.KeyRelease, key, modifier, char))
+
     def test_sweep_preview_commits_current_input_and_preserves_live_data(self):
         self.window.setWidth(1536)
         self.window.setHeight(864)
@@ -76,7 +84,7 @@ class QuickWorkflowTests(unittest.TestCase):
         QtTest.QTest.qWait(60)
         draft = self.item("field_vtg_stop")
         draft.forceActiveFocus()
-        draft.setProperty("text", "1.5")
+        self.type_text("1.5")
         self.click("measurementPreviewSweep")
         end = time.monotonic() + 5
         while service.sweepPreview.busy and time.monotonic() < end:
@@ -113,6 +121,10 @@ class QuickWorkflowTests(unittest.TestCase):
         self.assertTrue(regions["configureRegions"])
         service.useGateRegions()
         QtTest.QTest.qWait(50)
+        section = self.item("measurement_section_Additional gate regions")
+        section.forceActiveFocus()
+        QtTest.QTest.keyClick(self.window, QtCore.Qt.Key_Space)
+        QtTest.QTest.qWait(50)
         self.assertTrue(self.item("measurementAdd_regions").isVisible())
         self.window.setWidth(800)
         self.window.setHeight(600)
@@ -143,7 +155,7 @@ class QuickWorkflowTests(unittest.TestCase):
         QtTest.QTest.qWait(50)
         field = self.item("field_vds_step")
         field.forceActiveFocus()
-        field.setProperty("text", "bad")
+        self.type_text("bad")
         QtTest.QTest.keyClick(self.window, QtCore.Qt.Key_Return)
         header = self.item("measurement_section_Vds trajectory")
         header.forceActiveFocus()
@@ -160,7 +172,7 @@ class QuickWorkflowTests(unittest.TestCase):
         self.assertEqual(field.property("text"), "bad")
         accessible = QtGui.QAccessible.queryAccessibleInterface(field)
         self.assertIn("valid number", accessible.text(QtGui.QAccessible.Description))
-        field.setProperty("text", "0.02")
+        self.type_text("0.02")
         QtTest.QTest.keyClick(self.window, QtCore.Qt.Key_Return)
         QtTest.QTest.qWait(30)
         self.assertFalse(self.item("locateMeasurementError").isVisible())
@@ -205,7 +217,7 @@ class QuickWorkflowTests(unittest.TestCase):
         field = self.item("field_vbg_stop")
         self.assertTrue(field.isVisible())
         self.assertTrue(field.hasActiveFocus())
-        field.setProperty("text", "1.25")
+        self.type_text("1.25")
         QtTest.QTest.keyClick(self.window, QtCore.Qt.Key_Return)
         QtTest.QTest.qWait(30)
         self.assertEqual(service.validationIssues, [])
@@ -221,6 +233,11 @@ class QuickWorkflowTests(unittest.TestCase):
         self.assertIn("1 CSV", self.item("outputSummaryCount").property("text"))
         self.assertIn(str(self.base), self.item("outputSummaryFolder").property("text"))
         self.assertFalse(self.base.exists(), "Reviewing output must not create measurement folders")
+        self.assertFalse(self.item("field_base_name").isVisible())
+        output_header = self.item("measurement_section_File output")
+        output_header.forceActiveFocus()
+        QtTest.QTest.keyClick(self.window, QtCore.Qt.Key_Space)
+        QtTest.QTest.qWait(50)
         self.assertTrue(self.item("field_base_name").isVisible())
         self.assertTrue(self.item("filenamePreview").isVisible())
         caption = self.item("stopFieldNotice")
@@ -254,7 +271,7 @@ class QuickWorkflowTests(unittest.TestCase):
         self.assertEqual(pane.property("section"), 5)
         editor = self.item("field_device_id")
         editor.forceActiveFocus()
-        editor.setProperty("text", "Sample 025")
+        self.type_text("Sample 025")
         QtTest.QTest.keyClick(self.window, QtCore.Qt.Key_Tab)
         QtTest.QTest.qWait(40)
         self.assertEqual(Path(self.backend.dataFolderPath), self.base / "Operator_One" / "Sample_025")
@@ -288,7 +305,7 @@ class QuickWorkflowTests(unittest.TestCase):
         self.assertEqual(pane.property("section"), 3)
         groups = ((0, (1, 5, 6)), (1, (0, 2, 3, 4)), (2, (7,)))
         titles = {0: "Manual controls", 1: "Connections & protection", 2: "Magnet & temperature",
-                  3: "Drag / primary lock-in", 4: "Drive lock-in", 5: "Sample & files",
+                  3: "Primary lock-in", 4: "Second lock-in", 5: "Sample & files",
                   6: "Signal chain", 7: "Runtime settings"}
         for group, sections in groups:
             self.click(f"instrumentGroup{group}")
@@ -307,7 +324,7 @@ class QuickWorkflowTests(unittest.TestCase):
         self.assertEqual((pane.property("section"), pane.property("currentGroup")), (5, 0))
         editor = self.item("field_device_id")
         editor.forceActiveFocus()
-        editor.setProperty("text", "Group sample")
+        self.type_text("Group sample")
         self.click("instrumentGroup1")
         self.click("instrumentGroup0")
         self.assertEqual(pane.property("section"), 5)
@@ -351,7 +368,7 @@ class QuickWorkflowTests(unittest.TestCase):
     def test_focus_current_commits_measurement_editor(self):
         editor = self.item("field_vds_start")
         editor.forceActiveFocus()
-        editor.setProperty("text", "0.123")
+        self.type_text("0.123")
         self.assertNotEqual(self.backend._measurement._values[0]["vds_start"], 0.123)
         QtCore.QMetaObject.invokeMethod(self.item("measurementMode"), "focusCurrent")
         QtTest.QTest.qWait(50)
@@ -475,7 +492,7 @@ class QuickWorkflowTests(unittest.TestCase):
         self.assertGreaterEqual(live.width(), 400)
         editor = self.item("field_device_id")
         editor.forceActiveFocus()
-        editor.setProperty("text", "Draft sample")
+        self.type_text("Draft sample")
         QtQml.QQmlProperty(self.window, "width").write(1100)
         QtTest.QTest.qWait(350)
         self.assertFalse(self.window.property("dockInstruments"))

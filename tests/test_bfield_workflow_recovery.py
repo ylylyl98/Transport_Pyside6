@@ -357,7 +357,9 @@ class GateRecoveryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             p = LineSweepParams(output_csv_path=os.path.join(directory, "scan.csv"),
                 output_metadata_path=os.path.join(directory, "scan_metadata.json"))
-            fake = NS(voltage=1., set_voltage=lambda v: None)
+            fake = NS(voltage=1., set_voltage=lambda v: None,
+                      identity="KEITHLEY INSTRUMENTS INC.,MODEL 2400,123,1",
+                      cached_source_voltage_range_v=20., refresh_source_voltage_range=lambda: 20.)
             worker = LineSweepWorker(p, SaveRoot(base=directory), Connections(), g1=fake, g2=fake, g3=fake, daq=NS())
             worker._build_trajectory = lambda: [dict(vtg=1., vbg=1., vds=1.)]
             worker._validate_sessions = lambda: None

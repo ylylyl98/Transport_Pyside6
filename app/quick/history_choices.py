@@ -125,7 +125,22 @@ def resolve_choices(records, view, kind, cache):
     axis_order.sort(key=lambda a: (not any(a in varying for _, _, _, varying, _ in available), a == 'Step Index'))
     signal_order = [s for s in SIGNAL_COLUMNS if any(s in signals for _, _, signals, _, _ in available)]
     original_x, original_y, original_signal = actual.get('x', ''), actual.get('map_y', ''), actual.get('signal', '')
-    signal_pref = ([original_signal] if original_signal in signal_order else []) + [s for s in signal_order if s != original_signal]
+    # Only use a role-derived default when all selected records agree. A
+    # user's still-valid explicit choice always wins over this preference.
+    modes = set()
+    for record in selected:
+        meta = record.metadata or {}
+        chain = meta.get('signal_chain') or (meta.get('validation') or {}).get('calibration', {}).get('signal_chain') or {}
+        modes.add((chain.get('drag_drive') or {}).get('mode', 'ordinary'))
+    role_signal = {'single_drag': 'I_drag_X', 'single_drive': 'I_drive_X'}.get(next(iter(modes)) if len(modes) == 1 else None)
+    preferred = []
+    if actual.get('signal_explicit') and original_signal in signal_order:
+        preferred.append(original_signal)
+    if role_signal in signal_order and role_signal not in preferred:
+        preferred.append(role_signal)
+    if original_signal in signal_order and original_signal not in preferred:
+        preferred.append(original_signal)
+    signal_pref = preferred + [s for s in signal_order if s not in preferred]
     x_pref = ([original_x] if original_x in axis_order else []) + [a for a in axis_order if a != original_x]
     y_pref = ([original_y] if original_y in axis_order else []) + [a for a in axis_order if a != original_y]
     map_2d = is_map and actual.get('map_y') != 'None (1D)'
@@ -170,7 +185,9 @@ def resolve_choices(records, view, kind, cache):
     actual['signal'], actual['x'] = signal, x
     if is_map:
         actual['map_y'] = y if y else 'None (1D)'
-    if original_signal and signal != original_signal:
+    auto_role = (not actual.get('signal_explicit') and signal == role_signal
+                 and original_signal in signal_order)
+    if original_signal and signal != original_signal and not auto_role:
         warnings.append(f'Signal {original_signal} is unavailable for the selected data; using {signal}.')
     if original_x and x != original_x:
         warnings.append(f'X coordinate {original_x} is unavailable for the selected data; using {x}.')

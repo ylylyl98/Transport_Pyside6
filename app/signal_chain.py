@@ -39,6 +39,7 @@ class SignalChainSnapshot:
     ac_contact: str = ""
     ac_voltage_ratio: float | None = None
     drag_drive: dict | None = None
+    excitation_source: str = "primary"
 
     @property
     def preamp_gain_v_per_a(self) -> float:
@@ -81,6 +82,8 @@ def engineering_value(value: float, unit: str, separator: str = "") -> str:
 
 def sample_ac_voltage_estimate(data: dict) -> float | None:
     """User-estimated Vsample/Vsource; never a measured sample voltage."""
+    if data.get('excitation_source', (data.get('drag_drive') or {}).get('excitation_source', 'primary')) != 'primary':
+        return None
     ratio = data.get('ac_voltage_ratio')
     amplitude = ((data.get('lockin_settings') or {}).get('values') or {}).get('sine_out_v')
     if not all(isinstance(v, (int, float)) and math.isfinite(v) and v > 0 for v in (ratio, amplitude)):
@@ -92,6 +95,7 @@ def sample_ac_voltage_estimate(data: dict) -> float | None:
 def _add_ac_estimate_metadata(data: dict) -> None:
     ratio = data.get('ac_voltage_ratio')
     valid = isinstance(ratio, (int, float)) and math.isfinite(ratio) and ratio > 0
+    data.setdefault('excitation_source', 'primary')
     data['ac_voltage_ratio_source'] = 'user estimate' if valid else 'not specified'
     data['ac_voltage_ratio_definition'] = 'sample-side voltage / Lock-in output voltage; same amplitude convention'
     data['sample_ac_voltage_estimate_v'] = sample_ac_voltage_estimate(data)
@@ -120,8 +124,13 @@ def signal_chain_filename_parts(snapshot: SignalChainSnapshot | dict) -> list[st
         f"Pre{engineering_value(preamp, 'A')}",
     ]
     dual = data.get('drag_drive') or {}
-    if dual.get('enabled'):
+    mode = dual.get('mode', 'dual' if dual.get('enabled') else 'ordinary')
+    if mode == 'dual':
         parts.extend(['DragDrive', 'Rs' + engineering_value(dual['series_resistance_ohm'], 'Ohm')])
+    elif mode in ('single_drag', 'single_drive'):
+        parts.append('Single' + mode[7:].title())
+        if mode == 'single_drive':
+            parts.append('Rs' + engineering_value(dual['series_resistance_ohm'], 'Ohm'))
     amplitude = values.get("sine_out_v")
     if isinstance(amplitude, (int, float)) and math.isfinite(amplitude) and amplitude > 0:
         parts.append(('ACout' if verified else 'ACset') + engineering_value(amplitude, 'V'))

@@ -505,6 +505,7 @@ class BFieldGateScanTab(GateScanTab):
         self._refresh_condition_table()
 
     def _set_ui_from_params(self, params):
+        self.bias2_editor.set_values(params)
         """Load a condition snapshot into the inherited Gate Scan editor."""
         controls = (
             (self.ed_base, params.base_name), (self.cbo_source, "Keithley 2400" if params.vds_source == "Keithley 2400" else f"NI DAQ ao{params.ao_channel}"),
@@ -560,6 +561,8 @@ class BFieldGateScanTab(GateScanTab):
             required = ["daq", "g1", "g2"]
             if params.vds_source == "Keithley 2400":
                 required.append("g3")
+            if params.bias2_mode != "Disabled":
+                required.append("g4")
             requests.append((params, tuple(required), calibration, condition.name))
         required_all = tuple(dict.fromkeys(name for _params, required, _cal, _name in requests for name in required))
         missing = [name for name in required_all if not self.device_manager.is_connected(name)]
@@ -582,7 +585,53 @@ class BFieldGateScanTab(GateScanTab):
                 raise ValueError("Raw trajectory needs at least one active variable")
         elif abs(float(params.derived_ratio)) < 1e-12:
             raise ValueError("Derived trajectory requires a non-zero ratio")
-        super().validate_field_batch_request(params)
+        from app.workers.line_sweep import LineSweepWorker
+        limited = deepcopy(params)
+        limited.n_points = 2
+        connections = deepcopy(self.conns)
+        for name, setting in (("g1", "gate1_max_voltage_v"), ("g2", "gate2_max_voltage_v"),
+                              ("g3", "gate3_max_voltage_v")):
+            applied = self.device_manager.applied_gate_voltage_limit(name)
+            if applied > 0:
+                setattr(connections, setting, min(applied, getattr(connections, setting)))
+        worker = LineSweepWorker(limited, self.save, connections)
+        worker._validate_trajectory_limits(worker._build_trajectory())
+
+    def begin_field_batch(self, params, required_devices, calibration=None):
+        if not super().begin_field_batch(params, required_devices, calibration):
+            return False
+        try:
+            from app.constants import GATE_BIAS_RAMP_STEP_V, SAFE_RAMP_STEP_V
+            from app.voltage_resolution import validate_source_targets
+            from app.bias_control import bias2_target, validate_bias2
+            from app.workers.line_sweep import LineSweepWorker
+            plans = []
+            for condition in self._conditions:
+                if condition.enabled:
+                    p = condition.params
+                    worker = LineSweepWorker(p, self.save, self.conns)
+                    plans.append((p, worker._build_trajectory()))
+            for name, key, label in (("g1", "vtg", "G1 / Vtg"), ("g2", "vbg", "G2 / Vbg")):
+                validate_source_targets(self.device_manager.get_session(name),
+                    [point[key] for p, points in plans for point in points], label,
+                    ramp_step=min([GATE_BIAS_RAMP_STEP_V] + [p.vg_ramp for p, _ in plans]), refresh=True)
+            vds_plans = [(p, points) for p, points in plans if p.vds_source == "Keithley 2400"]
+            if vds_plans:
+                validate_source_targets(self.device_manager.get_session("g3"),
+                    [point["vds"] for p, points in vds_plans for point in points], "G3 / Vds",
+                    ramp_step=min([SAFE_RAMP_STEP_V] + [p.vds_ramp for p, _ in vds_plans]), refresh=True)
+            bias2_plans = [(p, points) for p, points in plans if p.bias2_mode != "Disabled"]
+            if bias2_plans:
+                validate_source_targets(self.device_manager.get_session("g4"),
+                    [bias2_target(p, point["vds"]) for p, points in bias2_plans for point in points],
+                    "G4 / Bias2", ramp_step=min(p.bias2_ramp for p, _ in bias2_plans), refresh=True)
+                for p, points in bias2_plans:
+                    validate_bias2(p, points, self.device_manager, p.vds_source != "None")
+            return True
+        except Exception as exc:
+            self.finish_field_batch()
+            self._show_series_error(f"B-field Gate Scan preflight: {exc}")
+            return False
 
     def _apply_batch_lock(self):
         """Lock every editor while the reserved series owns the instruments."""
@@ -606,6 +655,8 @@ class BFieldGateScanTab(GateScanTab):
             required = ["daq", "g1", "g2"]
             if self._batch_params.vds_source == "Keithley 2400":
                 required.append("g3")
+            if self._batch_params.bias2_mode != "Disabled":
+                required.append("g4")
             return required
         return super()._required_devices()
 

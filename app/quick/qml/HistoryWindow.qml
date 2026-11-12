@@ -72,7 +72,7 @@ ApplicationWindow {
     }
     ActionDialog {
         id: rangeDialog; objectName: "historyRangeDialog"
-        title: "Axis and color ranges"; modal: true
+        title: backend.hasMap ? "Axis and color ranges" : "Axis ranges"; modal: true
         width: Math.min(window.width - 64, 640)
         anchors.centerIn: parent
         visible: window.rangesOpen
@@ -81,9 +81,36 @@ ApplicationWindow {
         contentItem: ColumnLayout {
             spacing: 12
             Label { text: "Use Auto to fit the displayed data, or Fixed to enter bounds."; color: Theme.muted; Layout.fillWidth: true; wrapMode: Text.Wrap }
-            HistoryRange { backend: window.backend; axis: "x"; label: "Map X"; Layout.fillWidth: true }
-            HistoryRange { backend: window.backend; axis: "y"; label: "Map Y"; Layout.fillWidth: true }
-            HistoryRange { backend: window.backend; axis: "color"; label: "Signal"; Layout.fillWidth: true }
+            RowLayout {
+                visible: !backend.hasMap && backend.rangeChannels.length > 1
+                Layout.fillWidth: true
+                Label { text: "Y channel"; color: Theme.muted }
+                SelectBox {
+                    objectName: "historyRangeChannel"; Layout.fillWidth: true
+                    model: backend.rangeChannels
+                    currentIndex: model.indexOf(backend.rangeChannel)
+                    onActivated: backend.setRangeChannel(currentText)
+                    Accessible.name: "Y range channel"
+                }
+            }
+            HistoryRange { backend: window.backend; axis: "x"; label: backend.hasMap ? "Map X" : "X"; Layout.fillWidth: true }
+            HistoryRange { backend: window.backend; axis: "y"; label: backend.hasMap ? "Map Y" : backend.rangeChannel === "Shared Y" ? "Shared Y" : "Y"; Layout.fillWidth: true }
+            HistoryRange { backend: window.backend; axis: "color"; label: "Signal"; visible: backend.hasMap; Layout.fillWidth: true }
+        }
+    }
+    ActionDialog {
+        id: coverageDialog; objectName: "historyCoverageDetails"
+        title: "Files used in this view"; modal: true
+        width: Math.min(window.width - 80, 900); height: Math.min(window.height - 80, 520)
+        anchors.centerIn: parent
+        standardButtons: Dialog.Close
+        contentItem: ScrollView {
+            TextArea {
+                objectName: "historyCoverageText"
+                text: backend.coverageDetails
+                readOnly: true; selectByMouse: true
+                wrapMode: TextEdit.Wrap; color: Theme.text
+            }
         }
     }
     ActionDialog {
@@ -169,6 +196,13 @@ ApplicationWindow {
                         Label { text: backend.selectedCount > 0 ? backend.selectedCount + " selected" : "Check files to compare"; font.bold: backend.selectedCount > 0; color: Theme.text; Layout.fillWidth: true; ToolTip.text: "Selections stay checked when you filter the list"; ToolTip.visible: selectionHover.hovered; HoverHandler { id: selectionHover } }
                         ActionButton { text: "Clear selection"; enabled: backend.selectedCount > 0; onClicked: backend.clearSelection() }
                     }
+                    Label {
+                        objectName: "historyHiddenSelection"
+                        visible: backend.hiddenSelectedCount > 0
+                        text: backend.hiddenSelectedCount + " selected files hidden by filters"
+                        color: Theme.accent; font.pointSize: Theme.captionPointSize
+                        Layout.fillWidth: true; wrapMode: Text.Wrap
+                    }
                     ListView {
                         id: fileList; Layout.fillWidth: true; Layout.fillHeight: true
                         objectName: "historyFileList"
@@ -225,9 +259,9 @@ ApplicationWindow {
                         ToolTip.text: "Save the displayed plot, CSV data and a restorable analysis view"; ToolTip.visible: hovered
                         Menu {
                             id: exportMenu
-                            MenuItem { text: "Heatmap PNG + CSV…"; onTriggered: window.saveAs("heatmap") }
-                            MenuItem { text: "Measured cut PNG + CSV…"; enabled: backend.cutReady; onTriggered: window.saveAs("cut") }
-                            MenuItem { text: "Heatmap + cut PNG + CSV…"; enabled: backend.cutReady; onTriggered: window.saveAs("both") }
+                            MenuItem { objectName: "historyExportHeatmapItem"; text: "Heatmap PNG + CSV…"; onTriggered: window.saveAs("heatmap") }
+                            MenuItem { objectName: "historyExportCutItem"; text: "Measured cut PNG + CSV…"; enabled: backend.cutReady; onTriggered: window.saveAs("cut") }
+                            MenuItem { objectName: "historyExportBothItem"; text: "Heatmap + cut PNG + CSV…"; enabled: backend.cutReady; onTriggered: window.saveAs("both") }
                         }
                     }
                 }
@@ -271,16 +305,26 @@ ApplicationWindow {
                         Label { text: backend.hasMap ? "Cut scale" : "Normalize"; anchors.verticalCenter: parent.verticalCenter }
                         SelectBox { width: 110; model: ["Raw", "Max |Y|", "0–1"]; currentIndex: ["raw", "max_abs", "min_max"].indexOf(backend.state.normalization); onActivated: backend.setOption("normalization", ["raw", "max_abs", "min_max"][currentIndex]); Accessible.name: "Normalization" }
                     }
-                    ActionButton { objectName: "historyRanges"; visible: backend.hasMap; text: "Axis / color ranges…"; onClicked: window.rangesOpen = true }
+                    ActionButton { objectName: "historyRanges"; text: backend.hasMap ? "Axis / color ranges…" : "Axis ranges…"; enabled: backend.exportReady; onClicked: window.rangesOpen = true }
                 }
-                Label {
-                    text: backend.choiceNote
-                    color: Theme.muted
+                RowLayout {
                     Layout.fillWidth: true
-                    wrapMode: Text.Wrap
-                    font.pointSize: Theme.captionPointSize
+                    Label {
+                        objectName: "historyCoverageSummary"
+                        text: backend.coverageSummary
+                        color: Theme.text; font.bold: backend.selectedCount > 0
+                        Layout.fillWidth: true; wrapMode: Text.Wrap
+                        Accessible.name: text
+                    }
+                    ActionButton {
+                        objectName: "historyCoverageButton"
+                        text: "File details…"; enabled: backend.selectedCount > 0 && !backend.busy
+                        onClicked: coverageDialog.open()
+                        ToolTip.text: "Show plotted files and why other checked files were skipped"
+                        ToolTip.visible: hovered
+                    }
                 }
-                Label { text: backend.selectionSummary; color: Theme.muted; Layout.fillWidth: true; wrapMode: Text.Wrap; maximumLineCount: 2; elide: Text.ElideRight; ToolTip.text: text; ToolTip.visible: summaryHover.hovered; HoverHandler { id: summaryHover } }
+                Label { text: (backend.selectedCount > 0 ? "Selected conditions: " : "") + backend.selectionSummary; color: Theme.muted; Layout.fillWidth: true; wrapMode: Text.Wrap; maximumLineCount: 2; elide: Text.ElideRight; ToolTip.text: text; ToolTip.visible: summaryHover.hovered; HoverHandler { id: summaryHover } }
                 ColumnLayout {
                     visible: backend.currentType === "map_2d"
                     Layout.fillWidth: true
@@ -321,7 +365,7 @@ ApplicationWindow {
                             Row {
                             spacing: 5
                             Label { text: "Value"; anchors.verticalCenter: parent.verticalCenter }
-                            SelectBox { width: 155; model: backend.measuredValues; editable: true; currentIndex: model.indexOf(backend.state.fixed_value); editText: backend.state.fixed_value === null ? "" : String(backend.state.fixed_value); onActivated: backend.setOption("fixed_value", currentText); onAccepted: backend.setOption("fixed_value", editText); Accessible.name: "Exact measured cut coordinate" }
+                            HistoryCoordinate { width: 155; backend: window.backend }
                             }
                         }
                     }
@@ -330,7 +374,7 @@ ApplicationWindow {
                     id: plotTabs; objectName: "historyPlotTabs"; visible: backend.hasMap && window.narrowPlots
                     Layout.fillWidth: true
                     NavigationTabButton { objectName: "historyHeatmapTab"; text: "Heatmap · " + backend.state.signal }
-                    NavigationTabButton { objectName: "historyCutTab"; text: "Measured cut · " + backend.state.fixed_axis + " = " + backend.state.fixed_value; ToolTip.text: backend.traceCount + " displayed traces"; ToolTip.visible: hovered }
+                    NavigationTabButton { objectName: "historyCutTab"; text: "Measured cut · " + backend.state.fixed_axis + " = " + backend.cutCoordinateLabel; ToolTip.text: backend.state.fixed_axis + " = " + backend.cutCoordinateExact + " · " + backend.traceCount + " displayed traces"; ToolTip.visible: hovered }
                 }
                 Item {
                     Layout.fillWidth: true; Layout.fillHeight: true; Layout.minimumHeight: 180
@@ -353,7 +397,7 @@ ApplicationWindow {
                         visible: backend.hasMap && (!window.narrowPlots || plotTabs.currentIndex === 1)
                         Layout.fillWidth: true; Layout.fillHeight: true; Layout.preferredWidth: 1
                         spacing: 6
-                        Label { objectName: "historyCutTitle"; visible: !window.narrowPlots; text: "Measured cut — " + backend.state.fixed_axis + " = " + backend.state.fixed_value; font.bold: true; Layout.fillWidth: true; color: Theme.text; elide: Text.ElideRight; ToolTip.text: text; ToolTip.visible: cutTitleHover.hovered; HoverHandler { id: cutTitleHover } }
+                        Label { objectName: "historyCutTitle"; visible: !window.narrowPlots; text: "Measured cut — " + backend.state.fixed_axis + " = " + backend.cutCoordinateLabel; font.bold: true; Layout.fillWidth: true; color: Theme.text; elide: Text.ElideRight; ToolTip.text: backend.state.fixed_axis + " = " + backend.cutCoordinateExact; ToolTip.visible: cutTitleHover.hovered; HoverHandler { id: cutTitleHover } }
                         PlotPane {
                             objectName: "historyCutPlot"; darkMode: backend.dark
                             visible: backend.hasMap && (!window.narrowPlots || plotTabs.currentIndex === 1)

@@ -21,6 +21,9 @@ from instruments.instrument import InstrumentError, PyvisaInstrument
 
 class FakeKeithley(Keithley2400Base):
     def __init__(self, current_compliance: float = 1e-7, max_voltage: float = 12.0):
+        self._identity = "KEITHLEY INSTRUMENTS INC.,MODEL 2400,1,1"
+        self.cached_source_voltage_range_v = None
+        self.cached_source_voltage_range_error = ""
         self._name = "fake Keithley"
         self._address = "GPIB::1"
         self._init_curr_comp = current_compliance
@@ -280,6 +283,9 @@ class CaptureEmitter:
 
 class ConnectedKeithleyStub:
     instances = []
+    identity = "KEITHLEY,MODEL 2400,1,1"
+    cached_source_voltage_range_v = 20.0
+    def refresh_source_voltage_range(self): return self.cached_source_voltage_range_v
 
     def __init__(self, name, address, curr_comp, max_source_voltage):
         self.name = name
@@ -325,6 +331,10 @@ class ConnectedKeithleyStub:
 
 
 class ManualGateSession:
+    identity = "KEITHLEY,MODEL 2400,1,1"
+    cached_source_voltage_range_v = 20.0
+    def refresh_source_voltage_range(self): return self.cached_source_voltage_range_v
+
     def __init__(self, setpoint=0.0):
         self.setpoint = float(setpoint)
         self.writes = []

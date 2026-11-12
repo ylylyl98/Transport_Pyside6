@@ -84,7 +84,7 @@ def validate_cosweep_params(params: CoParams) -> None:
                 doping, efield = _derived_pair(params, params.axis_fast, fast_value, params.axis_slow, slow_value)
                 vtg, vbg = derived_to_gates(doping, efield, params.ratio, params.ratio_target)
                 if abs(vtg) > V_LIMIT or abs(vbg) > V_LIMIT:
-                    raise ValueError(f"Derived point ({doping:g}, {efield:g}) requires Vtg={vtg:.3f} V and Vbg={vbg:.3f} V, above the {V_LIMIT:.1f} V limit.")
+                    raise ValueError(f"Derived point ({doping:g}, {efield:g}) requires Vtg={vtg:.9g} V and Vbg={vbg:.9g} V, above the {V_LIMIT:.1f} V limit.")
         bias_values = (fast if params.axis_fast == "Vds" else slow if params.axis_slow == "Vds" else [params.vds_start])
         if any(abs(float(value)) > V_LIMIT for value in bias_values):
             raise ValueError(f"Vds trajectory is above the {V_LIMIT:.1f} V limit.")
@@ -93,7 +93,7 @@ def validate_cosweep_params(params: CoParams) -> None:
     for field in ("vtg_start", "vtg_stop", "vbg_start", "vbg_stop", "vds_start", "vds_stop"):
         value = float(getattr(params, field))
         if abs(value) > V_LIMIT:
-            raise ValueError(f"{field} is {value:.3f} V, above the {V_LIMIT:.1f} V limit.")
+            raise ValueError(f"{field} is {value:.9g} V, above the {V_LIMIT:.1f} V limit.")
     for axis in axes:
         start, stop, step = _raw_axis_values(params, axis)
         if abs(start) > V_LIMIT or abs(stop) > V_LIMIT:
@@ -113,7 +113,7 @@ def validate_cosweep_params(params: CoParams) -> None:
             vbg = fast_value if params.axis_fast == "Vbg" else (slow_value if params.axis_slow == "Vbg" else params.vbg_start)
             vds = fast_value if params.axis_fast == "Vds" else (slow_value if params.axis_slow == "Vds" else params.vds_start)
             if abs(vtg) > V_LIMIT or abs(vbg) > V_LIMIT or abs(vds) > V_LIMIT:
-                raise ValueError(f"Raw point requires Vtg={vtg:.3f} V, Vbg={vbg:.3f} V, Vds={vds:.3f} V, above the {V_LIMIT:.1f} V limit.")
+                raise ValueError(f"Raw point requires Vtg={vtg:.9g} V, Vbg={vbg:.9g} V, Vds={vds:.9g} V, above the {V_LIMIT:.1f} V limit.")
 
 
 def _raw_axis_values(params: CoParams, axis: str) -> tuple[float, float, float]:
@@ -286,6 +286,9 @@ class CoSweepWorker(RunWorker):
         self.g1 = kw.get("g1")
         self.g2 = kw.get("g2")
         self.g3 = kw.get("g3")
+        self.g4 = kw.get("g4")
+        self.device_manager = kw.get("device_manager")
+        self._outputs_started = False
         self.daq = kw.get("daq")
         self.plot_choice = kw.get("plot_choice")
         self.amp_rate = kw.get("amp_rate", 1e7)
@@ -347,6 +350,12 @@ class CoSweepWorker(RunWorker):
                 raise RuntimeError("G3 / Vds is required for a Keithley-driven sweep.")
 
             trajectory = build_cosweep_points(self.p)
+            self.validate_source_trajectory(trajectory, gate_ramp=min(GATE_BIAS_RAMP_STEP_V, self.p.vg_ramp),
+                                            vds_ramp=min(SAFE_RAMP_STEP_V, self.p.vds_ramp),
+                                            use_g3=self.p.vds_source == "Keithley 2400")
+            self.validate_bias2(self.p, trajectory, self.p.vds_source != "None")
+            if self.p.vds_source == "None" and "Vds" in active_axes:
+                raise RuntimeError("Vds sweep requires Bias1 enabled.")
             total = len(trajectory)
             measurement_name = "map_2d" if slow_axis != "None" else "sweep_1d"
 
@@ -376,6 +385,7 @@ class CoSweepWorker(RunWorker):
                     },
                 )
 
+            self._outputs_started = True
             with open(csv_path, "x", newline="", buffering=1, encoding="utf-8") as f:
                 w = csv.writer(f)
                 w.writerow(["Vtg", "Vbg", "Vds", "Vds_measured", "raw_X", "raw_Y", "raw_DC", "Ids_X", "Ids_Y", "Ids_DC", KEITHLEY_CHANNEL, "Doping", "E-field", "PassIndex", "FastDirection", *self.extra_columns()])
@@ -384,7 +394,7 @@ class CoSweepWorker(RunWorker):
                 if not self._active_derived and "Vtg" not in active_axes:
                     if self.g1 is not None:
                         self.log.emit(
-                            f"Ramping G1/Vtg to {self.p.vtg_start:.3f} V "
+                            f"Ramping G1/Vtg to {self.p.vtg_start:.9g} V "
                             f"({GATE_BIAS_RAMP_STEP_V:g} V/step, {GATE_BIAS_RAMP_STEP_T:g} s/step)"
                         )
                         safe_ramp(
@@ -398,7 +408,7 @@ class CoSweepWorker(RunWorker):
                 if not self._active_derived and "Vbg" not in active_axes:
                     if self.g2 is not None:
                         self.log.emit(
-                            f"Ramping G2/Vbg to {self.p.vbg_start:.3f} V "
+                            f"Ramping G2/Vbg to {self.p.vbg_start:.9g} V "
                             f"({GATE_BIAS_RAMP_STEP_V:g} V/step, {GATE_BIAS_RAMP_STEP_T:g} s/step)"
                         )
                         safe_ramp(
@@ -409,8 +419,10 @@ class CoSweepWorker(RunWorker):
                             GATE_BIAS_RAMP_STEP_T,
                             self.check_abort_pause,
                         )
-                if "Vds" not in active_axes:
-                    if self.p.vds_source.startswith("NI DAQ"):
+                if "Vds" not in active_axes and self.p.vds_source != "None":
+                    if self.p.bias2_mode == "Follow":
+                        self.move_pair(self.p.vds_start)
+                    elif self.p.vds_source.startswith("NI DAQ"):
                         self.daq.ramp_voltage(self.p.ao_channel, self.p.vds_start, self.p.vds_ramp)
                     else:
                         if self.g3 is None:
@@ -440,6 +452,8 @@ class CoSweepWorker(RunWorker):
                             self.set_volt(slow_axis, point["slow_value"])
                             current_pass = pass_idx
                         self.set_volt(fast_axis, point["fast_value"])
+                    if self.p.bias2_mode != "Follow":
+                        self.apply_bias2(point["vds"])
                     time.sleep(self.p.delay)
 
                     sample = self.acquire_currents(self.p.n_sample)
@@ -454,7 +468,7 @@ class CoSweepWorker(RunWorker):
 
                     curr_vtg = point["vtg"]
                     curr_vbg = point["vbg"]
-                    curr_vds = point["vds"]
+                    curr_vds = point["vds"] if self.p.vds_source != "None" else None
                     doping, efield = point["doping"], point["efield"]
 
                     w.writerow([curr_vtg, curr_vbg, curr_vds, vds_measured, raw_x, raw_y, raw_dc, ids_x, ids_y, ids_dc, ids_keithley, doping, efield, pass_idx, fast_direction, *self.extra_values()])
@@ -468,7 +482,7 @@ class CoSweepWorker(RunWorker):
                         "index": float(cnt),
                         "vtg": float(curr_vtg),
                         "vbg": float(curr_vbg),
-                        "vds": float(curr_vds),
+                        "vds": float(curr_vds) if curr_vds is not None else None,
                         "doping": float(doping),
                         "efield": float(efield),
                     }
@@ -477,6 +491,8 @@ class CoSweepWorker(RunWorker):
                     self.point.emit(x_plot, y_val)
                     self.point_data.emit({
                         **sample,
+                "Bias2": getattr(self, "_bias2_voltage", None),
+                "Ibias2_Keithley": getattr(self, "_bias2_current", None),
                         "x": x_plot,
                         **point_record,
                         "vds_measured": vds_measured,
@@ -495,41 +511,49 @@ class CoSweepWorker(RunWorker):
                     self.progress.emit(cnt / total)
             run_status = "finished"
             run_detail = csv_path
-            self.finished.emit(csv_path)
         except RunStopped as ex:
             run_status = "stopped"
             run_detail = f"{ex}. Partial data saved to: {csv_path}" if csv_path else str(ex)
-            self.stopped.emit(run_detail)
         except Exception as ex:
             run_status = "error"
             run_detail = str(ex)
-            self.error.emit(run_detail)
         finally:
             self._emit_timing("cleanup")
             failures = []
             try:
-                if self.g1 is not None:
+                if self._outputs_started and self.g1 is not None:
                     safe_ramp(self.g1.set_voltage, getattr(self.g1, "voltage", None) or 0.0, 0.0, SAFE_RAMP_STEP_V, SAFE_RAMP_STEP_T)
             except Exception as ex:
                 failures.append(f"G1/Vtg zero failed: {ex}")
             try:
-                if self.g2 is not None:
+                if self._outputs_started and self.g2 is not None:
                     safe_ramp(self.g2.set_voltage, getattr(self.g2, "voltage", None) or 0.0, 0.0, SAFE_RAMP_STEP_V, SAFE_RAMP_STEP_T)
             except Exception as ex:
                 failures.append(f"G2/Vbg zero failed: {ex}")
             try:
-                if self.p.vds_source.startswith("NI DAQ"):
+                if self._outputs_started and self.p.vds_source.startswith("NI DAQ"):
                     if self.daq is not None:
                         self.daq.ramp_voltage(self.p.ao_channel, 0.0, SAFE_RAMP_STEP_V, SAFE_RAMP_STEP_T)
-                elif self.g3 is not None:
+                elif self._outputs_started and self.p.vds_source == "Keithley 2400" and self.g3 is not None:
                     safe_ramp(self.g3.set_voltage, getattr(self.g3, "voltage", None) or 0.0, 0.0, SAFE_RAMP_STEP_V, SAFE_RAMP_STEP_T)
             except Exception as ex:
                 failures.append(f"Vds zero failed: {ex}")
+            try:
+                self.cleanup_bias2()
+            except Exception as ex:
+                failures.append(f"Bias2 zero failed: {ex}")
             self.emit_safe_state_report(failures)
+            if failures:
+                run_status, run_detail = "error", "Output cleanup failed: " + "; ".join(failures)
             try:
                 update_run_metadata_status(self.p.output_metadata_path, run_status, run_detail, failures)
+            except Exception as ex:
+                run_status, run_detail = "error", f"Run metadata save failed: {ex}"
             finally:
                 self._emit_timing("cleanup_failed" if failures else "done")
+            if run_status == "finished": self.finished.emit(csv_path)
+            elif run_status == "stopped": self.stopped.emit(run_detail)
+            else: self.error.emit(run_detail)
 
     def set_volt(self, name, val):
         if name == "Vtg":
@@ -541,7 +565,11 @@ class CoSweepWorker(RunWorker):
                 raise RuntimeError("Required session missing: G2 / Vbg")
             self.g2.ramp_voltage(val, self.p.vg_ramp)
         elif name == "Vds":
-            if self.p.vds_source.startswith("NI DAQ"):
+            if self.p.vds_source == "None":
+                return
+            if self.p.bias2_mode == "Follow":
+                self.move_pair(val)
+            elif self.p.vds_source.startswith("NI DAQ"):
                 self.daq.ramp_voltage(self.p.ao_channel, val, self.p.vds_ramp)
             else:
                 if self.g3 is None:
@@ -560,13 +588,14 @@ class CoSweepWorker(RunWorker):
             return None
         try:
             values = self.g3.acquire()
-            return values.get("current", self.g3.current)
+            return values.get("current", getattr(self.g3, "current", None))
         except Exception:
             return None
 
     def _plot_value(self, ids_dc, ids_x, ids_y, ids_keithley):
         if self.plot_choice in getattr(self, "_current_sample", {}):
-            return self._current_sample[self.plot_choice]
+            value = self._current_sample[self.plot_choice]
+            return value if value is not None else float("nan")
         if self.plot_choice == "Ids_X":
             return ids_x
         if self.plot_choice == "Ids_Y":

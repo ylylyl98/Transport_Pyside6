@@ -14,7 +14,7 @@ from app.quick.forms import field, checked_value
 from app.keithley_modes import keithley_mode_options
 
 
-ADDRESS_KEYS = {"gate1": "g1", "gate2": "g2", "gate3": "g3", "daq_dev": "daq",
+ADDRESS_KEYS = {"gate1": "g1", "gate2": "g2", "gate3": "g3", "gate4": "g4", "daq_dev": "daq",
                 "mono": "mono", "lockin": "lockin", "drive_lockin": "drive_lockin"}
 MODE_OPTIONS = [{"label": label, "value": key} for key, label in keithley_mode_options()]
 
@@ -62,13 +62,16 @@ class InstrumentService(QObject):
         s = self.settings
         for attr, short in ADDRESS_KEYS.items():
             setattr(self.connections, attr, str(s.value("addr/" + short, getattr(self.connections, attr))))
-        for i in range(1, 4):
+        for i in range(1, 5):
             prefix = f"gate{i}"
             setattr(self.connections, prefix + "_mode", str(s.value(f"mode/g{i}", getattr(self.connections, prefix + "_mode"))))
             for key in ("max_voltage_v", "current_compliance_a"):
                 attr = prefix + "_" + key
                 setattr(self.connections, attr, float(s.value(f"protection/g{i}/{key}", getattr(self.connections, attr))))
         self.connections.drag_drive_enabled = s.value("drag_drive/enabled", False, type=bool)
+        self.connections.signal_chain_mode = str(s.value("drag_drive/mode", "dual" if self.connections.drag_drive_enabled else "ordinary"))
+        self.connections.drag_drive_enabled = self.connections.signal_chain_mode == "dual"
+        self.connections.dc_enabled = s.value("signal_chain/dc_enabled", True, type=bool)
         self.save_root.user = str(s.value("path/user", self.save_root.user))
         self.save_root.device_id = str(s.value("path/device_id", s.value("path/sample", self.save_root.device_id)))
         self.save_root.base = str(s.value("path/base", self.save_root.base))
@@ -81,6 +84,10 @@ class InstrumentService(QObject):
             "ac_contact": str(s.value("signal_chain/ac_contact", "")),
             "ac_voltage_ratio": float(s.value("signal_chain/ac_voltage_ratio", 0) or 0),
             "series_resistance_ohm": float(s.value("drag_drive/rs_ohm", 100000)),
+            "signal_chain_mode": self.connections.signal_chain_mode,
+            "dc_enabled": self.connections.dc_enabled,
+            "dc_preamp_gain_v_per_a": float(s.value("signal_chain/dc_preamp_gain_v_per_a", 1 / amp if 0 < amp <= 1 else (amp if amp > 1 else 1e7))),
+            "excitation_source": str(s.value("signal_chain/excitation_source", "primary")),
         }
 
     def set_active_provider(self, callback):
@@ -115,9 +122,9 @@ class InstrumentService(QObject):
         values = []
         for attr, short in ADDRESS_KEYS.items():
             values.append(field(attr, {"daq_dev": "NI DAQ device", "mono": "Monochromator",
-                                      "lockin": "Drag / primary lock-in", "drive_lockin": "Drive lock-in"}.get(attr, short.upper()),
+                                      "lockin": "Primary lock-in (Drag or Drive)", "drive_lockin": "Second lock-in (Dual Drive)"}.get(attr, short.upper()),
                                 getattr(self.connections, attr), group="Instrument addresses"))
-        for i in range(1, 4):
+        for i in range(1, 5):
             prefix = f"gate{i}"
             values.extend([
                 field(prefix + "_mode", "Mode", getattr(self.connections, prefix + "_mode"), options=MODE_OPTIONS, group=f"G{i} protection"),
@@ -134,9 +141,12 @@ class InstrumentService(QObject):
     @Property('QVariantList', notify=signalFieldsChanged)
     def signalFields(self):
         v = self.calibration
-        return [field("drag_drive_enabled", "Use Drive lock-in for Drag / Drive", self.connections.drag_drive_enabled, group="Optional Drive channel"),
-                field("series_resistance_ohm", "Drive series resistance (Ω)", v["series_resistance_ohm"], min=.001, max=1e12, group="Optional Drive channel", visible=self.connections.drag_drive_enabled),
-                field("preamp_sensitivity_a", "Preamp sensitivity (A/V)", v["preamp_sensitivity_a"], min=1e-15, max=1, group="Manual signal conversion"),
+        return [field("signal_chain_mode", "Signal chain mode", v["signal_chain_mode"], options=[{"label": label, "value": mode} for label, mode in [("Ordinary", "ordinary"), ("Single lock-in: Drag", "single_drag"), ("Single lock-in: Drive", "single_drive"), ("Two lock-ins: Drag / Drive", "dual")]], group="Signal chain"),
+                field("dc_enabled", "Acquire DC (AI2)", v["dc_enabled"], group="Signal chain"),
+                field("dc_preamp_gain_v_per_a", "DC preamp gain (V/A)", v["dc_preamp_gain_v_per_a"], min=1e-3, max=1e15, group="Signal chain", visible=v["dc_enabled"]),
+                field("excitation_source", "Excitation source", v["excitation_source"], options=[{"label": label, "value": value} for label, value in [("Primary lock-in", "primary"), ("External", "external"), ("Unspecified", "unspecified")]], group="Signal chain"),
+                field("series_resistance_ohm", "Drive series resistance (Ω)", v["series_resistance_ohm"], min=.001, max=1e12, group="Optional Drive channel", visible=v["signal_chain_mode"] in ("single_drive", "dual")),
+                field("preamp_sensitivity_a", "Preamp sensitivity (A/V)", v["preamp_sensitivity_a"], min=1e-15, max=1, group="Manual signal conversion", visible=v["signal_chain_mode"] != "single_drive"),
                 field("lockin_sensitivity_v", "Lock-in sensitivity (V)", v["lockin_sensitivity_v"], min=1e-12, max=10,
                       readOnly=self.manager.is_connected("lockin"),
                       group="Lock-in calibration", description="Read from the connected primary lock-in; verified again before acquisition"),
@@ -149,7 +159,7 @@ class InstrumentService(QObject):
         result = []
         for name in self.manager.sessions:
             rb = self._readbacks.get(name, {})
-            gate = name in ("g1", "g2", "g3")
+            gate = name in ("g1", "g2", "g3", "g4")
             target_available = gate and not self._closing and not self._active() and self.manager.can_accept_gate_target(name)
             protection = gate and self.manager.protection_is_applied(name)
             result.append(dict(name=name, label=name.upper(), state=self.manager.state(name),
@@ -193,7 +203,7 @@ class InstrumentService(QObject):
         primary = self.lockins.get("lockin")
         amplitude = getattr(primary, "_verified_settings", {}).get("sine_out_v") if primary else None
         ratio = self.calibration["ac_voltage_ratio"]
-        if amplitude is None or not ratio:
+        if self.calibration["excitation_source"] != "primary" or amplitude is None or not ratio:
             return "Sample AC estimate requires a verified source amplitude and configured voltage ratio"
         return f"Estimated sample AC: {float(amplitude) * ratio:.9g} V ({float(amplitude):.9g} V × {ratio:g})"
 
@@ -239,8 +249,14 @@ class InstrumentService(QObject):
                 setting_key = "path/" + key
             elif key in self.calibration:
                 self.calibration[key] = value
+                if key == "signal_chain_mode":
+                    self.connections.signal_chain_mode = value
+                    self.connections.drag_drive_enabled = value == "dual"
+                    self.settings.setValue("drag_drive/enabled", self.connections.drag_drive_enabled)
+                elif key == "dc_enabled":
+                    self.connections.dc_enabled = value
                 setting_key = {"preamp_sensitivity_a": "rates/amp", "lockin_sensitivity_v": "rates/lkn",
-                               "frequency_hz": "lockin/frequency_hz", "series_resistance_ohm": "drag_drive/rs_ohm"}.get(key, "signal_chain/" + key)
+                               "frequency_hz": "lockin/frequency_hz", "signal_chain_mode": "drag_drive/mode", "series_resistance_ohm": "drag_drive/rs_ohm"}.get(key, "signal_chain/" + key)
             else:
                 setattr(self.connections, key, value)
                 if key in ADDRESS_KEYS:
@@ -303,7 +319,7 @@ class InstrumentService(QObject):
                 self.manager.set_monochromator_wavelength(target)
             elif name == "protection":
                 device = str(args["device"])
-                if device not in ("g1", "g2", "g3"):
+                if device not in ("g1", "g2", "g3", "g4"):
                     raise ValueError("Unknown gate")
                 prefix = "gate" + device[-1]
                 self.manager.apply_gate_protection(device, getattr(self.connections, prefix + "_max_voltage_v"),
@@ -372,11 +388,11 @@ class InstrumentService(QObject):
     def signal_chain_snapshot(self):
         primary = self.lockins.get("lockin")
         v = self.calibration
-        dual = dict(enabled=self.connections.drag_drive_enabled, series_resistance_ohm=v["series_resistance_ohm"])
+        dual = dict(mode=v["signal_chain_mode"], enabled=self.connections.drag_drive_enabled, series_resistance_ohm=v["series_resistance_ohm"], dc_enabled=v["dc_enabled"], dc_preamp_gain_v_per_a=v["dc_preamp_gain_v_per_a"])
         return SignalChainSnapshot(frequency_hz=v["frequency_hz"], lockin_sensitivity_v=v["lockin_sensitivity_v"],
             preamp_sensitivity_a=v["preamp_sensitivity_a"], lockin_settings=primary.settings_snapshot() if primary else None,
             experiment_context=self.context_provider(), ac_contact=v["ac_contact"], ac_voltage_ratio=v["ac_voltage_ratio"] or None,
-            drag_drive=dual)
+            drag_drive=dual, excitation_source=v["excitation_source"])
 
     def close(self):
         self._closing = True

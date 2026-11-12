@@ -129,3 +129,10 @@ and a known resistor signal after restarting the app when idle.
 References: [SR850 manual](https://www.thinksrs.com/downloads/PDFs/Manuals/SR850m.pdf),
 [SR830 manual](https://www.thinksrs.com/downloads/PDFs/Manuals/SR830m.pdf),
 [SR551 manual](https://www.thinksrs.com/downloads/pdfs/manuals/SR550551552m.pdf).
+
+
+## Single lock-in measurement
+
+A run may use one lock-in for either Drag or Drive. Select the role to match the physical wiring and reconnect the cables manually before starting; the application does not switch them. The selected role, calibration and DAQ mapping are frozen for the run. In either single-instrument role, X and Y use DAQ ai0 and ai1. Drive uses the SR551 gain and series resistance conversion; Drag uses the current preamplifier calibration. The unmeasured role has no current values.
+
+DAQ ai2 is a separate DC signal: enable it only when it is wired and set its own preamplifier gain. AC excitation source and measurement role are separate. An external or unspecified excitation is not inferred from the measuring lock-in's Sine Out, and no sample AC estimate is calculated from that output.

@@ -63,7 +63,8 @@ def record_x_value(record: Mapping[str, object], resolved_axis: str) -> float:
     }.get(resolved_axis)
     if key is None:
         raise ValueError(f"Unsupported resolved plot X axis: {resolved_axis}")
-    return float(record[key])
+    value = record[key]
+    return float(value) if value is not None else float("nan")
 
 
 def plot_x_axis_label(resolved_axis: str, ratio: float, ratio_target: str) -> str:

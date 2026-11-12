@@ -24,6 +24,10 @@ class Connections:
     lockin: str = "GPIB1::08::INSTR"
     drive_lockin: str = "GPIB1::09::INSTR"
     drag_drive_enabled: bool = False
+    gate4: str = ""
+    gate4_mode: str = "voltage_2w"
+    gate4_max_voltage_v: float = 20.0
+    gate4_current_compliance_a: float = 1e-6
 
 
 @dataclass
@@ -42,6 +46,7 @@ class SaveRoot:
 
 @dataclass
 class DualGateParams:
+
     base_name: str = "dual_gate"
     output_csv_path: str = ""
     output_metadata_path: str = ""
@@ -59,10 +64,15 @@ class DualGateParams:
     plot_choice: str = "Ids_DC"
     ao_channel: int = 0
     sweep_both_ways: bool = False
+    bias2_mode: str = "Disabled"
+    bias2_voltage: float = 0.0
+    bias2_offset: float = 0.0
+    bias2_ramp: float = 0.05
 
 
 @dataclass
 class CoParams:
+
     # Additional raw Vtg/Vbg rectangles, merged with the primary axis ranges.
     regions: list[dict[str, float]] = field(default_factory=list)
     base_name: str = "dual_gate_cosweep"
@@ -105,10 +115,15 @@ class CoParams:
     efield_start: float = 0.0
     efield_stop: float = 1.0
     efield_step: float = 0.1
+    bias2_mode: str = "Disabled"
+    bias2_voltage: float = 0.0
+    bias2_offset: float = 0.0
+    bias2_ramp: float = 0.05
 
 
 @dataclass
 class LineSweepParams:
+
     base_name: str = "gate_scan"
     output_csv_path: str = ""
     output_metadata_path: str = ""
@@ -147,6 +162,10 @@ class LineSweepParams:
     plot_x_axis: str = "Follow Sweep"
     plot_x_resolved: str = "Vtg"
     sweep_both_ways: bool = False
+    bias2_mode: str = "Disabled"
+    bias2_voltage: float = 0.0
+    bias2_offset: float = 0.0
+    bias2_ramp: float = 0.05
 
 
 @dataclass
@@ -167,6 +186,7 @@ class BFieldTransportCondition:
     ``ratio_target`` and are retained here for an explicit preview/readback.
     """
 
+
     name: str = "Con1"
     doping: float = 0.0
     efield: float = 0.0
@@ -179,6 +199,10 @@ class BFieldTransportCondition:
     ao_channel: int = 0
     settle_s: float = 0.5
     enabled: bool = True
+    bias2_mode: str = "Disabled"
+    bias2_voltage: float = 0.0
+    bias2_offset: float = 0.0
+    bias2_ramp: float = 0.05
 
     def resolve_gates(self) -> tuple[float, float]:
         from app.gate_transform import derived_to_gates
@@ -265,15 +289,21 @@ BFieldSweepParams = BFieldTransportParams
 class PhotocurrentBiasCondition:
     """One complete gate/drain bias condition for a photocurrent spectrum."""
 
+
     enabled: bool = True
     vtg: float = 0.0
     vbg: float = 0.0
     vds: float = 0.0
     settle_s: float = 2.0
+    bias2_mode: str = "Disabled"
+    bias2_voltage: float = 0.0
+    bias2_offset: float = 0.0
+    bias2_ramp: float = 0.05
 
 
 @dataclass
 class PhotocurrentParams:
+
     base_name: str = "pcspec"
     output_csv_path: str = ""
     output_metadata_path: str = ""
@@ -295,3 +325,7 @@ class PhotocurrentParams:
     delay: float = 0.01
     n_sample: int = 1
     plot_choice: str = "Ids_DC"
+    bias2_mode: str = "Disabled"
+    bias2_voltage: float = 0.0
+    bias2_offset: float = 0.0
+    bias2_ramp: float = 0.05

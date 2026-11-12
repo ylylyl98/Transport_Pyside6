@@ -544,7 +544,7 @@ class TransportCsvWriter:
         self.close()
 
 
-def write_series_manifest(path: str, *, params: BFieldTransportParams, validation: Mapping, status: str = "running", results: Iterable[Mapping] = (), cleanup_failures: Iterable[str] = (), runtime: Mapping | None = None) -> None:
+def write_series_manifest(path: str, *, params: BFieldTransportParams, validation: Mapping, status: str = "running", results: Iterable[Mapping] = (), cleanup_failures: Iterable[str] = (), runtime: Mapping | None = None, csv_paths: Iterable[str] | None = None) -> None:
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     params_payload = asdict(params)
     if params.magnet_backend == "2100":
@@ -560,6 +560,7 @@ def write_series_manifest(path: str, *, params: BFieldTransportParams, validatio
         condition_payloads.append(item)
     payload = {
         "schema": "bfield_transport_manifest_v1",
+        "measurement": "bfield_transport",
         "updated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "status": str(status),
         "params": params_payload,
@@ -568,6 +569,8 @@ def write_series_manifest(path: str, *, params: BFieldTransportParams, validatio
         "results": list(results),
         "cleanup_failures": list(cleanup_failures),
     }
+    if csv_paths is not None:
+        payload["csv_paths"] = list(csv_paths)
     if runtime is not None:
         payload["runtime"] = dict(runtime)
     if params.magnet_backend == "1000" and params.measurement_mode == "stepped":

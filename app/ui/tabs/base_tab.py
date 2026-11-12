@@ -78,6 +78,8 @@ class BaseMeasurementTab(QtWidgets.QWidget):
 
     def claim_run_devices(self, required_devices) -> tuple[bool, list[str]]:
         devices = list(dict.fromkeys(required_devices))
+        if self.bias2_is_enabled():
+            devices.append("g4")
         if self.device_manager.is_connected("lockin"):
             devices.append("lockin")
         if getattr(self.device_manager.connections, "drag_drive_enabled", False):
@@ -145,6 +147,24 @@ class BaseMeasurementTab(QtWidgets.QWidget):
         self.control_scroll.setMaximumWidth(480)
 
         self._build_control_panel(self.control_layout)
+        if hasattr(getattr(self, "p", None), "bias2_mode") and not hasattr(self.p, "bias_conditions"):
+            from app.ui.widgets.bias2_editor import Bias2Editor
+            self.bias2_editor = Bias2Editor(self)
+            self.control_layout.addWidget(self.bias2_editor)
+            prefix = getattr(self, "SETTINGS_PREFIX", "tabs/bias2")
+            controls = list(self.bias2_editor.controls.items())
+            self._load_tab_widget_settings(prefix, controls)
+            self.bias2_editor._edited()
+            self._bind_tab_widget_settings(prefix, controls)
+            if hasattr(self, "_parameter_widgets"):
+                self._parameter_widgets.append(self.bias2_editor)
+            self.bias2_editor.changed.connect(self._bias2_edited)
+            manager = getattr(self, "device_manager", None)
+            if manager is not None:
+                def lock_bias2(*_):
+                    self.bias2_editor.setEnabled(not manager.is_busy() and not manager.current_in_use())
+                manager.resources_changed.connect(lock_bias2)
+                manager.operation_changed.connect(lock_bias2)
         self.control_layout.addStretch()
 
         right_widget = QtWidgets.QWidget()
@@ -208,6 +228,27 @@ class BaseMeasurementTab(QtWidgets.QWidget):
 
     def _build_control_panel(self, ctl_layout: QtWidgets.QVBoxLayout):
         raise NotImplementedError
+
+    def bias2_fields(self):
+        editor = getattr(self, "bias2_editor", None)
+        return editor.values() if editor is not None else {}
+
+    def apply_bias2_params(self, params):
+        for key, value in self.bias2_fields().items():
+            setattr(params, key, value)
+        return params
+
+    def bias2_is_enabled(self):
+        return self.bias2_fields().get("bias2_mode", "Disabled") != "Disabled"
+
+    def _bias2_edited(self):
+        for name in ("_update_plot_axis_choices", "_update_connection_hint", "refresh_output_preview"):
+            callback = getattr(self, name, None)
+            if callable(callback):
+                callback()
+        callback = getattr(self, "_update_condition_edit_state", None)
+        if callable(callback):
+            callback()
 
     def refine_parameter_presentation(self):
         """Flatten presentation while preserving control objects and wiring."""

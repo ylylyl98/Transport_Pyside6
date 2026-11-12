@@ -39,9 +39,11 @@ from app.models import BFIELD_HYSTERESIS_LABELS, BFIELD_MT_FIELDS
 from app.models import BFieldTransportCondition, BFieldTransportParams, Connections, SaveRoot
 from app.run_output import build_planned_output
 from app.result_channels import plot_channel_options, compare_channel_options
+from app.signal_chain import signal_chain_metadata
 from app.settings import get_app_settings
 from app.ui.helpers import set_standard_input_height, style_form_layout
 from app.ui.tabs.base_tab import BaseMeasurementTab
+from app.ui.widgets.bias2_editor import Bias2Editor
 from app.ui.widgets.safe_combo import SafeComboBox
 from app.ui.widgets.expandable_line_edit import ExpandableLineEdit
 from app.ui.widgets.safe_spinbox import SafeDoubleSpinBox, SafeSpinBox
@@ -80,12 +82,14 @@ class BFieldTransportTab(BaseMeasurementTab):
         self.btn_stop.clicked.connect(self.stop_run)
 
     def _update_plot_axis_choices(self):
-        options = plot_channel_options('', getattr(self.device_manager.connections, 'drag_drive_enabled', False))
+        chain = self.get_signal_chain()
+        chain = signal_chain_metadata(chain) if chain is not None else {}
+        options = plot_channel_options('', chain, bias2=self.bias2_is_enabled())
         if self.plot_choice not in options:
-            self.plot_choice = 'Ids_DC'
+            self.plot_choice = options[0] if options else ''
         self.plot.set_y_axis_options(options, self.plot_choice)
         dual = getattr(self.device_manager.connections, 'drag_drive_enabled', False)
-        self.plot.set_compare_channels(compare_channel_options('', dual), grid=dual)
+        self.plot.set_compare_channels(compare_channel_options('', chain, bias2=self.bias2_is_enabled()), grid=dual)
         self.set_plot_axis_source(self.plot_choice)
 
     def set_plot_axis_source(self, source):
@@ -251,9 +255,9 @@ class BFieldTransportTab(BaseMeasurementTab):
         intro.setWordWrap(True)
         intro.setProperty("role", "hint")
         ctl_layout.addWidget(intro)
-        self.condition_table = QtWidgets.QTableWidget(0, 9)
+        self.condition_table = QtWidgets.QTableWidget(0, 13)
         self.condition_table.setHorizontalHeaderLabels(
-            ["", "Name", "Dop\ning", "E-\nfield", "Vds", "Sour\nce", "AO", "Vtg", "Vbg"]
+            ["", "Name", "Dop\ning", "E-\nfield", "Vds", "Sour\nce", "AO", "Vtg", "Vbg", "Bias2 mode", "Bias2 fixed", "Offset", "Ramp"]
         )
         self.condition_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         self.condition_table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
@@ -276,6 +280,8 @@ class BFieldTransportTab(BaseMeasurementTab):
             "Calculated top-gate voltage", "Calculated bottom-gate voltage",
         )):
             self.condition_table.horizontalHeaderItem(column).setToolTip(tooltip)
+        for column in range(9, 13):
+            self.condition_table.setColumnHidden(column, True)
         self.condition_table.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.condition_table.setToolTip(
             "All condition columns fit without horizontal scrolling. Select a row to see its "
@@ -284,6 +290,12 @@ class BFieldTransportTab(BaseMeasurementTab):
         self.condition_table.itemChanged.connect(self._condition_edited)
         self.condition_table.itemSelectionChanged.connect(self._refresh_condition_details)
         ctl_layout.addWidget(self.condition_table)
+        self.condition_bias2_editor = Bias2Editor()
+        self.condition_bias2_editor.setTitle("Selected condition - Bias 2")
+        self._updating_condition_bias2 = False
+        self.condition_bias2_editor.changed.connect(self._condition_bias2_changed)
+        self.condition_table.itemSelectionChanged.connect(self._load_condition_bias2)
+        ctl_layout.addWidget(self.condition_bias2_editor)
         self.lbl_condition_details = QtWidgets.QLabel()
         self.lbl_condition_details.setWordWrap(True)
         self.lbl_condition_details.setProperty("role", "hint")
@@ -521,7 +533,7 @@ class BFieldTransportTab(BaseMeasurementTab):
         source = "K2400" if condition.vds_source == "Keithley 2400" else (
             "DAQ" if condition.vds_source == "NI DAQ AO" else condition.vds_source
         )
-        return ["✓" if condition.enabled else "", condition.name, f"{condition.doping:g}", f"{condition.efield:g}", f"{condition.vds:g}", source, str(condition.ao_channel), f"{condition.vtg:g}", f"{condition.vbg:g}"]
+        return ["✓" if condition.enabled else "", condition.name, f"{condition.doping:g}", f"{condition.efield:g}", f"{condition.vds:g}", source, str(condition.ao_channel), f"{condition.vtg:g}", f"{condition.vbg:g}", condition.bias2_mode, f"{condition.bias2_voltage:g}", f"{condition.bias2_offset:g}", f"{condition.bias2_ramp:g}"]
 
     @staticmethod
     def _canonical_vds_source(value):
@@ -580,6 +592,8 @@ class BFieldTransportTab(BaseMeasurementTab):
             self.condition_table.blockSignals(False)
         self._update_condition_buttons()
         self._refresh_condition_details()
+        self._load_condition_bias2()
+        self._update_plot_axis_choices()
         self.refresh_output_preview()
         self.refresh_hardware_readiness()
 
@@ -593,16 +607,58 @@ class BFieldTransportTab(BaseMeasurementTab):
                 ratio=self.sp_ratio.value(), ratio_target=self.cbo_ratio_target.currentData() or RATIO_TARGET_VBG,
                 vds=float(text(4)), vds_source=self._canonical_vds_source(text(5)), ao_channel=int(text(6) or 0),
                 enabled=(self.condition_table.item(row, 0).checkState() == QtCore.Qt.CheckState.Checked),
+                bias2_mode=text(9), bias2_voltage=float(text(10)),
+                bias2_offset=float(text(11)), bias2_ramp=float(text(12)),
             )
+            if condition.bias2_mode not in ("Disabled", "Fixed", "Follow"):
+                raise ValueError("Bias2 mode must be Disabled, Fixed or Follow")
             condition.refresh_gates()
             return condition
         except (TypeError, ValueError) as exc:
             raise BFieldTransportSafetyError(f"Condition row {row + 1}: {exc}") from exc
 
+    def _load_condition_bias2(self):
+        row = self._selected_row()
+        if row < 0 and self.condition_table.rowCount():
+            row = 0
+        self.condition_bias2_editor.setEnabled(row >= 0 and not self._locked)
+        if row >= 0:
+            try:
+                condition = self._condition_from_row(row)
+            except BFieldTransportSafetyError:
+                return
+            self._updating_condition_bias2 = True
+            try:
+                self.condition_bias2_editor.set_values(condition)
+            finally:
+                self._updating_condition_bias2 = False
+
+    def _condition_bias2_changed(self):
+        if self._updating_condition_bias2:
+            return
+        row = self._selected_row()
+        if row < 0 and self.condition_table.rowCount():
+            row = 0
+        if row < 0:
+            return
+        for column, value in enumerate(self.condition_bias2_editor.values().values(), start=9):
+            self.condition_table.item(row, column).setText(str(value))
+
+    def bias2_is_enabled(self):
+        try:
+            conditions = self._collect_conditions() if hasattr(self, 'condition_table') else self.conditions
+        except (ValueError, BFieldTransportSafetyError):
+            conditions = self.conditions
+        return any(c.enabled and c.bias2_mode != 'Disabled' for c in conditions)
+
     def _collect_conditions(self):
         return [self._condition_from_row(row) for row in range(self.condition_table.rowCount())]
 
     def _condition_edited(self, item):
+        try:
+            self.conditions[item.row()] = self._condition_from_row(item.row())
+        except (ValueError, BFieldTransportSafetyError):
+            pass
         if item.column() in (2, 3, 4, 5):
             try:
                 condition = self._condition_from_row(item.row())
@@ -615,6 +671,7 @@ class BFieldTransportTab(BaseMeasurementTab):
         self._update_condition_buttons()
         self._refresh_condition_details()
         self.refresh_output_preview()
+        self._update_plot_axis_choices()
 
     def _refresh_condition_details(self, *_args):
         if not hasattr(self, "lbl_condition_details"):
@@ -868,6 +925,10 @@ class BFieldTransportTab(BaseMeasurementTab):
         result = dict(TransportSweepPlan.from_params(params).validation)
         if not any(condition.enabled for condition in params.conditions):
             raise BFieldTransportSafetyError("Enable at least one fixed transport condition")
+        from app.bias_control import validate_bias2
+        for condition in params.conditions:
+            if condition.enabled:
+                validate_bias2(condition, [condition.vds], self.device_manager)
         return result
 
     def _preview_params(self):
@@ -972,7 +1033,7 @@ class BFieldTransportTab(BaseMeasurementTab):
 
     def set_sweep_locked(self, locked: bool):
         self._locked = bool(locked)
-        for widget in (*self._step_inputs, self.sp_start, self.sp_stop, self.sp_rate, self.chk_round_trip, self.condition_table,
+        for widget in (*self._step_inputs, self.sp_start, self.sp_stop, self.sp_rate, self.chk_round_trip, self.condition_table, self.condition_bias2_editor,
                        self.cbo_condition_add_mode, self.ed_condition_add_first,
                        self.ed_condition_add_second, self.ed_condition_add_vds, self.btn_condition_add_preview,
                        self.btn_condition_update, self.btn_condition_duplicate,

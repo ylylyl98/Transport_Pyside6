@@ -6,6 +6,7 @@ folder or selection from publishing data. Exports use the published arrays.
 from __future__ import annotations
 
 import copy
+from collections import Counter
 import hashlib
 import json
 import os
@@ -29,10 +30,10 @@ from app.quick.history_choices import resolve_choices
 def _defaults(kind):
     return {"x": {"vds_sweep": "Vds", "gate_scan": "Doping", "map_2d": "Vtg",
                   "bfield_gate_scan": "Doping", "bfield_transport": "B_measured_T",
-                  "photocurrent": "Wavelength"}[kind], "signal": "Ids_DC", "direction": "All",
+                  "photocurrent": "Wavelength"}[kind], "signal": "Ids_DC", "signal_explicit": False, "direction": "All",
             "normalization": "raw", "map_y": "Vbg", "fixed_axis": "", "fixed_value": None,
             "pass": "All rows", "primary_path": "", "auto_axes": True, "legend": True,
-            "cmap": "RdBu_r", "four_channels": False}
+            "cmap": "RdBu_r", "four_channels": False, "range_channel": ""}
 
 
 def _index_display(folder, header_cache, previous_rows=None):
@@ -124,7 +125,8 @@ def _read_display(records, view, kind, cache, *, resolve_options=True):
                 "y_unit": traces[0].y_unit if traces else primary.signal_unit if primary else "",
                 "records": exported, "traces": [{"path": str(t.path), "x": t.x.copy(), "y": t.y.copy(),
                 "direction": t.direction, "condition": t.condition} for t in traces],
-                "warnings": list(warnings), "view": actual}
+                "warnings": list(warnings), "view": actual,
+                "_coverage_paths": sorted({str(t.path) for t in traces if np.any(np.isfinite(t.x) & np.isfinite(t.y))})}
     if primary:
         snapshot["map"] = {"path": str(primary.path), "x_name": primary.x_name, "y_name": primary.y_name,
                            "x_unit": primary.x_unit, "y_unit": primary.y_unit, "signal_unit": primary.signal_unit,
@@ -295,6 +297,10 @@ class HistoryBackend(QtCore.QObject):
                                 len(s._snapshot.get("traces", [])) if s._snapshot else 0, notify=changed)
     emptyState = QtCore.Property("QVariantMap", lambda s: s._cached_ui("empty", s._empty_state), notify=changed)
     selectionSummary = QtCore.Property(str, lambda s: s._cached_ui("selection", s._selection_summary), notify=changed)
+    hiddenSelectedCount = QtCore.Property(int, lambda s: len({str(r.path) for r in s._selected()} -
+        {row["path"] for row in s._files}), notify=changed)
+    coverageSummary = QtCore.Property(str, lambda s: s._cached_ui("coverage", s._coverage_text)[0], notify=changed)
+    coverageDetails = QtCore.Property(str, lambda s: s._cached_ui("coverage", s._coverage_text)[1], notify=changed)
     busy = QtCore.Property(bool, lambda s: s._index_visible or s._plot_active or s._plot_pending, notify=busyChanged)
     exportReady = QtCore.Property(bool, lambda s: bool(s._snapshot and s._snapshot["records"]) and not s.busy and not s._export_job, notify=changed)
     plotModel = QtCore.Property(QtCore.QObject, lambda s: s._plot, constant=True)
@@ -307,12 +313,18 @@ class HistoryBackend(QtCore.QObject):
     choiceNote = QtCore.Property(str, lambda s: s._available.get("note", ""), notify=changed)
     mapSources = QtCore.Property("QVariantList", lambda s: [{"path": str(r.path), "label": r.path.name} for r in s._selected()], notify=changed)
     hasMap = QtCore.Property(bool, lambda s: bool(s._snapshot and s._snapshot.get("map")), notify=changed)
-    cutReady = QtCore.Property(bool, lambda s: s.exportReady and bool(s._snapshot.get("traces")), notify=changed)
+    cutHasData = QtCore.Property(bool, lambda s: s._cut_has_data(), notify=changed)
+    cutReady = QtCore.Property(bool, lambda s: s.exportReady and s._cut_has_data(), notify=changed)
     cutEmptyText = QtCore.Property(str, lambda s: s._cut_empty_text(), notify=changed)
     measuredValues = QtCore.Property("QVariantList", lambda s: s._coordinates(), notify=changed)
+    measuredCoordinateOptions = QtCore.Property("QVariantList", lambda s: s._coordinate_options(), notify=changed)
+    cutCoordinateLabel = QtCore.Property(str, lambda s: s._cut_coordinate_label(), notify=changed)
+    cutCoordinateExact = QtCore.Property(str, lambda s: s._cut_coordinate_exact(), notify=changed)
     passes = QtCore.Property("QVariantList", lambda s: ["All rows"] + getattr(s, "_passes", []), notify=changed)
     layout = QtCore.Property("QVariantMap", lambda s: dict(s._layout), notify=changed)
     rangeState = QtCore.Property("QVariantMap", lambda s: s._range_state(), notify=rangeChanged)
+    rangeChannels = QtCore.Property("QVariantList", lambda s: s._range_channels(), notify=rangeChanged)
+    rangeChannel = QtCore.Property(str, lambda s: s._range_channel(), notify=rangeChanged)
 
     @QtCore.Slot(bool)
     def setDark(self, dark):
@@ -335,9 +347,61 @@ class HistoryBackend(QtCore.QObject):
             return {"title": "No plottable data for this selection", "detail": "Try another signal, direction or source file. Open details below for parser warnings.", "action": ""}
         return {"title": "", "detail": "", "action": ""}
 
+    def _coverage_text(self):
+        selected = self._selected()
+        if not selected:
+            return "", ""
+        if self.busy:
+            return "Updating file coverage…", ""
+        snapshot = self._snapshot
+        if not snapshot:
+            return f"0 / {len(selected)} files displayed", "No rendered data for the current selection."
+        total = len(selected)
+        basename_counts = Counter(record.path.name for record in selected)
+        def paths(panel):
+            if '_coverage_paths' in panel:
+                return set(panel['_coverage_paths'])
+            return {str(t['path']) for t in panel.get('traces', [])
+                    if np.any(np.isfinite(t['x']) & np.isfinite(t['y']))}
+        def explain(panel, included):
+            warnings = panel.get('warnings', [])
+            lines = []
+            for record in selected:
+                path = str(record.path)
+                if path in included:
+                    lines.append(path + ": displayed")
+                    continue
+                prefix = record.path.name + ": "
+                ambiguous = basename_counts[record.path.name] > 1
+                matching = [] if ambiguous else [w[len(prefix):] for w in warnings if w.startswith(prefix)]
+                has_empty_trace = any(str(t.get('path')) == path for t in panel.get('traces', []))
+                fallback = ("Selected cut has no finite overlapping X and signal values." if has_empty_trace else
+                            "No finite overlapping values for the selected coordinate, signal, direction or pass.")
+                reason = "; ".join(matching) if matching else fallback
+                if ambiguous:
+                    reason += " Same-name file warnings are listed in general Details and cannot be attributed safely."
+                lines.append(path + ": " + reason)
+            return lines
+        panels = snapshot.get('panels')
+        if panels:
+            summaries, details = [], []
+            for channel, panel in panels.items():
+                included = paths(panel)
+                name = channel or "Unassigned panel"
+                summaries.append(f"{name}: {len(included)}/{total} files")
+                details.extend(f"{name} · {line}" for line in explain(panel, included))
+            return " · ".join(summaries), "\n".join(details)
+        included = paths(snapshot)
+        if snapshot.get('map'):
+            primary = str(snapshot['map']['path'])
+            summary = f"Heatmap: 1 primary file · Measured cut: {len(included)}/{total} files"
+            details = [f"Heatmap source: {primary}", "Measured cut files:"]
+            details.extend(explain(snapshot, included))
+            return summary, "\n".join(details)
+        return f"{len(included)} / {total} files displayed", "\n".join(explain(snapshot, included))
+
     def _selection_summary(self):
         selected = self._selected()
-        prefix = f"{len(selected)} selected files · {self.traceCount} displayed traces"
         hints = {"vds_sweep": "Fixed gate biases", "gate_scan": "Saved raw-voltage / derived trajectory",
                  "bfield_gate_scan": "Gate trajectories at saved B", "bfield_transport": "Measured B (T)",
                  "photocurrent": "Each file may contain multiple gate-condition traces", "map_2d": "Exact measured cuts; no interpolation"}
@@ -351,6 +415,7 @@ class HistoryBackend(QtCore.QObject):
             keys = {"vds_sweep": ("Vtg", "Vbg"), "gate_scan": ("Vds",),
                     "bfield_gate_scan": ("B", "B (start)", "Vds"), "bfield_transport": ("Vds", "Doping", "E-field"),
                     "photocurrent": ("Vtg", "Vbg", "Vds"), "map_2d": ()}[self._kind]
+            keys = ("Lock-in role", "Bias2", "Bias2 voltage", "Bias2 offset") + keys
             text = " · ".join(f"{k}={saved[k]}" for k in keys if k in saved)
             if self._kind == "gate_scan":
                 params = record.metadata.get("params", {})
@@ -360,11 +425,40 @@ class HistoryBackend(QtCore.QObject):
             if text and text not in values:
                 values.append(text)
         context = " / ".join(values[:3]) + (f" / +{len(values) - 3} more conditions" if len(values) > 3 else "")
-        return prefix + " · " + (context or hints[self._kind])
+        return context or hints[self._kind]
+
+    def _cut_has_data(self):
+        snapshot = self._snapshot or {}
+        if not snapshot.get("map"):
+            return False
+        if "_coverage_paths" in snapshot:
+            return bool(snapshot["_coverage_paths"])
+        return any(np.any(np.isfinite(t['x']) & np.isfinite(t['y'])) for t in snapshot.get('traces', []))
+
+    def _coordinate_options(self):
+        from app.analysis_coordinates import coordinate_options
+        return self._cached_ui('coordinate_options', lambda: coordinate_options(self._coordinates()))
+
+    def _cut_coordinate_exact(self):
+        value = self.state.get('fixed_value')
+        return '' if value is None else repr(float(value))
+
+    def _cut_coordinate_label(self):
+        from app.analysis_coordinates import coordinate_label
+        value = self.state.get('fixed_value')
+        if value is None:
+            return ''
+        try:
+            return coordinate_label(self._coordinates(), value)
+        except ValueError:
+            return repr(float(value))
 
     def _cut_empty_text(self):
         values = self._coordinates()
-        available = ", ".join(f"{v:.8g}" for v in values[:12])
+        value = self.state.get("fixed_value")
+        if value is not None and value in values and not self._cut_has_data():
+            return "This measured coordinate has no finite signal values for the selected cut."
+        available = ", ".join(item['label'] for item in self._coordinate_options()[:12])
         if len(values) > 12:
             available += f", … ({len(values)} values)"
         return ("No exact measured cut at this coordinate.\nChoose a measured value above or click a map cell."
@@ -413,15 +507,61 @@ class HistoryBackend(QtCore.QObject):
         folder = next((path for path in candidates if path.is_dir()), Path.home())
         return QtCore.QUrl.fromLocalFile(str(folder)).toString()
 
+    def _range_channels(self):
+        if self.hasMap:
+            return []
+        view = self._plot.captureView()
+        channels = [channel for channel in self._plot.channels() if channel]
+        if view.get('layout') == 'overlay' and view.get('overlay_axis') == 'shared':
+            return ['Shared Y']
+        return channels if len(channels) > 1 else []
+
+    def _range_channel(self):
+        channels = self._range_channels()
+        if not channels:
+            return ''
+        saved = self._views[self._kind].get('range_channel', '')
+        return saved if saved in channels else channels[0]
+
+    @QtCore.Slot(str)
+    def setRangeChannel(self, channel):
+        if channel in self._range_channels():
+            self._views[self._kind]['range_channel'] = channel
+            self._range_errors['y'] = ''
+            self.save_state()
+            self.rangeChanged.emit()
+
+    def _range_y_index(self):
+        channels = self._plot.channels()
+        chosen = self._range_channel()
+        if not chosen or chosen == 'Shared Y':
+            chosen = self._plot.channel
+        return channels.index(chosen) if chosen in channels else 0
+
     def _range_state(self):
         view = self._plot.captureView()
-        y_index = self._plot.channels().index(self._plot.channel) if self._plot.channel in self._plot.channels() else 0
+        y_index = self._range_y_index()
         result = {"x": {"auto": not view.get("manual_x", False), "bounds": list(map(float, view["xlim"]))},
                 "y": {"auto": not view.get("manual_y", [False])[y_index], "bounds": list(map(float, view["ylim"][y_index]))},
                 "color": {"auto": view.get("clim_auto", True), "bounds": list(map(float, view["clim"]))}}
-        for axis, label in (("x", self._plot.xLabel), ("y", self._plot.yLabel), ("color", self._plot.zLabel)):
-            result[axis].update(error=self._range_errors[axis], title=label,
-                                unit=label.rsplit(" (", 1)[1][:-1] if " (" in label and label.endswith(")") else "")
+        channels = self._plot.channels()
+        selected = self._range_channel()
+        y_label = self._plot.yLabel
+        normalized = not self.hasMap and self._views[self._kind].get('normalization', 'raw') != 'raw'
+        shared_units = None
+        if not self.hasMap and selected == 'Shared Y':
+            labels = [self._plot.channelLabel(channel) for channel in channels]
+            units = [label.rsplit(" (", 1)[1][:-1] if " (" in label and label.endswith(")") else "" for label in labels]
+            shared_units = units[0] if units and len(set(units)) == 1 and not normalized else ""
+            y_label = ("Shared Y" + (f" ({shared_units})" if shared_units else
+                       " — mixed units" if not normalized and len(set(units)) > 1 else ""))
+        elif not self.hasMap and selected:
+            y_label = self._plot.channelLabel(selected)
+        for axis, label in (("x", self._plot.xLabel), ("y", y_label), ("color", self._plot.zLabel)):
+            unit = label.rsplit(" (", 1)[1][:-1] if " (" in label and label.endswith(")") else ""
+            if axis == 'y' and normalized:
+                unit = ''
+            result[axis].update(error=self._range_errors[axis], title=label, unit=unit)
         return result
 
     @QtCore.Slot(str, bool, str, str)
@@ -445,13 +585,17 @@ class HistoryBackend(QtCore.QObject):
                     if values:
                         view["xlim"] = values
                 else:
-                    index = self._plot.channels().index(self._plot.channel) if self._plot.channel in self._plot.channels() else 0
-                    view["manual_y"][index] = not automatic
-                    if values:
-                        view["ylim"][index] = values
-                    if view.get("four_channels"):
-                        view["channel_views"][self._plot.channels()[index]].update(
-                            manual_y=[not automatic], ylim=view["ylim"][index])
+                    index = self._range_y_index()
+                    channels = self._plot.channels()
+                    indices = (range(len(channels)) if view.get('layout') == 'overlay' and view.get('overlay_axis') == 'shared'
+                               else [index])
+                    for i in indices:
+                        view["manual_y"][i] = not automatic
+                        if values:
+                            view["ylim"][i] = values
+                        if channels[i] in view.get("channel_views", {}):
+                            view["channel_views"][channels[i]].update(
+                                manual_y=[not automatic], ylim=view["ylim"][i])
                 self._plot.applyView(view)
             self._remember_plot_view()
         except (ValueError, TypeError) as exc:
@@ -490,7 +634,10 @@ class HistoryBackend(QtCore.QObject):
             if self._kind not in MEASUREMENT_TYPES:
                 self._kind = "vds_sweep"
             for kind in MEASUREMENT_TYPES:
-                self._views[kind] = {**_defaults(kind), **state.get("views", {}).get(kind, {})}
+                saved_view = state.get("views", {}).get(kind, {})
+                self._views[kind] = {**_defaults(kind), **saved_view}
+                if "signal" in saved_view and "signal_explicit" not in saved_view:
+                    self._views[kind]["signal_explicit"] = True
                 self._checked[kind] = set(state.get("checks", {}).get(kind, state.get("checked", [])))
             self._set_search(state.get("search", ""))
             self._date = state.get("date", "All dates")
@@ -630,6 +777,9 @@ class HistoryBackend(QtCore.QObject):
                     self._status = str(exc)
                     self.changed.emit()
                     return
+            if key == "signal" and not self._views[self._kind].get("signal_explicit"):
+                self._views[self._kind]["signal_explicit"] = True
+                self.save_state()
             if self._views[self._kind][key] == value and not (key == "signal" and (self._views[self._kind].get("four_channels") or self._views[self._kind].get("layout") in ("overlay", "two"))):
                 return
             self._views[self._kind][key] = value
@@ -912,8 +1062,8 @@ class HistoryBackend(QtCore.QObject):
             snapshot = self.export_snapshot()
             if mode == "heatmap" and not snapshot.get("map"):
                 raise ValueError("No heatmap is displayed")
-            if mode == "cut" and not snapshot["traces"]:
-                raise ValueError("No measured cut is displayed")
+            if snapshot.get("map") and mode in ("cut", "both") and not self._cut_has_data():
+                raise ValueError("No finite measured cut is displayed; export the heatmap separately")
             target = QtCore.QUrl(output).toLocalFile() if output.startswith("file:") else output
             if target:
                 target = str(Path(target).with_suffix(".png"))
@@ -966,6 +1116,8 @@ class HistoryBackend(QtCore.QObject):
             self.setFolder(os.path.commonpath([str(p.parent) for p in paths]))
             self._kind = view["kind"]
             self._checked[self._kind] = {str(p) for p in paths}
+            if "signal" in view and "signal_explicit" not in view:
+                view["signal_explicit"] = True
             self._views[self._kind] = {**_defaults(self._kind), **view}
             self._set_search("")
             self._date = "All dates"
@@ -1002,7 +1154,10 @@ class HistoryBackend(QtCore.QObject):
             return
         self._kind = state["kind"]
         for kind in MEASUREMENT_TYPES:
-            self._views[kind] = {**_defaults(kind), **state.get("views", {}).get(kind, {})}
+            saved_view = state.get("views", {}).get(kind, {})
+            self._views[kind] = {**_defaults(kind), **saved_view}
+            if "signal" in saved_view and "signal_explicit" not in saved_view:
+                self._views[kind]["signal_explicit"] = True
             self._checked[kind] = set(state.get("checks", {}).get(kind, state.get("checked", [])))
         self._date = state.get("date", "All dates")
         self._set_search(state.get("search", ""))

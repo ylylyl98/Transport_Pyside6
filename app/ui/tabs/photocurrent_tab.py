@@ -8,6 +8,7 @@ from PySide6 import QtCore, QtWidgets
 from app.constants import GATE_BIAS_RAMP_STEP_T, GATE_BIAS_RAMP_STEP_V
 from app.device_manager import DeviceManager
 from app.models import Connections, PhotocurrentBiasCondition, PhotocurrentParams, SaveRoot
+from app.ui.widgets.bias2_editor import Bias2Editor
 from app.result_channels import compare_channel_options, plot_channel_options, plot_channel_value
 from app.run_output import build_planned_output, planned_output_warning
 from app.signal_chain import SignalChainSnapshot, signal_chain_filename_parts, signal_chain_metadata
@@ -113,8 +114,8 @@ class PhotocurrentTab(BaseMeasurementTab):
         recipe_layout = QtWidgets.QVBoxLayout(grp_recipe)
         recipe_layout.setContentsMargins(10, 18, 10, 10)
         recipe_layout.setSpacing(6)
-        self.tbl_bias_conditions = QtWidgets.QTableWidget(0, 5)
-        self.tbl_bias_conditions.setHorizontalHeaderLabels(["", "Vtg (V)", "Vbg (V)", "Vds (V)", "Settle (s)"])
+        self.tbl_bias_conditions = QtWidgets.QTableWidget(0, 9)
+        self.tbl_bias_conditions.setHorizontalHeaderLabels(["", "Vtg (V)", "Vbg (V)", "Vds (V)", "Settle (s)", "Bias2 mode", "Bias2 fixed (V)", "Offset (V)", "Ramp (V)"])
         self.tbl_bias_conditions.verticalHeader().setVisible(False)
         self.tbl_bias_conditions.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         self.tbl_bias_conditions.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -125,7 +126,15 @@ class PhotocurrentTab(BaseMeasurementTab):
         for column in range(1, self.tbl_bias_conditions.columnCount()):
             recipe_header.setSectionResizeMode(column, QtWidgets.QHeaderView.ResizeMode.Stretch)
         self.tbl_bias_conditions.setColumnWidth(0, 30)
+        for column in range(5, 9):
+            self.tbl_bias_conditions.setColumnHidden(column, True)
         recipe_layout.addWidget(self.tbl_bias_conditions)
+        self.condition_bias2_editor = Bias2Editor()
+        self.condition_bias2_editor.setTitle("Selected condition - Bias 2")
+        self._updating_condition_bias2 = False
+        self.condition_bias2_editor.changed.connect(self._condition_bias2_changed)
+        self.tbl_bias_conditions.itemSelectionChanged.connect(self._load_condition_bias2)
+        recipe_layout.addWidget(self.condition_bias2_editor)
         row_recipe_buttons = QtWidgets.QHBoxLayout()
         row_recipe_buttons.setContentsMargins(0, 0, 0, 0)
         row_recipe_buttons.setSpacing(4)
@@ -275,8 +284,37 @@ class PhotocurrentTab(BaseMeasurementTab):
             item = QtWidgets.QTableWidgetItem(f"{value:g}")
             item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
             table.setItem(row, column, item)
+        for column, value in enumerate((condition.bias2_mode, condition.bias2_voltage, condition.bias2_offset, condition.bias2_ramp), start=5):
+            table.setItem(row, column, QtWidgets.QTableWidgetItem(str(value)))
         table.blockSignals(False)
         self._on_bias_conditions_changed()
+
+    def _load_condition_bias2(self):
+        rows = self._selected_condition_rows()
+        row = rows[0] if rows else (0 if self.tbl_bias_conditions.rowCount() else -1)
+        self.condition_bias2_editor.setEnabled(row >= 0 and getattr(self, "worker", None) is None)
+        if row < 0:
+            return
+        try:
+            conditions = self._bias_conditions(rows=[row], strict=True)
+        except ValueError:
+            return
+        if conditions:
+            self._updating_condition_bias2 = True
+            try:
+                self.condition_bias2_editor.set_values(conditions[0])
+            finally:
+                self._updating_condition_bias2 = False
+
+    def _condition_bias2_changed(self):
+        if self._updating_condition_bias2:
+            return
+        rows = self._selected_condition_rows()
+        row = rows[0] if rows else (0 if self.tbl_bias_conditions.rowCount() else -1)
+        if row < 0:
+            return
+        for column, value in enumerate(self.condition_bias2_editor.values().values(), start=5):
+            self.tbl_bias_conditions.item(row, column).setText(str(value))
 
     def _selected_condition_rows(self) -> list[int]:
         rows = sorted({index.row() for index in self.tbl_bias_conditions.selectionModel().selectedRows()})
@@ -354,6 +392,8 @@ class PhotocurrentTab(BaseMeasurementTab):
                 for column, label in ((1, "Vtg"), (2, "Vbg"), (3, "Vds"), (4, "settle time")):
                     item = table.item(row, column)
                     values.append(float(item.text()) if item is not None else 0.0)
+                if table.item(row, 5).text().strip() not in ("Disabled", "Fixed", "Follow"):
+                    raise ValueError("Bias2 mode must be Disabled, Fixed or Follow")
                 if values[3] < 0:
                     raise ValueError("settle time must be zero or greater")
                 conditions.append(
@@ -363,6 +403,10 @@ class PhotocurrentTab(BaseMeasurementTab):
                         vbg=values[1],
                         vds=values[2],
                         settle_s=values[3],
+                        bias2_mode=table.item(row, 5).text().strip(),
+                        bias2_voltage=float(table.item(row, 6).text()),
+                        bias2_offset=float(table.item(row, 7).text()),
+                        bias2_ramp=float(table.item(row, 8).text()),
                     )
                 )
             except ValueError as ex:
@@ -380,6 +424,8 @@ class PhotocurrentTab(BaseMeasurementTab):
             return
         self._refresh_condition_preview()
         self.refresh_output_preview()
+        if hasattr(self, "cbo_y"):
+            self._update_plot_axis_choices()
         if not getattr(self, "_loading_tab_settings", False):
             self._save_bias_conditions_settings()
 
@@ -504,6 +550,8 @@ class PhotocurrentTab(BaseMeasurementTab):
                 "vbg": condition.vbg,
                 "vds": condition.vds,
                 "settle_s": condition.settle_s,
+                "bias2_mode": condition.bias2_mode, "bias2_voltage": condition.bias2_voltage,
+                "bias2_offset": condition.bias2_offset, "bias2_ramp": condition.bias2_ramp,
             }
             for condition in conditions
         ]
@@ -535,6 +583,10 @@ class PhotocurrentTab(BaseMeasurementTab):
                         vbg=float(row.get("vbg", 0.0)),
                         vds=float(row.get("vds", 0.0)),
                         settle_s=float(row.get("settle_s", 2.0)),
+                        bias2_mode=str(row.get("bias2_mode", "Disabled")),
+                        bias2_voltage=float(row.get("bias2_voltage", 0)),
+                        bias2_offset=float(row.get("bias2_offset", 0)),
+                        bias2_ramp=float(row.get("bias2_ramp", .05)),
                     )
                 )
             except (TypeError, ValueError):
@@ -636,17 +688,17 @@ class PhotocurrentTab(BaseMeasurementTab):
         return self.cbo_source.currentText() if self.chk_use_vds.isChecked() else "None"
 
     def _update_plot_axis_choices(self):
-        options = plot_channel_options(self._plot_vds_source_for_choices(), getattr(self.device_manager.connections, "drag_drive_enabled", False))
+        options = plot_channel_options(self._plot_vds_source_for_choices(), signal_chain_metadata(self.get_signal_chain()), bias2=self.bias2_is_enabled())
         current = self.cbo_y.currentText()
         if current not in options:
-            current = "Ids_DC"
+            current = options[0] if options else ""
         self.cbo_y.blockSignals(True)
         self.cbo_y.clear()
         self.cbo_y.addItems(options)
         self.cbo_y.setCurrentText(current)
         self.cbo_y.blockSignals(False)
         self.plot.set_y_axis_options(options, current)
-        self.plot.set_compare_channels(compare_channel_options(self._plot_vds_source_for_choices(), getattr(self.device_manager.connections, "drag_drive_enabled", False)), grid=getattr(self.device_manager.connections, "drag_drive_enabled", False))
+        self.plot.set_compare_channels(compare_channel_options(self._plot_vds_source_for_choices(), signal_chain_metadata(self.get_signal_chain()), bias2=self.bias2_is_enabled()), grid=getattr(self.device_manager.connections, "drag_drive_enabled", False))
         self.set_plot_axis_source(current)
 
     def _on_device_status_changed(self, name: str, _state: str, _detail: str):
@@ -659,6 +711,9 @@ class PhotocurrentTab(BaseMeasurementTab):
             self.set_status(message, "idle")
         self._update_manual_buttons()
 
+    def bias2_is_enabled(self):
+        return any(c.bias2_mode != "Disabled" for c in self._active_bias_conditions())
+
     def _required_devices(self) -> list[str]:
         required = ["daq", "mono"]
         conditions = self._active_bias_conditions()
@@ -668,6 +723,8 @@ class PhotocurrentTab(BaseMeasurementTab):
             required.append("g2")
         if self.chk_use_vds.isChecked() and self.cbo_source.currentText() == "Keithley 2400":
             required.append("g3")
+        if self.bias2_is_enabled():
+            required.append("g4")
         return list(dict.fromkeys(required))
 
     def _validate_required_sessions(self) -> bool:
@@ -680,13 +737,21 @@ class PhotocurrentTab(BaseMeasurementTab):
         if not conditions:
             QtWidgets.QMessageBox.warning(self, "Bias Recipe", "Select at least one bias condition to run.")
             return False
+        from app.bias_control import validate_bias2
         for index, condition in enumerate(conditions, start=1):
+            try:
+                validate_bias2(condition, [condition.vds], self.device_manager,
+                               bias1_enabled=self.chk_use_vds.isChecked(),
+                               bias1_source="Keithley 2400" if self.cbo_source.currentText() == "Keithley 2400" else "NI DAQ AO")
+            except (ValueError, RuntimeError) as ex:
+                QtWidgets.QMessageBox.warning(self, "Bias2", f"Condition {index}: {ex}")
+                return False
             values = [("Vtg", condition.vtg), ("Vbg", condition.vbg)]
             if self.chk_use_vds.isChecked():
                 values.append(("Vds", condition.vds))
             for label, value in values:
                 if abs(value) > 20.0:
-                    QtWidgets.QMessageBox.warning(self, "Bias Recipe", f"Condition {index}: {label} is outside the ±20 V limit.")
+                    QtWidgets.QMessageBox.warning(self, "Bias Recipe", f"Condition {index}: {label} is outside the Â±20 V limit.")
                     return False
         missing = [name for name in self._required_devices() if not self.device_manager.is_connected(name)]
         if missing:
@@ -836,7 +901,7 @@ class PhotocurrentTab(BaseMeasurementTab):
         self.set_plot_axis_source(self.p.plot_choice)
         try:
             self.begin_run_logging(self._planned_output, "Photocurrent")
-            self.worker = PhotocurrentWorker(self.p, self.save, self.conns, g1=self.s_g1, g2=self.s_g2, g3=self.s_g3, daq=self.s_daq, mono=self.s_mono, plot_choice=self.p.plot_choice, amp_rate=amp, lkn_rate=lkn, signal_chain=signal_chain_metadata(signal_chain))
+            self.worker = PhotocurrentWorker(self.p, self.save, self.conns, g1=self.s_g1, g2=self.s_g2, g3=self.s_g3, g4=self.device_manager.get_session("g4"), device_manager=self.device_manager, daq=self.s_daq, mono=self.s_mono, plot_choice=self.p.plot_choice, amp_rate=amp, lkn_rate=lkn, signal_chain=signal_chain_metadata(signal_chain))
             self.plot.set_planned_ranges({"x": (self.p.wl_start, self.p.wl_stop)})
             self.worker_thread = QtCore.QThread()
             self.worker.moveToThread(self.worker_thread)
@@ -853,6 +918,7 @@ class PhotocurrentTab(BaseMeasurementTab):
             self.worker.error.connect(self.worker_thread.quit)
             self.worker_thread.finished.connect(self._cleanup_thread)
             self.run_panel.set_running(True)
+            self.condition_bias2_editor.setEnabled(False)
             self.set_status("Starting measurement...", "preparing")
             self.worker_thread.start()
         except Exception as ex:
@@ -872,6 +938,7 @@ class PhotocurrentTab(BaseMeasurementTab):
         self.worker_thread = None
         self.release_run_devices()
         self.run_panel.set_running(False)
+        self._load_condition_bias2()
         self._update_manual_buttons()
 
     def on_point_data(self, record):
@@ -879,8 +946,9 @@ class PhotocurrentTab(BaseMeasurementTab):
         self._redraw_plot()
 
     def set_plot_axis_source(self, source: str):
-        if source not in plot_channel_options(self._plot_vds_source_for_choices(), getattr(self.device_manager.connections, "drag_drive_enabled", False)):
-            source = "Ids_DC"
+        if source not in plot_channel_options(self._plot_vds_source_for_choices(), signal_chain_metadata(self.get_signal_chain()), bias2=self.bias2_is_enabled()):
+            options = plot_channel_options(self._plot_vds_source_for_choices(), signal_chain_metadata(self.get_signal_chain()), bias2=self.bias2_is_enabled())
+            source = options[0] if options else ""
         if self.cbo_y.currentText() != source:
             self.cbo_y.blockSignals(True)
             self.cbo_y.setCurrentText(source)

@@ -41,6 +41,9 @@ class LineSweepWorker(RunWorker):
         self.g1 = kw.get("g1")
         self.g2 = kw.get("g2")
         self.g3 = kw.get("g3")
+        self.g4 = kw.get("g4")
+        self.device_manager = kw.get("device_manager")
+        self._outputs_started = False
         self.daq = kw.get("daq")
         self.plot_choice = kw.get("plot_choice", self.p.plot_choice)
         self.amp_rate = kw.get("amp_rate", 1e7)
@@ -70,6 +73,12 @@ class LineSweepWorker(RunWorker):
 
             self._validate_sessions()
             self._validate_trajectory_limits(trajectory)
+            self.validate_source_trajectory(trajectory, gate_ramp=min(GATE_BIAS_RAMP_STEP_V, self.p.vg_ramp),
+                                            vds_ramp=min(SAFE_RAMP_STEP_V, self.p.vds_ramp),
+                                            use_g3=self.p.vds_source == "Keithley 2400")
+            self.validate_bias2(self.p, trajectory, self.p.vds_source != "None")
+            if self.p.vds_source == "None" and ((self.p.mode == "Raw" and self.p.raw_vds_active) or (self.p.mode != "Raw" and self.p.derived_vds_mode == "Swept")):
+                raise RuntimeError("Vds sweep requires Bias1 enabled.")
 
             if not csv_path:
                 ts = new_run_id()
@@ -97,10 +106,11 @@ class LineSweepWorker(RunWorker):
                     },
                 )
 
+            self._outputs_started = True
             first = trajectory[0]
             self.status.emit("Ramping to sweep start position...")
             self.log.emit(
-                f"Ramping G1/Vtg to {first['vtg']:.3f} V "
+                f"Ramping G1/Vtg to {first['vtg']:.9g} V "
                 f"({GATE_BIAS_RAMP_STEP_V:g} V/step, {GATE_BIAS_RAMP_STEP_T:g} s/step)"
             )
             safe_ramp(
@@ -111,9 +121,9 @@ class LineSweepWorker(RunWorker):
                 GATE_BIAS_RAMP_STEP_T,
                 self.check_abort_pause,
             )
-            self.log.emit(f"G1/Vtg ready at {first['vtg']:.3f} V")
+            self.log.emit(f"G1/Vtg ready at {first['vtg']:.9g} V")
             self.log.emit(
-                f"Ramping G2/Vbg to {first['vbg']:.3f} V "
+                f"Ramping G2/Vbg to {first['vbg']:.9g} V "
                 f"({GATE_BIAS_RAMP_STEP_V:g} V/step, {GATE_BIAS_RAMP_STEP_T:g} s/step)"
             )
             safe_ramp(
@@ -124,18 +134,21 @@ class LineSweepWorker(RunWorker):
                 GATE_BIAS_RAMP_STEP_T,
                 self.check_abort_pause,
             )
-            self.log.emit(f"G2/Vbg ready at {first['vbg']:.3f} V")
+            self.log.emit(f"G2/Vbg ready at {first['vbg']:.9g} V")
             source_label = (
                 f"NI DAQ ao{self.p.ao_channel}"
                 if self.p.vds_source != "Keithley 2400"
                 else "Keithley G3"
             )
             self.log.emit(
-                f"Ramping Vds/{source_label} to {first['vds']:.3f} V "
+                f"Ramping Vds/{source_label} to {first['vds']:.9g} V "
                 f"({SAFE_RAMP_STEP_V:g} V/step, {SAFE_RAMP_STEP_T:g} s/step)"
             )
-            self._safe_ramp_vds(first["vds"], allow_stop=True)
-            self.log.emit(f"Vds/{source_label} ready at {first['vds']:.3f} V")
+            if self.p.bias2_mode == "Follow":
+                self.move_pair(first["vds"], step=SAFE_RAMP_STEP_V)
+            else:
+                self._safe_ramp_vds(first["vds"], allow_stop=True)
+            self.log.emit(f"Vds/{source_label} ready at {first['vds']:.9g} V")
             self._last_vtg = float(first["vtg"])
             self._last_vbg = float(first["vbg"])
             self._last_vds = float(first["vds"])
@@ -174,19 +187,24 @@ class LineSweepWorker(RunWorker):
         finally:
             failures = []
             try:
-                if self.g1 is not None:
+                if self._outputs_started and self.g1 is not None:
                     safe_ramp(self.g1.set_voltage, getattr(self.g1, "voltage", None) or 0.0, 0.0, SAFE_RAMP_STEP_V, SAFE_RAMP_STEP_T)
             except Exception as ex:
                 failures.append(f"G1/Vtg zero failed: {ex}")
             try:
-                if self.g2 is not None:
+                if self._outputs_started and self.g2 is not None:
                     safe_ramp(self.g2.set_voltage, getattr(self.g2, "voltage", None) or 0.0, 0.0, SAFE_RAMP_STEP_V, SAFE_RAMP_STEP_T)
             except Exception as ex:
                 failures.append(f"G2/Vbg zero failed: {ex}")
             try:
-                self._safe_ramp_vds(0.0, allow_stop=False)
+                if self._outputs_started:
+                    self._safe_ramp_vds(0.0, allow_stop=False)
             except Exception as ex:
                 failures.append(f"Vds zero failed: {ex}")
+            try:
+                self.cleanup_bias2()
+            except Exception as ex:
+                failures.append(f"Bias2 zero failed: {ex}")
             self.emit_safe_state_report(failures)
             if failures:
                 run_status = "error"
@@ -204,6 +222,8 @@ class LineSweepWorker(RunWorker):
                 self.error.emit(run_detail)
 
     def _safe_ramp_vds(self, target: float, allow_stop: bool = False) -> None:
+        if self.p.vds_source == "None":
+            return
         if self.p.vds_source == "Keithley 2400":
             if self.g3 is None:
                 raise RuntimeError("Required session missing: G3 / Vds")
@@ -237,7 +257,7 @@ class LineSweepWorker(RunWorker):
             ids_keithley = self._read_keithley_current()
             vds_measured = (
                 self.daq.get_ao_vs_gnd_value(self.p.ao_channel)
-                if self.p.vds_source != "Keithley 2400"
+                if self.p.vds_source.startswith("NI DAQ")
                 else None
             )
             batch = self.batch_metadata.get("gate_scan_bfield_batch", {})
@@ -246,7 +266,7 @@ class LineSweepWorker(RunWorker):
                 idx_offset + idx - 1,
                 point["vtg"],
                 point["vbg"],
-                point["vds"],
+                point["vds"] if self.p.vds_source != "None" else None,
                 vds_measured,
                 raw_x,
                 raw_y,
@@ -273,11 +293,13 @@ class LineSweepWorker(RunWorker):
             self.point.emit(x_plot, y_val)
             self.point_data.emit({
                 **sample,
+                "Bias2": getattr(self, "_bias2_voltage", None),
+                "Ibias2_Keithley": getattr(self, "_bias2_current", None),
                 "x": x_plot,
                 "index": float(acquisition_index),
                 "vtg": point["vtg"],
                 "vbg": point["vbg"],
-                "vds": point["vds"],
+                "vds": point["vds"] if self.p.vds_source != "None" else None,
                 "vds_measured": vds_measured,
                 "doping": point["doping"],
                 "efield": point["efield"],
@@ -308,7 +330,7 @@ class LineSweepWorker(RunWorker):
                 if name == "vds" and self.p.vds_source != "Keithley 2400":
                     limit = V_LIMIT
                 if not math.isfinite(value) or abs(value) > limit + 1e-9:
-                    raise RuntimeError(f"{name.upper()} exceeds limit at {value:.3f} V (limit {limit:.1f} V)")
+                    raise RuntimeError(f"{name.upper()} exceeds limit at {value:.9g} V (limit {limit:.1f} V)")
 
     def _build_trajectory(self) -> list[dict[str, float]]:
         return self._build_raw_trajectory() if self.p.mode == "Raw" else self._build_derived_trajectory()
@@ -382,25 +404,30 @@ class LineSweepWorker(RunWorker):
         if self._last_vbg is None or not math.isclose(self._last_vbg, vbg, abs_tol=1e-12):
             safe_ramp(self.g2.set_voltage, self._last_vbg or 0.0, vbg, self.p.vg_ramp, GATE_BIAS_RAMP_STEP_T, self.check_abort_pause)
             self._last_vbg = vbg
-        if self._last_vds is None or not math.isclose(self._last_vds, vds, abs_tol=1e-12):
-            if self.p.vds_source == "Keithley 2400":
+        if self.p.vds_source != "None" and (self._last_vds is None or not math.isclose(self._last_vds, vds, abs_tol=1e-12)):
+            if self.p.bias2_mode == "Follow":
+                self.move_pair(vds)
+            elif self.p.vds_source == "Keithley 2400":
                 safe_ramp(self.g3.set_voltage, self._last_vds or 0.0, vds, self.p.vds_ramp, SAFE_RAMP_STEP_T, self.check_abort_pause)
             else:
                 self.daq.ramp_voltage(self.p.ao_channel, vds, self.p.vds_ramp, SAFE_RAMP_STEP_T, check_fn=self.check_abort_pause)
             self._last_vds = vds
+        if self.p.bias2_mode != "Follow":
+            self.apply_bias2(vds)
 
     def _read_keithley_current(self):
         if self.p.vds_source != "Keithley 2400" or self.g3 is None:
             return None
         try:
             values = self.g3.acquire()
-            return values.get("current", self.g3.current)
+            return values.get("current", getattr(self.g3, "current", None))
         except Exception:
             return None
 
     def _plot_value(self, ids_dc, ids_x, ids_y, ids_keithley):
         if self.plot_choice in getattr(self, "_current_sample", {}):
-            return self._current_sample[self.plot_choice]
+            value = self._current_sample[self.plot_choice]
+            return value if value is not None else float("nan")
         if self.plot_choice == "Ids_X":
             return ids_x
         if self.plot_choice == "Ids_Y":

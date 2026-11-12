@@ -40,6 +40,7 @@ class MeasurementService(QObject):
     changed = Signal()
     fieldsChanged = Signal()
     uiSectionsChanged = Signal()
+    resolutionSummaryChanged = Signal()
     outputPreviewChanged = Signal()
     modeChanged = Signal()
     recordReady = Signal(object)
@@ -118,10 +119,13 @@ class MeasurementService(QObject):
         self._load_settings()
         self.fieldsChanged.connect(self.outputPreviewChanged)
         self.fieldsChanged.connect(self._invalidate_sweep_preview)
-        for signal_name in ("status_changed", "operation_changed", "protection_changed"):
+        self.fieldsChanged.connect(self.resolutionSummaryChanged)
+        self.uiSectionsChanged.connect(self.resolutionSummaryChanged)
+        for signal_name in ("status_changed", "operation_changed", "protection_changed", "gate_currents_read"):
             signal = getattr(manager, signal_name, None)
             if signal is not None:
                 signal.connect(lambda *_: self.changed.emit())
+                signal.connect(lambda *_: self.resolutionSummaryChanged.emit())
         if magnet1000 is not None:
             from app.engine.gate_scan_field_batch import GateScanFieldBatch
             from app.engine.bfield_transport_router import BFieldTransportRouter
@@ -190,6 +194,11 @@ class MeasurementService(QObject):
         errors = self._field_errors[mode]
         sections = measurement_sections(values, mode, self._selected_rows[mode] if selected is None else selected, errors,
                                         transport_coordinates=self._transport_coordinates, sampling=self._sampling.step, magnet_backend=self._selected_backend())
+        channels = self._plot_channels(values.get("vds_source", "None"))
+        for section in sections:
+            for field in section["fields"]:
+                if field["key"] == "plot_choice":
+                    field["options"] = channels
         visible_keys = {field["key"] for section in sections for field in section["fields"]
                         if not field.get("rowKey")}
         recovery = []
@@ -206,6 +215,47 @@ class MeasurementService(QObject):
         return sections
 
     uiSections = Property("QVariantList", lambda self: self._ui_sections(), notify=uiSectionsChanged)
+
+    @Property(str, notify=uiSectionsChanged)
+    def signalSummary(self):
+        from app.drag_drive import measurement_mode
+        chain = signal_chain_metadata(self.get_signal_chain())
+        mode = measurement_mode(chain)
+        labels = {"ordinary": "Ordinary", "single_drag": "Single Lock-in · Drag",
+                  "single_drive": "Single Lock-in · Drive", "dual": "Two Lock-ins · Drag / Drive"}
+        config = chain.get("drag_drive") or {}
+        text = labels.get(mode, mode)
+        if mode in ("single_drive", "dual"):
+            text += f" · SR551 ×10 · Rs = {config.get('series_resistance_ohm', 100000):g} Ω"
+        return text
+    @Property(str, notify=resolutionSummaryChanged)
+    def resolutionSummary(self):
+        """Cached readback only; this summary never contacts an instrument."""
+        values = self._values[self._mode]
+        names = ["g1", "g2"]
+        uses_g3 = values.get("vds_source") == "Keithley 2400" and (self._mode != 3 or values.get("use_vds"))
+        if self._mode in (4, 5) and values.get("conditions"):
+            uses_g3 = any(row.get("enabled", True) and row.get("vds_source") == "Keithley 2400"
+                          for row in values["conditions"])
+        if uses_g3:
+            names.append("g3")
+        if values.get("bias2_mode", "Disabled") != "Disabled" or any(
+                row.get("enabled", True) and row.get("bias2_mode", "Disabled") != "Disabled"
+                for key in ("conditions", "bias_conditions") for row in values.get(key, [])):
+            names.append("g4")
+        parts = []
+        for name in names:
+            session = self.device_manager.get_session(name)
+            if session is None:
+                continue
+            status = source_resolution_status(session)
+            if status.quantum is None:
+                parts.append(f"{name.upper()}: resolution unconfirmed")
+            else:
+                source_range = getattr(session, "cached_source_voltage_range_v", None)
+                parts.append(f"{name.upper()}: {float(source_range):g} V range / {status.quantum:g} V step")
+        return " · ".join(parts)
+
     @Property("QVariantMap", notify=fieldsChanged)
     def filenameField(self):
         values, mode = self._values[self._mode], self._mode
@@ -673,7 +723,7 @@ class MeasurementService(QObject):
             converted = self._convert_input(value, default[column], column, self._mode)
             changes_shape = self._mode == 4 and (column in {"mode", "vds_source"} or
                 (column.startswith("raw_") and column.endswith("_active")))
-            changes_shape = changes_shape or (self._mode == 5 and column == "vds_source")
+            changes_shape = changes_shape or (self._mode == 5 and column == "vds_source") or column == "bias2_mode"
             model = self._recipe_models.get((self._mode, key))
             if notify_model and changes_shape and converted != rows[row][column] and model and not model.flush():
                 model.notify_row(row)
@@ -837,6 +887,10 @@ class MeasurementService(QObject):
 
     def collect_params(self):
         params = build_params(self._values[self._mode], self._mode)
+        if hasattr(params, "plot_choice"):
+            channels = self._plot_channels(getattr(params, "vds_source", "None"))
+            if channels and params.plot_choice not in channels:
+                params.plot_choice = channels[0]
         if self._mode == 5:
             params.magnet_backend = self._selected_backend()
         return params
@@ -878,7 +932,8 @@ class MeasurementService(QObject):
             return [{"vtg": c.vtg, "vbg": c.vbg, "vds": c.vds if params.use_vds else 0.} for c in conditions]
         return []
 
-    def _validate(self, params, mode):
+    def _validate(self, params, mode, *, refresh_missing=True):
+        from app.bias_control import validate_bias2
         for key, value in asdict(params).items():
             if isinstance(value, float) and not math.isfinite(value):
                 raise ValueError(f"{key} must be finite")
@@ -906,11 +961,28 @@ class MeasurementService(QObject):
             if (mode in (1, 4) or swept_map_gate or self.device_manager.get_session(device) is not None
                     or any(abs(p[axis]) > 1e-12 for p in points)):
                 required.append(device)
-        use_vds = mode != 3 or params.use_vds
+        use_vds = params.vds_source != "None" and (mode != 3 or params.use_vds)
+        if mode == 0 and not use_vds:
+            raise ValueError("Vds Sweep requires a Bias 1 source")
+        if mode in (1, 4) and not use_vds and (
+                params.raw_vds_active if params.mode == "Raw" else params.derived_vds_mode == "Swept"):
+            raise ValueError("Enable a Bias 1 source or disable its sweep")
+        if mode == 2 and not use_vds and "Vds" in (params.axis_fast, params.axis_slow):
+            raise ValueError("A Vds map axis requires a Bias 1 source")
         if use_vds and params.vds_source == "Keithley 2400":
             required.append("g3")
         if use_vds and params.vds_source not in ("Keithley 2400", "NI DAQ AO"):
             raise ValueError("Unsupported Vds source")
+        if mode == 3:
+            for condition, point in zip((c for c in params.bias_conditions if c.enabled), points):
+                validate_bias2(condition, [point], self.device_manager, bias1_enabled=use_vds,
+                               bias1_source=params.vds_source)
+            bias2_enabled = any(c.enabled and c.bias2_mode != "Disabled" for c in params.bias_conditions)
+        else:
+            validate_bias2(params, points, self.device_manager, bias1_enabled=use_vds)
+            bias2_enabled = params.bias2_mode != "Disabled"
+        if bias2_enabled:
+            required.append("g4")
         missing = [d for d in required if not self.device_manager.is_connected(d)]
         if missing:
             raise ValueError("Connect required devices first: " + ", ".join(missing))
@@ -936,7 +1008,8 @@ class MeasurementService(QObject):
             limit = float(daq.get_max_output(params.ao_channel))
             if not math.isfinite(limit) or any(abs(p["vds"]) > abs(limit) + 1e-9 for p in points):
                 raise ValueError("Vds exceeds the DAQ AO range")
-        if mode == 2:
+        if mode in (0, 1, 2, 3, 4):
+            from app.constants import GATE_BIAS_RAMP_STEP_V
             resolutions = {}
             refresh = []
             for device, axis in (("g1", "vtg"), ("g2", "vbg"), ("g3", "vds")):
@@ -949,8 +1022,20 @@ class MeasurementService(QObject):
                     else:
                         raise ValueError(f"{device.upper()}: {resolution.message}")
                 else:
-                    resolutions[axis] = resolution.quantum
+                    quantum = resolution.quantum
+                    source_range = float(self.device_manager.get_session(device).cached_source_voltage_range_v)
+                    if any(abs(float(point[axis])) > source_range + quantum * 1e-7 for point in points):
+                        raise ValueError(f"{device.upper()} trajectory exceeds the {source_range:g} V source range.")
+                    resolutions[axis] = quantum
+                    ramp = (getattr(params, "vds_ramp", None) if axis == "vds" else
+                            getattr(params, "vg_ramp", None) if mode in (1, 2, 4) else GATE_BIAS_RAMP_STEP_V)
+                    if ramp is not None and float(ramp) + 1e-12 < quantum:
+                        raise ValueError(f"{device.upper()} ramp step {float(ramp):g} V is below the {quantum:g} V source resolution.")
+                    if mode == 0 and axis == "vds" and float(params.vds_step) + 1e-12 < quantum:
+                        raise ValueError(f"G3 Vds sample step {float(params.vds_step):g} V is below the {quantum:g} V source resolution.")
             if refresh:
+                if not refresh_missing:
+                    raise ValueError("Source range remains unavailable after refresh; check source readback.")
                 if self.device_manager.read_gate_currents(names=tuple(refresh)):
                     raise ValueError("Refreshing source ranges. Review readback and press Start again.")
                 raise ValueError("Source ranges unavailable; refresh readback before starting")
@@ -1025,7 +1110,26 @@ class MeasurementService(QObject):
         self._claim(required)
         self._engine_calibration = None
         self._preflight_request = params, mode, points
-        task = PreflightThread(self._rates, self)
+        configurations = [params]
+        if mode == 4:
+            rows = self._values[4]["conditions"]
+            if rows:
+                configurations = [build_params({**defaults(4), **{k: v for k, v in row.items() if k not in ("enabled", "name")}}, 4)
+                                  for row in deepcopy(rows) if row["enabled"]]
+        def verify_before_start():
+            if mode < 5:
+                for name in ("g1", "g2", "g3", "g4"):
+                    if name not in required:
+                        continue
+                    session = self.device_manager.get_session(name)
+                    refresh = getattr(session, "refresh_source_voltage_range", None)
+                    if not callable(refresh):
+                        raise ValueError(f"{name.upper()}: source range refresh is unavailable.")
+                    refresh()
+                for configuration in configurations:
+                    self._validate(configuration, mode, refresh_missing=False)
+            return self._rates()
+        task = PreflightThread(verify_before_start, self)
         self._preflight_thread = task
         task.finished.connect(self._preflight_finished)
         self._phase, self._message, self._progress = "preparing", "Verifying signal-chain settings", 0.
@@ -1098,12 +1202,21 @@ class MeasurementService(QObject):
     def _plot_channels(self, source, chain=None):
         from app.result_channels import plot_channel_options
         metadata = signal_chain_metadata(chain if chain is not None else self.get_signal_chain())
-        return plot_channel_options(source, bool((metadata.get("drag_drive") or {}).get("enabled")))
+        values = self._values[self._mode]
+        rows = values.get("bias_conditions", values.get("conditions", []))
+        if self._mode == 5:
+            source = "Keithley 2400" if any(row.get("enabled", True) and row.get("vds_source") == "Keithley 2400" for row in rows) else "None"
+        elif self._mode == 3 and not values.get("use_vds"):
+            source = "None"
+        bias2 = (any(row.get("enabled", True) and row.get("bias2_mode", "Disabled") != "Disabled" for row in rows)
+                 if rows else values.get("bias2_mode", "Disabled") != "Disabled")
+        return plot_channel_options(source, metadata, bias2=bias2)
 
     def _launch(self, params, mode, calibration, snapshot, *, batch_metadata=None):
         amp, lockin, chain = calibration
         worker = self._factories[mode](params, deepcopy(self.save), deepcopy(self.conns),
-            **{d: self.device_manager.get_session(d) if d in self._claimed else None for d in ("g1", "g2", "g3", "daq", "mono")},
+            **{d: self.device_manager.get_session(d) if d in self._claimed else None for d in ("g1", "g2", "g3", "g4", "daq", "mono")},
+            device_manager=self.device_manager,
             plot_choice=params.plot_choice, amp_rate=amp, lkn_rate=lockin,
             signal_chain=signal_chain_metadata(chain), batch_metadata=batch_metadata or {},
             apply_connected_gate_biases=True)
@@ -1300,6 +1413,12 @@ class MeasurementService(QObject):
             required = ["daq", "g1", "g2"]
             if any(c.vds_source == "Keithley 2400" for c in plan.conditions):
                 required.append("g3")
+            from app.bias_control import validate_bias2
+            for condition in plan.conditions:
+                validate_bias2(condition, [condition.vds], self.device_manager,
+                               bias1_enabled=condition.vds_source != "None")
+            if any(c.bias2_mode != "Disabled" for c in plan.conditions):
+                required.append("g4")
         self._begin_preflight(params, self._mode, list(dict.fromkeys(required)), [])
 
     def _dispatch_magnetic(self):

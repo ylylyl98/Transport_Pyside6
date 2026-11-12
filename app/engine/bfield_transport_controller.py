@@ -31,7 +31,8 @@ from app.engine.bfield_transport_sweep import (
     aps100_transport_field_limit,
 )
 from app.run_output import build_planned_output
-from app.drag_drive import DUAL_COLUMNS, dual_enabled, acquire_current_sample
+from app.drag_drive import acquisition_columns, measurement_mode, dual_enabled, acquire_current_sample
+from app.bias_control import validate_bias2, bias2_target, ramp_bias2, zero_bias2, read_bias2, ramp_pair
 from app.signal_chain import signal_chain_metadata
 from app.utils import safe_ramp
 from utils.config import cfg
@@ -94,6 +95,7 @@ class BFieldTransportController(SteppedTransportMixin, QtCore.QObject):
         self._target = None
         self._owner = "bfield-transport"
         self._claimed = []
+        self._active_bias2_condition = None
         self._exclusive_acquired = False
         self._config_pending = False
         self._stored_rates = self._stored_limits = None
@@ -368,6 +370,8 @@ class BFieldTransportController(SteppedTransportMixin, QtCore.QObject):
         self._stored_rates = self._stored_limits = None
         self._active_ao_channels.clear()
         try:
+            if getattr(self, "_active_bias2_condition", None) is not None:
+                raise RuntimeError("Previous Bias2 cleanup is incomplete; resolve the output before another run.")
             params = self.tab.collect_params()
             self.plan = TransportSweepPlan.from_params(params)
             self._reversal_preflight()
@@ -486,6 +490,7 @@ class BFieldTransportController(SteppedTransportMixin, QtCore.QObject):
                 self._exclusive_acquired = False
                 raise BFieldTransportSafetyError("Transport devices already in use: " + ", ".join(blocked))
             self._claimed = required
+            self._validate_biases(required, refresh=True)
             # Start a fresh durable heater-transition log lifecycle for every
             # transport reservation.  Polling cadence remains unchanged; only
             # the replaceable UI countdown/milestone dedup state is reset.
@@ -502,14 +507,14 @@ class BFieldTransportController(SteppedTransportMixin, QtCore.QObject):
             self._last_routine_log = 0.0
             self._last_ui_routine_log = 0.0
             self._log("B-field Transport series started")
-            write_series_manifest(self._manifest, params=params, validation=self.plan.validation)
-            write_series_manifest(self._checkpoint, params=params, validation=self.plan.validation)
+            write_series_manifest(self._manifest, params=params, validation=self.plan.validation, csv_paths=self._transport_outputs.condition_csv_paths)
+            write_series_manifest(self._checkpoint, params=params, validation=self.plan.validation, csv_paths=self._transport_outputs.condition_csv_paths)
             self._writers = {}
             for index, (condition, csv_path) in enumerate(
                 zip(self.plan.conditions, self._transport_outputs.condition_csv_paths), start=1
             ):
                 self._writers[index] = TransportCsvWriter(
-                    csv_path, condition, extra_columns=(DUAL_COLUMNS if dual_enabled(self._signal_chain) else ())
+                    csv_path, condition, extra_columns=(*acquisition_columns(self._signal_chain), "Bias2", "Ibias2_Keithley")
                     + (STEP_COLUMNS if self._is_stepped() else ()))
             self._active = True
             self._enable_background_work()
@@ -557,7 +562,15 @@ class BFieldTransportController(SteppedTransportMixin, QtCore.QObject):
             return True
         except Exception as exc:
             self.error.emit(str(exc))
-            self._cleanup("failed")
+            if self._active:
+                self._cleanup("failed")
+            else:
+                if self._claimed:
+                    self.device_manager.release(self._claimed)
+                    self._claimed = []
+                if self._exclusive_acquired:
+                    self._set_transport_polling(False)
+                    self._exclusive_acquired = not self.magnet.release_exclusive(self._owner)
             return False
 
     def stop(self):
@@ -1048,9 +1061,9 @@ class BFieldTransportController(SteppedTransportMixin, QtCore.QObject):
         }
         self._completed_final_mode = self._cleanup_final_mode
         if self._manifest:
-            write_series_manifest(self._manifest, params=self.plan.params, validation=self.plan.validation, status=self._cleanup_status, results=self._results, cleanup_failures=self._cleanup_failures, runtime=final_runtime)
+            write_series_manifest(self._manifest, params=self.plan.params, validation=self.plan.validation, status=self._cleanup_status, results=self._results, cleanup_failures=self._cleanup_failures, runtime=final_runtime, csv_paths=self._transport_outputs.condition_csv_paths)
         if self._checkpoint:
-            write_series_manifest(self._checkpoint, params=self.plan.params, validation=self.plan.validation, status=self._cleanup_status, results=self._results, cleanup_failures=self._cleanup_failures, runtime=final_runtime)
+            write_series_manifest(self._checkpoint, params=self.plan.params, validation=self.plan.validation, status=self._cleanup_status, results=self._results, cleanup_failures=self._cleanup_failures, runtime=final_runtime, csv_paths=self._transport_outputs.condition_csv_paths)
 
     def _files_finished(self, _value, error):
         if error is not None:
@@ -1567,7 +1580,7 @@ class BFieldTransportController(SteppedTransportMixin, QtCore.QObject):
                "Condition_name": condition.name, "Direction": direction, "B_measured_T": float(getattr(snapshot, "field_t", 0.0)),
                "B_target_T": float(self._target), "Sweep_rate_T_per_min": self._current_range_rate(snapshot),
                "Sweep_rate_A_per_s": (self._current_range_rate(snapshot) / (self.plan.validation["aps100_rates"]["coil_constant_t_per_a"] * 60.0) if self.plan.params.magnet_backend == "1000" and self._current_range_rate(snapshot) is not None else None), "Doping": condition.doping, "E-field": condition.efield,
-               "Vtg": condition.vtg, "Vbg": condition.vbg, "Vds": condition.vds}
+               "Vtg": condition.vtg, "Vbg": condition.vbg, "Vds": condition.vds if condition.vds_source != "None" else None}
         row["_monitor_generation"] = self._monitor_generation
         thermal = self._latest_lakeshore()
         if thermal is not None:
@@ -1591,19 +1604,13 @@ class BFieldTransportController(SteppedTransportMixin, QtCore.QObject):
         row["Acquisition_started"] = time.time()
         daq = self.device_manager.get_session("daq")
         if daq is not None and hasattr(daq, "acquire"):
-            if dual_enabled(self._signal_chain):
+            try:
                 row.update(acquire_current_sample(
                     daq, max(1, int(self.plan.params.averages)), *self._calibration,
                     self._signal_chain, self._check_io_cancel))
-            else:
-                try:
-                    raw = self._acquire_daq(daq, max(1, int(self.plan.params.averages)))
-                except Exception as exc:
-                    raise RuntimeError(f"DAQ acquisition failed during transport sweep: {exc}") from exc
-                row.update({"raw_X": raw[0], "raw_Y": raw[1], "raw_DC": raw[2]})
-                amp_rate, lockin_rate = self._calibration
-                row.update({"Ids_X": raw[0] / (float(amp_rate) * float(lockin_rate)), "Ids_Y": raw[1] / (float(amp_rate) * float(lockin_rate)), "Ids_DC": raw[2] / float(amp_rate)})
-            if condition.vds_source != "Keithley 2400" and hasattr(daq, "get_ao_vs_gnd_value"):
+            except Exception as exc:
+                raise RuntimeError(f"DAQ acquisition failed during transport sweep: {exc}") from exc
+            if condition.vds_source.startswith("NI DAQ") and hasattr(daq, "get_ao_vs_gnd_value"):
                 row["Vds_measured"] = daq.get_ao_vs_gnd_value(int(condition.ao_channel))
         if condition.vds_source == "Keithley 2400":
             smu = self.device_manager.get_session("g3")
@@ -1620,6 +1627,8 @@ class BFieldTransportController(SteppedTransportMixin, QtCore.QObject):
                     row["Keithley_current"] = row["Ids_Keithley"]
                 except Exception as exc:
                     row["Keithley_read_error"] = str(exc)
+        row["Bias2"] = bias2_target(condition, condition.vds)
+        row["Ibias2_Keithley"] = read_bias2(self.device_manager.get_session("g4"), condition)
         row["Acquisition_finished"] = time.time()
         return row
 
@@ -1824,19 +1833,36 @@ class BFieldTransportController(SteppedTransportMixin, QtCore.QObject):
 
     def _apply_biases(self, condition):
         condition.refresh_gates()
+        previous = getattr(self, "_active_bias2_condition", None)
+        if condition.bias2_mode == "Disabled" and previous is not None:
+            if "g4" not in self._claimed:
+                raise BFieldTransportSafetyError("Bias2 G4 is not reserved for this run")
+            zero_bias2(self.device_manager.get_session("g4"), previous)
+            self._active_bias2_condition = None
         pairs = (("g1", condition.vtg), ("g2", condition.vbg))
-        if condition.vds_source == "Keithley 2400": pairs += (("g3", condition.vds),)
+        if condition.vds_source == "Keithley 2400" and condition.bias2_mode != "Follow": pairs += (("g3", condition.vds),)
         for name, target in pairs:
             session = self.device_manager.get_session(name)
             if session is None: raise BFieldTransportSafetyError(f"Missing session {name.upper()}")
             current = float(getattr(session, "voltage", 0.0) or 0.0)
             safe_ramp(session.set_voltage, current, float(target), 0.1, 0.02, check_fn=self._check_bias_progress)
-        if condition.vds_source != "Keithley 2400":
+        if condition.vds_source.startswith("NI DAQ") and condition.bias2_mode != "Follow":
             daq = self.device_manager.get_session("daq")
             if daq is None or not hasattr(daq, "ramp_voltage"):
                 raise BFieldTransportSafetyError("NI DAQ session is required for AO Vds")
             self._active_ao_channels.add(int(condition.ao_channel))
             daq.ramp_voltage(int(condition.ao_channel), float(condition.vds), 0.1, 0.02, check_fn=self._check_bias_progress)
+        if condition.bias2_mode != "Disabled":
+            self._active_bias2_condition = condition
+            if condition.bias2_mode == "Follow":
+                daq = self.device_manager.get_session("daq")
+                if condition.vds_source.startswith("NI DAQ"):
+                    self._active_ao_channels.add(int(condition.ao_channel))
+                primary = self.device_manager.get_session("g3") if condition.vds_source == "Keithley 2400" else None
+                ramp_pair(primary, daq, int(condition.ao_channel), self.device_manager.get_session("g4"),
+                          condition, condition.vds, 0.1, self._check_bias_progress, 0.02)
+            else:
+                ramp_bias2(self.device_manager.get_session("g4"), condition, condition.vds, self._check_bias_progress)
         deadline = time.monotonic() + max(0.0, float(condition.settle_s))
         while time.monotonic() < deadline:
             self._check_bias_progress()
@@ -1847,7 +1873,7 @@ class BFieldTransportController(SteppedTransportMixin, QtCore.QObject):
         self._check_io_cancel()
         self._io_progress_at = time.monotonic()
 
-    def _validate_biases(self, required):
+    def _validate_biases(self, required, refresh=False):
         daq = self.device_manager.get_session("daq")
         # The production tab always supplies the calibration callback; a
         # minimal controller test double may intentionally omit all DAQ I/O.
@@ -1855,7 +1881,9 @@ class BFieldTransportController(SteppedTransportMixin, QtCore.QObject):
             raise BFieldTransportSafetyError("NI DAQ acquisition session is required for transport measurements")
         for condition in self.plan.conditions:
             condition.refresh_gates()
-            if condition.vds_source not in {"Keithley 2400", "NI DAQ AO"}:
+            if condition.bias2_mode != "Disabled" and "g4" not in required:
+                required.append("g4")
+            if condition.vds_source not in {"Keithley 2400", "NI DAQ AO", "None"}:
                 raise BFieldTransportSafetyError(f"Unsupported Vds source: {condition.vds_source}")
             for name, value in (("g1", condition.vtg), ("g2", condition.vbg)):
                 session = self.device_manager.get_session(name)
@@ -1870,7 +1898,7 @@ class BFieldTransportController(SteppedTransportMixin, QtCore.QObject):
                 limit = self.device_manager.applied_gate_voltage_limit("g3")
                 if abs(float(condition.vds)) > limit + 1e-9:
                     raise BFieldTransportSafetyError(f"Condition {condition.name}: Vds exceeds verified G3 protection")
-            else:
+            elif condition.vds_source.startswith("NI DAQ"):
                 channel = int(condition.ao_channel)
                 if channel < 0:
                     raise BFieldTransportSafetyError("NI DAQ AO channel must be non-negative")
@@ -1880,6 +1908,27 @@ class BFieldTransportController(SteppedTransportMixin, QtCore.QObject):
                         raise BFieldTransportSafetyError(
                             f"Condition {condition.name}: Vds exceeds verified DAQ AO{channel} protection"
                         )
+
+        if refresh:
+            from app.voltage_resolution import validate_source_targets
+            for name, attr, label in (("g1", "vtg", "G1 / Vtg"), ("g2", "vbg", "G2 / Vbg")):
+                validate_source_targets(self.device_manager.get_session(name),
+                                        [getattr(condition, attr) for condition in self.plan.conditions],
+                                        label, ramp_step=0.1, refresh=True)
+            g3_targets = [condition.vds for condition in self.plan.conditions
+                          if condition.vds_source == "Keithley 2400"]
+            if g3_targets:
+                validate_source_targets(self.device_manager.get_session("g3"), g3_targets,
+                                        "G3 / Vds", ramp_step=0.1, refresh=True)
+            bias2_conditions = [condition for condition in self.plan.conditions if condition.bias2_mode != "Disabled"]
+            if bias2_conditions:
+                validate_source_targets(self.device_manager.get_session("g4"),
+                                        [bias2_target(c, c.vds) for c in bias2_conditions],
+                                        "G4 / Bias2", ramp_step=min(c.bias2_ramp for c in bias2_conditions),
+                                        refresh=True)
+                for condition in bias2_conditions:
+                    validate_bias2(condition, [condition.vds], self.device_manager,
+                                   condition.vds_source != "None")
 
     def _on_fault(self, message):
         if self._active: self._fail(str(message))
@@ -1991,11 +2040,15 @@ class BFieldTransportController(SteppedTransportMixin, QtCore.QObject):
                 self._begin_persistent_cleanup()
 
     def _zero_biases(self):
-        for name in ("g1", "g2", "g3"):
+        for name in ("g1", "g2", "g3", "g4"):
             if name not in self._claimed: continue
+            if name == "g4" and getattr(self, "_active_bias2_condition", None) is None: continue
             try:
                 session = self.device_manager.get_session(name)
-                if session is not None: safe_ramp(session.set_voltage, getattr(session, "voltage", 0.0) or 0.0, 0.0, 0.1, 0.02)
+                if session is None:
+                    raise RuntimeError("session missing during cleanup")
+                safe_ramp(session.set_voltage, getattr(session, "voltage", 0.0) or 0.0, 0.0, 0.1, 0.02)
+                if name == "g4": self._active_bias2_condition = None
             except Exception as exc: self._cleanup_failures.append(f"{name} zero failed: {exc}")
         daq = self.device_manager.get_session("daq")
         if daq is not None and hasattr(daq, "ramp_voltage"):
@@ -2219,15 +2272,18 @@ class BFieldTransportController(SteppedTransportMixin, QtCore.QObject):
             path = self._checkpoint
             params, validation = deepcopy(self.plan.params), dict(self.plan.validation)
             results = list(self._results)
+            output_paths = getattr(self._transport_outputs, "condition_csv_paths", None)
+            csv_paths = tuple(output_paths) if output_paths is not None else None
             self._storage_lane.submit(
                 lambda: write_series_manifest(path, params=params, validation=validation,
-                                              status="running", results=results, runtime=runtime),
+                                              status="running", results=results, runtime=runtime, csv_paths=csv_paths),
                 self._checkpoint_done,
             )
             return
         try:
             write_series_manifest(self._checkpoint, params=self.plan.params, validation=self.plan.validation,
-                                  status="running", results=self._results, runtime=runtime)
+                                  status="running", results=self._results, runtime=runtime,
+                                  csv_paths=getattr(self._transport_outputs, "condition_csv_paths", None))
         except OSError as exc:
             self._log(f"checkpoint update failed: {exc}")
 

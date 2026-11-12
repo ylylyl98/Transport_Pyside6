@@ -15,10 +15,10 @@ from app.curve_cache import CsvColumns
 
 MEASUREMENT_TYPES = {"vds_sweep": "Vds Sweep", "gate_scan": "Gate Scan", "map_2d": "2D Map",
                      "bfield_gate_scan": "B-field Gate Scan", "bfield_transport": "B-field Sweep", "photocurrent": "Photocurrent"}
-X_COLUMNS = ("Vds", "Vtg", "Vbg", "Doping", "E-field", "B_measured_T", "Wavelength", "Step Index")
+X_COLUMNS = ("Bias2", "Bias2_measured", "Vds", "Vtg", "Vbg", "Doping", "E-field", "B_measured_T", "Wavelength", "Step Index")
 from app.drag_drive import DUAL_COLUMNS, DUAL_SIGNALS
 
-SIGNAL_COLUMNS = ("Ids_DC", "Ids_X", "Ids_Y", "Ids_Keithley", "raw_DC", "raw_X", "raw_Y", *DUAL_COLUMNS, *RATIO_SIGNALS)
+SIGNAL_COLUMNS = ("Ibias2_Keithley", "Ids_DC", "Ids_X", "Ids_Y", "Ids_Keithley", "raw_DC", "raw_X", "raw_Y", *DUAL_COLUMNS, *RATIO_SIGNALS)
 _UNITS = {"", "v", "a", "mv", "ma", "ua", "µa", "μa", "na", "pa", "t", "k", "s", "hz", "ohm", "ω", "#", "deg", "rad", "a.u.", "nm"}
 
 
@@ -81,7 +81,7 @@ def _header(reader):
     # The native B-field writer has no units row. Its named schema carries
     # field in tesla, converted/Keithley currents in amperes and biases in volts.
     if not has_units and "B_measured_T" in headers:
-        units = {name: "T" if name in {"B_measured_T", "B_target_T"} else "A" if name.startswith("Ids_") or name in DUAL_SIGNALS or name == "Keithley_current" else "V" if name.startswith('raw_') or name in {"Vtg", "Vbg", "Vds", "Doping", "E-field", "Efield"} else "" for name in headers}
+        units = {name: "T" if name in {"B_measured_T", "B_target_T"} else "A" if name.startswith("Ids_") or name == "Ibias2_Keithley" or name in DUAL_SIGNALS or name == "Keithley_current" else "V" if name.startswith('raw_') or name in {"Vtg", "Vbg", "Vds", "Bias2", "Bias2_measured", "Doping", "E-field", "Efield"} else "" for name in headers}
     return headers, units, [] if has_units else second
 
 
@@ -109,7 +109,7 @@ def _measurement(path, root, metadata, headers):
     return ""
 
 
-def _conditions(metadata):
+def _conditions(metadata, path=None):
     params = metadata.get("params", {})
     if not isinstance(params, dict):
         return "Conditions unknown"
@@ -143,7 +143,96 @@ def _conditions(metadata):
     chain = metadata.get("signal_chain", {})
     if isinstance(chain, dict) and chain.get("ac_contact"):
         pieces.append(f"Contact={chain['ac_contact']}")
+    # Share the same metadata semantics used in scientific plot captions.
+    from app.plot_export_labels import _bias2_settings, _signal_settings
+    pieces.extend(f"{key}={value}" for key, value in _bias2_settings(metadata, path).items())
+    calibration = metadata.get("validation", {}).get("calibration", {}) if isinstance(metadata.get("validation"), dict) else {}
+    chain = metadata.get("signal_chain") or calibration.get("signal_chain") or {}
+    if isinstance(chain, dict):
+        signal = _signal_settings(chain)
+        for key in ("Lock-in role", "Drag preamp gain", "Drive preamp gain", "Series R", "Excitation"):
+            if signal.get(key):
+                pieces.append(f"{key}={signal[key]}")
     return " · ".join(pieces) or "Conditions unknown"
+
+
+def _explicit_metadata_index(root, cache):
+    """Index only saved local CSV paths; never infer a series from a filename."""
+    index, seen = {}, set()
+    for pattern in ("*_metadata.json", "*_series_manifest.json"):
+        for source in root.rglob(pattern):
+            key = ("metadata_source", source)
+            seen.add(key)
+            try:
+                stat = source.stat()
+                signature = (stat.st_mtime_ns, stat.st_size)
+                cached = cache.get(key) if cache is not None else None
+                if cached is not None and cached[0] == signature:
+                    payload = cached[1]
+                else:
+                    payload = json.loads(source.read_text(encoding="utf-8-sig"))
+                    if cache is not None:
+                        cache[key] = (signature, payload)
+                if not isinstance(payload, dict):
+                    continue
+                kind = payload.get("measurement")
+                if kind != "photocurrent" and payload.get("schema") != "bfield_transport_manifest_v1":
+                    continue
+                paths = payload.get("csv_paths")
+                if not isinstance(paths, list):
+                    continue
+                parent = source.parent.resolve()
+                for position, candidate in enumerate(paths):
+                    if not isinstance(candidate, str) or not candidate:
+                        continue
+                    target = Path(candidate)
+                    if not target.is_absolute():
+                        target = parent / target
+                    target = target.resolve()
+                    if target.parent != parent or target.suffix.lower() != ".csv":
+                        continue
+                    index.setdefault(target, []).append((source, signature, payload, position))
+            except (OSError, ValueError, TypeError):
+                continue
+    return index, seen
+
+
+def _series_metadata(payload, position, source):
+    """Keep shared run metadata and attach the explicitly mapped condition."""
+    metadata = dict(payload)
+    # Resolve the saved paths against their metadata file, never process CWD.
+    paths = metadata.get("csv_paths")
+    if isinstance(paths, list):
+        metadata["csv_paths"] = [str((source.parent / path).resolve()) if isinstance(path, str) and not Path(path).is_absolute()
+                                 else str(Path(path).resolve()) if isinstance(path, str) else path
+                                 for path in paths]
+    if metadata.get("schema") == "bfield_transport_manifest_v1":
+        metadata["measurement"] = "bfield_transport"
+        raw_params = metadata.get("params")
+        params = dict(raw_params) if isinstance(raw_params, dict) else {}
+        rows = metadata.get("conditions") or params.get("conditions") or []
+        enabled = [row for row in rows if isinstance(row, dict) and row.get("enabled", True)] if isinstance(rows, list) else []
+        paths = metadata.get("csv_paths") or []
+        if len(enabled) == len(paths) and position < len(enabled):
+            params.update(enabled[position])
+            # The matching condition is now the only active condition for
+            # metadata consumers; keep the run-level signal chain unchanged.
+            params["conditions"] = [enabled[position]]
+            metadata["csv_paths"] = [paths[position]]
+        else:
+            # A malformed mapping cannot identify an individual condition.
+            params["conditions"] = []
+        metadata["params"] = params
+    elif metadata.get("measurement") == "photocurrent":
+        raw_params = metadata.get("params")
+        params = dict(raw_params) if isinstance(raw_params, dict) else {}
+        rows = params.get("bias_conditions")
+        if isinstance(rows, list):
+            enabled = [row for row in rows if isinstance(row, dict) and row.get("enabled", True)]
+            if len(enabled) != len(metadata.get("csv_paths") or []):
+                params["bias_conditions"] = []
+                metadata["params"] = params
+    return metadata
 
 
 def discover_history(root, cache=None) -> tuple[list[HistoryRecord], list[str]]:
@@ -152,6 +241,7 @@ def discover_history(root, cache=None) -> tuple[list[HistoryRecord], list[str]]:
     if not root.is_dir():
         return [], [f"Folder does not exist: {root}"]
     try:
+        metadata_index, seen_metadata = _explicit_metadata_index(root, cache)
         paths = root.rglob("*.csv")
         seen_paths = set()
         for path in paths:
@@ -161,7 +251,12 @@ def discover_history(root, cache=None) -> tuple[list[HistoryRecord], list[str]]:
                 sidecar = path.with_name(path.stem + "_metadata.json")
                 stat = path.stat()
                 meta_stat = sidecar.stat() if sidecar.exists() else None
-                signature = (stat.st_mtime_ns, stat.st_size, meta_stat.st_mtime_ns if meta_stat else 0, meta_stat.st_size if meta_stat else 0)
+                matches = metadata_index.get(path.resolve(), [])
+                source_signatures = tuple(sorted((str(source), *source_signature, position)
+                                                 for source, source_signature, _payload, position in matches))
+                signature = (stat.st_mtime_ns, stat.st_size, str(sidecar) if meta_stat else "",
+                             meta_stat.st_mtime_ns if meta_stat else 0, meta_stat.st_size if meta_stat else 0,
+                             source_signatures)
                 if cache is not None and path in cache and cache[path][0] == signature:
                     _signature, record, cached_warnings = cache[path]
                     if record is not None:
@@ -169,7 +264,11 @@ def discover_history(root, cache=None) -> tuple[list[HistoryRecord], list[str]]:
                     warnings.extend(cached_warnings)
                     continue
                 warning_start = len(warnings)
-                if sidecar.exists():
+                if len(matches) == 1:
+                    metadata = _series_metadata(matches[0][2], matches[0][3], matches[0][0])
+                elif len(matches) > 1:
+                    warnings.append(f"{path.name}: multiple explicit metadata mappings; metadata not assigned")
+                elif sidecar.exists():
                     try:
                         metadata = json.loads(sidecar.read_text(encoding="utf-8-sig"))
                         if not isinstance(metadata, dict):
@@ -196,7 +295,7 @@ def discover_history(root, cache=None) -> tuple[list[HistoryRecord], list[str]]:
                 except ValueError:
                     match = re.search(r"(\d{8})_(\d{6})(?:_\d+)?$", path.stem)
                     stamp = (dt.datetime.strptime("".join(match.groups()), "%Y%m%d%H%M%S") if match else dt.datetime.fromtimestamp(path.stat().st_mtime)).isoformat(timespec="seconds")
-                record = HistoryRecord(path, kind, stamp, str(metadata.get("status", "unknown")), _conditions(metadata), headers, units, metadata, (stat.st_mtime_ns, stat.st_size))
+                record = HistoryRecord(path, kind, stamp, str(metadata.get("status", "unknown")), _conditions(metadata, path), headers, units, metadata, (stat.st_mtime_ns, stat.st_size))
                 records.append(record)
                 if cache is not None:
                     cache[path] = (signature, record, warnings[warning_start:])
@@ -205,7 +304,7 @@ def discover_history(root, cache=None) -> tuple[list[HistoryRecord], list[str]]:
     except OSError as exc:
         warnings.append(f"Folder scan failed: {exc}")
     if cache is not None:
-        for missing in set(cache) - seen_paths:
+        for missing in set(cache) - seen_paths - seen_metadata:
             cache.pop(missing, None)
     records.sort(key=lambda r: (r.created_at, str(r.path)), reverse=True)
     return records, warnings

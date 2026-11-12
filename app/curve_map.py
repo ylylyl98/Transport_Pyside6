@@ -194,6 +194,9 @@ def map_comparison(records, x_name, y_name, signal, direction="All", pass_index=
         if units != expected_units:
             warnings.append(f"{record.path.name}: incompatible cut units {units}")
             continue
+        if not np.any(np.isfinite(x) & np.isfinite(y)):
+            warnings.append(f"{record.path.name}: no finite paired samples for {fixed_axis}={value!r}; cut skipped")
+            continue
         expected_units = units
         pass_label = "all rows" if result.pass_index is None else f"row/pass {result.pass_index:g}"
         label = f"{record.path.stem[:28]} · {fixed_axis}={value:g} · {pass_label}"

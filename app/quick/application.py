@@ -24,7 +24,7 @@ from app.quick.magnet import MagnetService
 from app.quick.measurements import MeasurementService
 from app.quick.plot import PlotModel, register_types
 from app.quick.runtime import RuntimeSettings
-from app.drag_drive import dual_enabled
+from app.drag_drive import dual_enabled, measurement_mode
 from app.result_channels import plot_channel_options
 from app.ui.png_export_process import PngExportProcess
 from utils.config import cfg
@@ -84,6 +84,7 @@ class ApplicationBackend(QObject):
         self._sync_plot_channels()
         self._measurement.fieldsChanged.connect(self._sync_plot_channels)
         self._instruments.signalFieldsChanged.connect(self._sync_plot_channels)
+        self._instruments.signalFieldsChanged.connect(self._measurement.uiSectionsChanged)
         self._plot = self._plots[self._measurement.mode]
         self._measurement.modeChanged.connect(self._select_plot)
         self._measurement.recordReady.connect(lambda record: self._plot.appendRecord(record))
@@ -208,7 +209,18 @@ class ApplicationBackend(QObject):
         for mode, plot in enumerate(self._plots):
             values = self._measurement._values[mode]
             source = values.get('vds_source', '')
-            plot.setChannelOptions(plot_channel_options(source, self._instruments.manager.connections.drag_drive_enabled))
+            chain = self._instruments.signal_chain_snapshot().to_dict()
+            rows = values.get('bias_conditions') or values.get('conditions') or []
+            if mode == 5:
+                source = 'Keithley 2400' if any(row.get('enabled', True) and row.get('vds_source') == 'Keithley 2400' for row in rows) else 'None'
+            elif mode == 3 and not values.get('use_vds'):
+                source = 'None'
+            bias2 = (any(row.get('enabled', True) and row.get('bias2_mode', 'Disabled') != 'Disabled' for row in rows)
+                     if rows else values.get('bias2_mode', 'Disabled') != 'Disabled')
+            channels = plot_channel_options(source, chain, bias2=bias2)
+            if values.get('plot_choice') not in channels and channels:
+                values['plot_choice'] = channels[0]
+            plot.setChannelOptions(channels)
 
     def _select_plot(self):
         self._plot = self._plots[self._measurement.mode]
@@ -216,7 +228,7 @@ class ApplicationBackend(QObject):
 
     def _begin_plot(self, snapshot):
         mode = self._measurement.mode
-        flavor = "drag_drive" if dual_enabled(snapshot.get("signal_chain")) else "ordinary"
+        flavor = measurement_mode(snapshot.get("signal_chain"))
         if flavor != self._plot_flavors[mode]:
             self._plot_flavors[mode] = flavor
             self._load_plot_preferences(mode)

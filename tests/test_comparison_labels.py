@@ -19,6 +19,75 @@ def snapshot(records):
 
 
 class ComparisonLabelTests(unittest.TestCase):
+    def test_dc_calibration_is_explicit_and_not_inferred(self):
+        from app.plot_export_labels import conditions, comparison_heading
+        records = [record("a.csv"), record("b.csv")]
+        records[0]["metadata"]["signal_chain"]["drag_drive"] = {
+            "mode": "single_drive", "dc_enabled": True, "dc_preamp_gain_v_per_a": 2e7}
+        records[1]["metadata"]["signal_chain"]["drag_drive"] = {
+            "mode": "single_drive", "dc_enabled": False, "dc_preamp_gain_v_per_a": 2e7}
+        self.assertEqual(conditions(records[0])["DC channel"], "Enabled")
+        self.assertEqual(conditions(records[0])["DC preamp gain"], "2e+07 V/A")
+        self.assertEqual(conditions(records[1])["DC channel"], "Disabled")
+        self.assertNotIn("DC preamp gain", conditions(records[1]))
+        _, detail = comparison_heading([records[0]], "Ids_DC")
+        self.assertIn("DC=Enabled", detail)
+        self.assertIn("DC gain=2e+07 V/A", detail)
+        labels = comparison_labels(records, [{"path": item["path"]} for item in records])
+        self.assertIn("DC channel = Enabled", labels[0])
+        self.assertIn("DC channel = Disabled", labels[1])
+        self.assertNotIn("DC channel", conditions(record("old.csv")))
+        self.assertNotIn("DC preamp gain", conditions(record("old.csv")))
+
+    def test_role_bias2_and_excitation_are_reported_only_when_saved(self):
+        from app.plot_export_labels import conditions, comparison_heading
+        from app.curve_history import _conditions
+        item = record("sample.csv")
+        item["metadata"]["params"].update(bias2_mode="Follow", bias2_offset=-.002)
+        chain = item["metadata"]["signal_chain"]
+        chain.update(excitation_source="external", drag_drive={"mode": "single_drive",
+                     "series_resistance_ohm": 100000., "drive_preamp_gain": 10.})
+        values = conditions(item)
+        self.assertEqual(values["Lock-in role"], "Single Drive")
+        self.assertEqual(values["Bias2"], "Follow")
+        self.assertEqual(values["Bias2 offset"], "−2 mV")
+        self.assertEqual(values["Excitation"], "External")
+        self.assertEqual(values["Drive preamp gain"], "10")
+        self.assertNotIn("Drag preamp gain", values)
+        _, detail = comparison_heading([item], "I_drive_X")
+        for text in ("Role=Single Drive", "Bias2=Follow", "Bias2 offset=−2 mV", "Excitation=External"):
+            self.assertIn(text, detail)
+        self.assertIn("Lock-in role=Single Drive", _conditions(item["metadata"]))
+        unknown = conditions({"path": "old.csv", "metadata": {}})
+        self.assertNotIn("Bias2", unknown)
+        self.assertNotIn("Lock-in role", unknown)
+        self.assertNotIn("Excitation", unknown)
+
+    def test_condition_file_mapping_does_not_guess_other_rows(self):
+        from app.plot_export_labels import conditions
+        from app.curve_history import _conditions
+        meta = {"params": {"bias2_mode": "Disabled", "bias_conditions": [
+            {"enabled": True, "bias2_mode": "Fixed", "bias2_voltage": .1},
+            {"enabled": False, "bias2_mode": "Disabled"},
+            {"enabled": True, "bias2_mode": "Follow", "bias2_offset": .02}]},
+            "csv_paths": ["first.csv", "second.csv"]}
+        self.assertEqual(conditions({"path": "first.csv", "metadata": meta})["Bias2 voltage"], "100 mV")
+        self.assertEqual(conditions({"path": "second.csv", "metadata": meta})["Bias2 offset"], "20 mV")
+        self.assertNotIn("Bias2", conditions({"path": "unknown.csv", "metadata": meta}))
+        self.assertNotIn("Bias2", _conditions(meta))
+        self.assertIn("Bias2=Follow", _conditions(meta, "second.csv"))
+
+    def test_role_and_bias2_differences_remain_in_comparison_labels(self):
+        records = [record("a.csv"), record("b.csv")]
+        for item, mode, voltage in zip(records, ("single_drag", "single_drive"), (.1, .2)):
+            item["metadata"]["signal_chain"]["drag_drive"] = {"mode": mode}
+            item["metadata"]["params"].update(bias2_mode="Fixed", bias2_voltage=voltage)
+        labels = comparison_labels(records, [{"path": r["path"]} for r in records])
+        self.assertIn("Lock-in role = Single Drag", labels[0])
+        self.assertIn("Bias2 voltage = 100 mV", labels[0])
+        self.assertIn("Lock-in role = Single Drive", labels[1])
+        self.assertIn("Bias2 voltage = 200 mV", labels[1])
+
     def test_dual_frequency_summary_collapses_equal_display_values_only(self):
         from app.plot_export_labels import comparison_heading, conditions
         item = record('dual.csv')

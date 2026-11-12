@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 from collections import Counter
 import json
+import os
 import re
 
 from app.curve_history import MEASUREMENT_TYPES
@@ -47,6 +48,7 @@ def conditions(record, excluded=()):
         other = "E-field" if axis == "Doping" else "Doping"
         if "derived_fixed" in params:
             result[other] = quantity(params["derived_fixed"], "V")
+    result.update(_bias2_settings(meta, record.get("path")))
     for name, value in meta.get("csv_conditions", {}).items():
         if value:
             result[name] = value
@@ -76,6 +78,40 @@ def conditions(record, excluded=()):
     return {key: value for key, value in result.items() if value and key not in excluded}
 
 
+def _bias2_settings(metadata, path=None):
+    """Describe only a condition that can be identified in saved metadata."""
+    params = metadata.get("params") or {}
+    if not isinstance(params, dict):
+        return {}
+    condition = params
+    for key in ("bias_conditions", "conditions"):
+        if key not in params:
+            continue
+        rows = params.get(key)
+        if not isinstance(rows, list):
+            return {}
+        enabled = [row for row in rows if isinstance(row, dict) and row.get("enabled", True)]
+        paths = metadata.get("csv_paths")
+        if path and isinstance(paths, list) and len(paths) == len(enabled):
+            normalize = lambda p: os.path.normcase(os.path.abspath(str(p)))
+            matches = [row for row, candidate in zip(enabled, paths) if normalize(candidate) == normalize(path)]
+            condition = matches[0] if len(matches) == 1 else {}
+        elif len(enabled) == 1:
+            condition = enabled[0]
+        else:
+            condition = {}
+        break
+    mode = condition.get("bias2_mode")
+    if mode not in ("Disabled", "Fixed", "Follow"):
+        return {}
+    result = {"Bias2": mode}
+    if mode == "Fixed" and "bias2_voltage" in condition:
+        result["Bias2 voltage"] = quantity(condition["bias2_voltage"], "V")
+    if mode == "Follow" and "bias2_offset" in condition:
+        result["Bias2 offset"] = quantity(condition["bias2_offset"], "V")
+    return {key: value for key, value in result.items() if value}
+
+
 def _signal_settings(chain):
     result = {}
     for key, label, unit in (("preamp_gain_v_per_a", "Preamp gain", "V/A"),
@@ -87,12 +123,34 @@ def _signal_settings(chain):
         result["Preamp gain"] = quantity(1. / sensitivity, "V/A")
     dual = chain.get("drag_drive") or {}
     instruments = dual.get("instruments") or {}
+    if isinstance(dual.get("dc_enabled"), bool):
+        result["DC channel"] = "Enabled" if dual["dc_enabled"] else "Disabled"
+        if dual["dc_enabled"] and "dc_preamp_gain_v_per_a" in dual:
+            result["DC preamp gain"] = quantity(dual["dc_preamp_gain_v_per_a"], "V/A")
+    mode = dual.get("mode")
+    if mode is None and dual.get("enabled") is True:
+        mode = "dual"
+    role = {"single_drag": "Single Drag", "single_drive": "Single Drive", "dual": "Dual Drag / Drive"}.get(mode)
+    if role:
+        result["Lock-in role"] = role
+    if mode in ("single_drag", "dual") and result.get("Preamp gain"):
+        result["Drag preamp gain"] = result["Preamp gain"]
+    if mode in ("single_drive", "dual"):
+        if "series_resistance_ohm" in dual:
+            result["Series R"] = quantity(dual["series_resistance_ohm"], "Ω")
+        if "drive_preamp_gain" in dual:
+            result["Drive preamp gain"] = quantity(dual["drive_preamp_gain"])
+    excitation = chain.get("excitation_source")
+    if excitation in ("primary", "external", "unspecified"):
+        result["Excitation"] = {"primary": "Primary lock-in", "external": "External", "unspecified": "Unspecified"}[excitation]
     sources = [("", chain.get("lockin_settings") or {})]
-    if dual.get("enabled"):
+    if mode == "single_drag":
+        sources = [("Drag ", chain.get("lockin_settings") or instruments.get("drag") or {})]
+    elif mode == "single_drive":
+        sources = [("Drive ", chain.get("lockin_settings") or instruments.get("drive") or {})]
+    elif mode == "dual":
         sources = [("Drag ", chain.get("lockin_settings") or instruments.get("drag") or {}),
                    ("Drive ", instruments.get("drive") or {})]
-        result["Series R"] = quantity(dual.get("series_resistance_ohm"), "Ω")
-        result["Drive preamp gain"] = quantity(dual.get("drive_preamp_gain"))
     for prefix, snapshot in sources:
         values = snapshot.get("values") or {}
         for key, label, unit in (("phase_deg", "Phase", "°"), ("sine_out_v", "Amplitude", "V"),
@@ -109,7 +167,7 @@ def _signal_settings(chain):
                 result[prefix + label] = str(values[key + "_label"])
             elif values.get(key) is not None:
                 result[prefix + label] = f"code {values[key]}"
-        if prefix != "Drive ":
+        if prefix != "Drive " or mode == "single_drive":
             result.setdefault(prefix + "f", quantity(chain.get("frequency_hz"), "Hz"))
             result.setdefault(prefix + "Sensitivity", quantity(chain.get("lockin_sensitivity_v"), "V"))
     return result
@@ -122,7 +180,8 @@ def _parameter_settings(metadata):
         return {}
     handled = {f"{prefix}_{suffix}" for prefix in ("vtg", "vbg", "vds", "raw_vtg", "raw_vbg", "raw_vds")
                for suffix in ("start", "stop", "set")}
-    handled.update(("base_name", "derived_fixed", "derived_vds_fixed", "derived_vds_start", "derived_vds_stop"))
+    handled.update(("base_name", "derived_fixed", "derived_vds_fixed", "derived_vds_start", "derived_vds_stop",
+                    "bias2_mode", "bias2_voltage", "bias2_offset"))
     titles = {"n_sample": "Samples", "delay_s": "Delay (s)", "settle_s": "Settle (s)", "dwell_s": "Dwell (s)"}
     result = {}
     for key, value in params.items():
@@ -211,7 +270,10 @@ _HEADING_LABELS = {
     "f": "f", "Amplitude": "Vac", "Phase": "φ",
     "Drag f": "Drag f", "Drag Amplitude": "Drag Vac", "Drag Phase": "Drag φ",
     "Drive f": "Drive f", "Drive Amplitude": "Drive Vac", "Drive Phase": "Drive φ",
-    "Series R": "Rs", "AC voltage ratio": "AC ratio",
+    "Lock-in role": "Role", "Bias2": "Bias2", "Bias2 voltage": "Bias2 voltage",
+    "Bias2 offset": "Bias2 offset", "Series R": "Rs", "Drag preamp gain": "Drag gain",
+    "Drive preamp gain": "Drive gain", "DC channel": "DC", "DC preamp gain": "DC gain",
+    "Excitation": "Excitation", "AC voltage ratio": "AC ratio",
 }
 
 

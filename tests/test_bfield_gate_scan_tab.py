@@ -64,6 +64,32 @@ class BFieldGateScanTabTests(unittest.TestCase):
         self.assertEqual(requests[1][3], "E-field condition")
         tab.deleteLater()
 
+    def test_batch_preflight_rejects_later_unrepresentable_condition_after_claim(self):
+        from copy import deepcopy
+        from unittest.mock import Mock
+        from app.models import GateScanCondition
+        from app.ui.tabs.gate_scan_tab import GateScanTab
+        class Source:
+            identity = "KEITHLEY INSTRUMENTS INC.,MODEL 2400,123,1"
+            cached_source_voltage_range_v = 20.
+            def __init__(self): self.reads = 0
+            def refresh_source_voltage_range(self): self.reads += 1
+        tab = self._fresh_raw_tab()
+        sources = {name: Source() for name in ("g1", "g2", "g3")}
+        tab.device_manager.get_session = lambda name: sources.get(name)
+        params = deepcopy(tab._conditions[0].params)
+        params.n_points = 2
+        bad = deepcopy(params); bad.raw_vtg_stop = .0003
+        tab._conditions = [GateScanCondition("first", params), GateScanCondition("second", bad)]
+        tab.finish_field_batch = Mock()
+        tab._show_series_error = Mock()
+        with patch.object(GateScanTab, "begin_field_batch", return_value=True):
+            self.assertFalse(tab.begin_field_batch(params, ("g1", "g2", "g3")))
+        tab.finish_field_batch.assert_called_once()
+        self.assertIn("not representable", tab._show_series_error.call_args[0][0])
+        self.assertEqual(sources["g1"].reads, 1)
+        tab.deleteLater()
+
     def test_ordinary_gate_editor_is_not_given_bfield_controls(self):
         # The dedicated tab owns the B-field controls; this assertion is made
         # by MainWindow wiring and the normal GateScanTab's opt-out default.

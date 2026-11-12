@@ -24,7 +24,7 @@ class FakeManager(QObject):
     def __init__(self):
         super().__init__()
         self.connections = Connections()
-        self.sessions = {k: SimpleNamespace(identity="KEITHLEY INSTRUMENTS INC.,MODEL 2400,x,y", cached_source_voltage_range_v=20.,
+        self.sessions = {k: SimpleNamespace(identity="KEITHLEY INSTRUMENTS INC.,MODEL 2400,x,y", cached_source_voltage_range_v=20., refresh_source_voltage_range=lambda: 20.,
             get_max_output=lambda channel: 10.) for k in ("g1", "g2", "g3", "daq", "mono")}
         self.claimed = set()
         self.busy = False
@@ -934,6 +934,7 @@ class QuickMeasurementTests(unittest.TestCase):
         class Gate:
             identity = "KEITHLEY INSTRUMENTS INC.,MODEL 2400,x,y"
             cached_source_voltage_range_v = 20.
+            def refresh_source_voltage_range(self): return self.cached_source_voltage_range_v
             voltage = 0.
             current = 1e-9
             def get_voltage_setpoint(self): return self.voltage
@@ -1029,6 +1030,9 @@ class QuickMeasurementTests(unittest.TestCase):
 
     def test_bfield_transport_port_stops_only_after_persistent_ack_and_storage_close(self):
         class Gate:
+            identity = "KEITHLEY INSTRUMENTS INC.,MODEL 2400,x,y"
+            cached_source_voltage_range_v = 20.
+            def refresh_source_voltage_range(self): return self.cached_source_voltage_range_v
             voltage = 0.
             def get_voltage_setpoint(self): return self.voltage
             def set_voltage(self, value): self.voltage = value

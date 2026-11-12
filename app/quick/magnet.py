@@ -181,21 +181,26 @@ class MagnetService(QObject):
 
     @Property(str, notify=changed)
     def temperatureStatus(self):
+        def display(value):
+            if isinstance(value, (int, float)) and math.isfinite(value):
+                return f"{value:.6g}"
+            return "—"
+
         if self._backend == "2100":
             snapshot = self._snapshots.get("temperature2100")
             if snapshot is None:
                 return "SDK sample temperature unavailable; refresh supported telemetry"
-            return (f"Sample: {getattr(snapshot, 'sample_temperature_k', None)} K; "
-                    f"VTI: {getattr(snapshot, 'vti_temperature_k', None)} K; "
-                    f"target: {getattr(snapshot, 'sample_setpoint_k', None)} K; "
+            return (f"Sample: {display(getattr(snapshot, 'sample_temperature_k', None))} K; "
+                    f"VTI: {display(getattr(snapshot, 'vti_temperature_k', None))} K; "
+                    f"target: {display(getattr(snapshot, 'sample_setpoint_k', None))} K; "
                     f"active: {getattr(snapshot, 'sample_control_active', None)}")
         valid = self._temperature_valid()
-        sample = str(getattr(self._snapshots.get("temperature"), "sample_temperature_k", None)) if valid else "unavailable/stale"
+        sample = display(getattr(self._snapshots.get("temperature"), "sample_temperature_k", None)) if valid else "unavailable/stale"
         state = ("pending readback" if self._temperature_pending() else "control failed" if self._control_failed
                  else "Stability wait disabled" if not self._values["wait_temperature"]
                  else "ready" if self.is_ready() else "waiting for stability")
         target = self.measurement_settings()[1]
-        return f"LS335 sample: {sample} K; target: {target if target is not None else 'unconfirmed'} K; {state}"
+        return f"LS335 sample: {sample} K; target: {display(target) if target is not None else 'unconfirmed'} K; {state}"
 
     @Property('QVariantMap', notify=changed)
     def telemetry(self):

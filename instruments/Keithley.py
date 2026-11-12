@@ -84,17 +84,17 @@ class Keithley2400Base(PyvisaInstrument):
             return start
 
         from app.constants import SAFE_RAMP_STEP_T, SAFE_RAMP_STEP_V
-        from app.utils import safe_ramp
+        from app.utils import ramp_quantized
+        from app.voltage_resolution import validate_source_targets
+
+        quantum = validate_source_targets(self, [0.0], self.name, SAFE_RAMP_STEP_V, refresh=True)
 
         def write_existing_voltage(value: float):
             self._write(":SOUR:VOLT:LEV %.9g" % float(value))
 
-        safe_ramp(
-            write_existing_voltage,
-            start,
-            0.0,
-            SAFE_RAMP_STEP_V,
-            SAFE_RAMP_STEP_T,
+        ramp_quantized(
+            write_existing_voltage, start, 0.0, SAFE_RAMP_STEP_V, SAFE_RAMP_STEP_T,
+            quantum, allow_unaligned_start=True,
         )
         self._output_values[self.VOLT_OUTPUT] = 0.0
         return start
@@ -334,6 +334,21 @@ class Keithley2400Base(PyvisaInstrument):
                 self._max_source_voltage = old_voltage_limit
                 raise
 
+    def refresh_source_voltage_range(self) -> float:
+        """Refresh only the source range; never modify an output or protection."""
+        with self.lock:
+            try:
+                value = float(self._query(":SOUR:VOLT:RANG?"))
+                if not math.isfinite(value) or value <= 0:
+                    raise ValueError(f"Invalid source voltage range: {value!r}")
+            except Exception as ex:
+                self.cached_source_voltage_range_v = None
+                self.cached_source_voltage_range_error = str(ex)
+                raise
+            self.cached_source_voltage_range_v = value
+            self.cached_source_voltage_range_error = ""
+            return value
+
     def read_protection_settings(self, include_trip: bool = True) -> dict[str, object]:
         with self.lock:
             # Publish a completed read, not an empty cache between queries.
@@ -438,13 +453,10 @@ class Keithley2400Base(PyvisaInstrument):
     def ramp_voltage(self, target: float, step: float):
         if self._operating_mode != KEITHLEY_MODE_VOLTAGE_2W:
             raise InstrumentError(self.name, "Keithley is not configured for 2-wire voltage source mode.")
-        if np.isclose(step, 0.0):
-            raise InstrumentError(self.name, "step cannot be 0.")
-        start = self.get_voltage_setpoint()
-        step = abs(step) if target > start else -abs(step)
-        for v in np.arange(start, target, step):
-            self.set_voltage_fast(v)
-        return self.set_voltage_fast(target)
+        from app.utils import safe_ramp
+        safe_ramp(self.set_voltage, 0.0, target, step, 0.0)
+        return self.output_values
+
 
 
 class Keithley2400VoltMode(Keithley2400Base):

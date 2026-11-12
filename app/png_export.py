@@ -24,7 +24,7 @@ from app.analysis_csv_export import csv_bytes, validate_csv_path, temporary_path
 from app.export_paths import ordinary_path, validate_export_path
 from app.plot_snapshot import save_snapshot, load_snapshot
 
-CHANNELS = ("Ids_DC", "Ids_X", "Ids_Y", "Ids_Keithley", *DUAL_SIGNALS)
+CHANNELS = ("Ibias2_Keithley", "Ids_DC", "Ids_X", "Ids_Y", "Ids_Keithley", *DUAL_SIGNALS)
 OVERVIEW_CHANNELS = (("I_drag_X", "Drag X"), ("I_drag_Y", "Drag Y"),
                      ("I_drive_X", "Drive X"), ("I_drive_Y", "Drive Y"))
 DPI = 150
@@ -501,7 +501,7 @@ def _run_record(path, metadata):
     path = ordinary_path(path)
     headers, units, rows, _warnings = read_csv_snapshot(path)
     if metadata.get("measurement") == "bfield_transport" and not units:
-        units = {name: "A" if name in CHANNELS or name == "Keithley_current" else "T" if name in {"B_measured_T", "B_target_T"} else "V" if name in {"Vtg", "Vbg", "Vds", "Doping", "E-field"} else "" for name in headers}
+        units = {name: "A" if name in CHANNELS or name == "Keithley_current" else "T" if name in {"B_measured_T", "B_target_T"} else "V" if name in {"Vtg", "Vbg", "Vds", "Bias2", "Bias2_measured", "Doping", "E-field"} else "" for name in headers}
     metadata = {**metadata, "csv_conditions": summarize_conditions(headers, units, rows)}
     stat = path.stat()
     return HistoryRecord(path, metadata.get("measurement", ""), metadata.get("created_at", metadata.get("updated_at", "")),

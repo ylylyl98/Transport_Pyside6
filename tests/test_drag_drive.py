@@ -231,6 +231,10 @@ class DualPreflightTests(unittest.TestCase):
         from app.workers.photocurrent import PhotocurrentWorker
         class Gate:
             voltage = 0.
+            identity = "KEITHLEY INSTRUMENTS INC.,MODEL 2400,123,1"
+            cached_source_voltage_range_v = 20.
+            def refresh_source_voltage_range(self):
+                return self.cached_source_voltage_range_v
             def set_voltage(self, value):
                 self.voltage = value
             def ramp_voltage(self, value, *args):
@@ -352,7 +356,7 @@ class DualPreflightTests(unittest.TestCase):
         bfield = window.tab_bfield_transport
         self.assertIn('I_drive_X', bfield.plot._y_axis_options)
         controller = window.bfield_transport_controller
-        controller._results = [{'B_measured_T': .1, 'Ids_DC': 9e-6, 'I_drive_X': 2e-8}]
+        controller._selected()._results = [{'B_measured_T': .1, 'Ids_DC': 9e-6, 'I_drive_X': 2e-8}]
         bfield.plot._emit_plot_mode_changed('Single Plot')
         bfield.plot.y_axis_changed.emit('I_drive_X')
         self.assertEqual(list(controller._plot_line.get_ydata()), [2e-8])

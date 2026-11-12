@@ -126,6 +126,19 @@ class SafeSpinBoxTests(unittest.TestCase):
             spinbox.setValue(value)
             self.assertEqual(spinbox.text(), expected)
 
+    def test_standard_decimal_padding_is_trimmed_without_changing_precision(self):
+        for locale, separator in (("en_US", "."), ("de_DE", ",")):
+            spinbox = SafeDoubleSpinBox()
+            spinbox.setLocale(QtCore.QLocale(locale))
+            spinbox.setDecimals(9)
+            spinbox.setRange(-10, 10)
+            spinbox.setSuffix(" V")
+            for value, shown in ((1.0, "1"), (0.125, "0.125"), (1e-9, "0.000000001")):
+                spinbox.setValue(value)
+                self.assertEqual(spinbox.text(), shown.replace(".", separator) + " V")
+                QtTest.QTest.keyClick(spinbox.lineEdit(), QtCore.Qt.Key.Key_Return)
+                self.assertEqual(spinbox.value(), value)
+
     def test_application_has_no_raw_spinbox_constructors(self):
         app_root = Path(__file__).resolve().parents[1] / "app"
         raw_constructor = re.compile(r"(?:QtWidgets\.)?Q(?:Double)?SpinBox\s*\(")

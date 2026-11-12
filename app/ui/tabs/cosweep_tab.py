@@ -637,7 +637,7 @@ class CoSweepTab(BaseMeasurementTab):
         self._update_source_items()
 
     def _update_source_items(self):
-        items = ["Keithley 2400"] + [f"NI DAQ {a}" for a in self.get_ao_items()]
+        items = ["None", "Keithley 2400"] + [f"NI DAQ {a}" for a in self.get_ao_items()]
         cur = self.cbo_source.currentText()
         self.cbo_source.blockSignals(True)
         self.cbo_source.clear()
@@ -648,17 +648,17 @@ class CoSweepTab(BaseMeasurementTab):
         self._update_plot_axis_choices()
 
     def _update_plot_axis_choices(self):
-        options = plot_channel_options(self.cbo_source.currentText(), getattr(self.device_manager.connections, "drag_drive_enabled", False))
+        options = plot_channel_options(self.cbo_source.currentText(), signal_chain_metadata(self.get_signal_chain()), bias2=self.bias2_is_enabled())
         current = self.cbo_y.currentText()
         if current not in options:
-            current = "Ids_DC"
+            current = options[0] if options else "Ids_DC"
         self.cbo_y.blockSignals(True)
         self.cbo_y.clear()
         self.cbo_y.addItems(options)
         self.cbo_y.setCurrentText(current)
         self.cbo_y.blockSignals(False)
         self.plot.set_y_axis_options(options, current)
-        self.plot.set_compare_channels(compare_channel_options(self.cbo_source.currentText(), getattr(self.device_manager.connections, "drag_drive_enabled", False)), grid=getattr(self.device_manager.connections, "drag_drive_enabled", False))
+        self.plot.set_compare_channels(compare_channel_options(self.cbo_source.currentText(), signal_chain_metadata(self.get_signal_chain()), bias2=self.bias2_is_enabled()), grid=getattr(self.device_manager.connections, "drag_drive_enabled", False))
         self.set_plot_axis_source(current)
 
     def _on_device_status_changed(self, name: str, _state: str, _detail: str):
@@ -683,6 +683,8 @@ class CoSweepTab(BaseMeasurementTab):
             required.append("g2")
         if self.cbo_source.currentText() == "Keithley 2400":
             required.append("g3")
+        if self.bias2_is_enabled():
+            required.append("g4")
         return list(dict.fromkeys(required))
 
     def _validate_required_sessions(self) -> bool:
@@ -987,6 +989,7 @@ class CoSweepTab(BaseMeasurementTab):
     def _params_for_summary(self) -> CoParams:
         """Build a non-destructive parameter snapshot for the setup summary."""
         p = CoParams(
+            **self.bias2_fields(),
             coordinate_mode="Derived" if self._is_derived() else "Raw",
             mode="Linked" if self.chk_link.isChecked() and self._link_plot_available() else "Grid",
             axis_fast=self.cbo_fast.currentText(),
@@ -1233,6 +1236,7 @@ class CoSweepTab(BaseMeasurementTab):
             self.log.appendPlainText(f"{name} not connected")
 
     def collect_params(self):
+        self.apply_bias2_params(self.p)
         self.p.regions = self._active_regions()
         self.refresh_output_preview()
         self.p.base_name = self.ed_base.text()
@@ -1244,7 +1248,7 @@ class CoSweepTab(BaseMeasurementTab):
             self.p.vds_source = "NI DAQ AO"
             self.p.ao_channel = int(src.split()[-1].replace("ao", ""))
         else:
-            self.p.vds_source = "Keithley 2400"
+            self.p.vds_source = "None" if src == "None" else "Keithley 2400"
         swept_axes = self._swept_axes()
         self.p.vtg_start = self.sp_vtg_start.value()
         self.p.vtg_stop = self.sp_vtg_stop.value() if "Vtg" in swept_axes else self.sp_vtg_start.value()
@@ -1384,6 +1388,9 @@ class CoSweepTab(BaseMeasurementTab):
         try:
             self.collect_params()
             validate_cosweep_params(self.p)
+            from app.bias_control import validate_bias2
+            validate_bias2(self.p, build_cosweep_points(self.p), self.device_manager,
+                           bias1_enabled=self.p.vds_source != "None")
         except Exception as ex:
             QtWidgets.QMessageBox.warning(self, "Invalid Parameters", str(ex))
             return
@@ -1407,7 +1414,7 @@ class CoSweepTab(BaseMeasurementTab):
         self.set_plot_axis_source(self.p.plot_choice)
         try:
             self.begin_run_logging(self._planned_output, "2D Map" if self._is_2d_map() else "1D Sweep")
-            self.worker = CoSweepWorker(self.p, self.save, self.conns, g1=self.s_g1, g2=self.s_g2, g3=self.s_g3, daq=self.s_daq, plot_choice=self.p.plot_choice, amp_rate=amp, lkn_rate=lkn, signal_chain=signal_chain_metadata(signal_chain))
+            self.worker = CoSweepWorker(self.p, self.save, self.conns, g1=self.s_g1, g2=self.s_g2, g3=self.s_g3, g4=self.device_manager.get_session("g4"), device_manager=self.device_manager, daq=self.s_daq, plot_choice=self.p.plot_choice, amp_rate=amp, lkn_rate=lkn, signal_chain=signal_chain_metadata(signal_chain))
             trajectory = build_cosweep_points(self.p)
             self.plot.set_planned_ranges(coordinate_ranges(trajectory),
                                          axis=self._resolved_plot_x_axis())
@@ -1488,7 +1495,7 @@ class CoSweepTab(BaseMeasurementTab):
         self._redraw_plot()
 
     def set_plot_axis_source(self, source: str):
-        if source not in plot_channel_options(self.cbo_source.currentText(), getattr(self.device_manager.connections, "drag_drive_enabled", False)):
+        if source not in plot_channel_options(self.cbo_source.currentText(), signal_chain_metadata(self.get_signal_chain()), bias2=self.bias2_is_enabled()):
             source = "Ids_DC"
         if self.cbo_y.currentText() != source:
             self.cbo_y.blockSignals(True)

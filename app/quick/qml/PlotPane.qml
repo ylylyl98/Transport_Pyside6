@@ -208,6 +208,7 @@ Pane {
                 }
             }
             Label {
+                objectName: "plotEmptyText"
                 visible: root.showEmptyState && (!root.plotModel || root.plotModel.pointCount === 0)
                 anchors.centerIn: parent
                 width: Math.max(100, parent.width - 140)

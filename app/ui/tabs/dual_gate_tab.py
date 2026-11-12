@@ -342,17 +342,17 @@ class DualGateTab(BaseMeasurementTab):
         self._update_plot_axis_choices()
 
     def _update_plot_axis_choices(self):
-        options = plot_channel_options(self.cbo_source.currentText(), getattr(self.device_manager.connections, "drag_drive_enabled", False))
+        options = plot_channel_options(self.cbo_source.currentText(), signal_chain_metadata(self.get_signal_chain()), bias2=self.bias2_is_enabled())
         current = self.cbo_y.currentText()
         if current not in options:
-            current = "Ids_DC"
+            current = options[0] if options else "Ids_DC"
         self.cbo_y.blockSignals(True)
         self.cbo_y.clear()
         self.cbo_y.addItems(options)
         self.cbo_y.setCurrentText(current)
         self.cbo_y.blockSignals(False)
         self.plot.set_y_axis_options(options, current)
-        self.plot.set_compare_channels(compare_channel_options(self.cbo_source.currentText(), getattr(self.device_manager.connections, "drag_drive_enabled", False)), grid=getattr(self.device_manager.connections, "drag_drive_enabled", False))
+        self.plot.set_compare_channels(compare_channel_options(self.cbo_source.currentText(), signal_chain_metadata(self.get_signal_chain()), bias2=self.bias2_is_enabled()), grid=getattr(self.device_manager.connections, "drag_drive_enabled", False))
         self.set_plot_axis_source(current)
 
     def _on_device_status_changed(self, name: str, _state: str, _detail: str):
@@ -373,6 +373,8 @@ class DualGateTab(BaseMeasurementTab):
             required.append("g2")
         if self.cbo_source.currentText() == "Keithley 2400":
             required.append("g3")
+        if self.bias2_is_enabled():
+            required.append("g4")
         return list(dict.fromkeys(required))
 
     def _validate_required_sessions(self) -> bool:
@@ -432,6 +434,7 @@ class DualGateTab(BaseMeasurementTab):
             self.log.appendPlainText(f"[Manual] Ramping G2 / Vbg to {val} V.")
 
     def collect_params(self):
+        self.apply_bias2_params(self.p)
         self.refresh_output_preview()
         self.p.base_name = self.ed_base.text()
         self.p.output_csv_path = self._planned_output.csv_path if self._planned_output else ""
@@ -476,6 +479,10 @@ class DualGateTab(BaseMeasurementTab):
             return
         try:
             self.collect_params()
+            from app.bias_control import validate_bias2
+            from app.utils import _frange_inc
+            step = abs(self.p.vds_step) * (1 if self.p.vds_stop >= self.p.vds_start else -1)
+            validate_bias2(self.p, _frange_inc(self.p.vds_start, self.p.vds_stop, step), self.device_manager)
         except Exception as ex:
             QtWidgets.QMessageBox.warning(self, "Invalid Parameters", str(ex))
             return
@@ -495,7 +502,7 @@ class DualGateTab(BaseMeasurementTab):
                 self.conns,
                 g1=self.s_g1,
                 g2=self.s_g2,
-                g3=self.s_g3,
+                g3=self.s_g3, g4=self.device_manager.get_session("g4"), device_manager=self.device_manager,
                 daq=self.s_daq,
                 plot_choice=self.p.plot_choice,
                 amp_rate=amp_rate,
@@ -548,7 +555,7 @@ class DualGateTab(BaseMeasurementTab):
         self._redraw_plot()
 
     def set_plot_axis_source(self, source: str):
-        if source not in plot_channel_options(self.cbo_source.currentText(), getattr(self.device_manager.connections, "drag_drive_enabled", False)):
+        if source not in plot_channel_options(self.cbo_source.currentText(), signal_chain_metadata(self.get_signal_chain()), bias2=self.bias2_is_enabled()):
             source = "Ids_DC"
         if self.cbo_y.currentText() != source:
             self.cbo_y.blockSignals(True)

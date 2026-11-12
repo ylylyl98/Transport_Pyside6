@@ -22,7 +22,7 @@ class InstrumentWorkspace(QtWidgets.QWidget):
         self.pages.addTab(self.scroll(connections), "Gate / DAQ")
         self.pages.addTab(self.scroll(magnet), "Magnet")
         self.lockin_pages = QtWidgets.QTabWidget()
-        self.lockin_pages.addTab(self.scroll(lockin), "Drag / Primary")
+        self.lockin_pages.addTab(self.scroll(lockin), "Primary · Drag or Drive")
         if drive_lockin is not None:
             self.lockin_pages.addTab(self.scroll(drive_lockin), "Drive")
         self.pages.addTab(self.lockin_pages, "Lock-in")
@@ -91,7 +91,9 @@ class InstrumentWorkspace(QtWidgets.QWidget):
     def refresh_summary(self, *_args):
         connected = [name.upper() for name in self.manager.sessions if self.manager.is_connected(name)]
         busy = sorted(self.manager.current_in_use())
-        mode = "Drag / Drive" if self.manager.connections.drag_drive_enabled else "Ordinary X/Y/DC"
+        key = getattr(self.manager.connections, "signal_chain_mode", None) or ("dual" if self.manager.connections.drag_drive_enabled else "ordinary")
+        mode = {"ordinary": "Ordinary X/Y/DC", "single_drag": "Single Lock-in · Drag",
+                "single_drive": "Single Lock-in · Drive", "dual": "Drag / Drive"}.get(key, key)
         text = "Measurement mode: " + mode
         text += "\nGate / DAQ / Lock-in connected: " + (", ".join(connected) if connected else "none")
         if busy:

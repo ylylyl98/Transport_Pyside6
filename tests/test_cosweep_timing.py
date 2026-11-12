@@ -53,6 +53,13 @@ class HistoricalCoSweepTimingTests(unittest.TestCase):
         return estimate_cosweep_seconds(p or self.p, connections=self.connections,
                                         device_id="YZ324", **kwargs)
 
+    def test_second_bias_uses_uncalibrated_model_and_adds_read_time(self):
+        from app.workers.cosweep_timing import historical_cosweep_match, cosweep_calibration_description
+        p = replace(self.p, bias2_mode="Fixed", bias2_voltage=.1)
+        self.assertFalse(historical_cosweep_match(p, self.connections, "YZ324"))
+        self.assertIn("not calibrated", cosweep_calibration_description(p, self.connections, "YZ324"))
+        self.assertGreater(estimate_cosweep_seconds(p), estimate_cosweep_seconds(self.p))
+
     def test_complete_historical_run_including_cleanup(self):
         self.assertAlmostEqual(self.estimate(), 1430, places=5)
 

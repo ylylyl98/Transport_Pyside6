@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import "NumberFormat.js" as NumberFormat
 
 ColumnLayout {
     id: editor
@@ -110,7 +111,7 @@ ColumnLayout {
     }
     Component {
         id: filenameEditor
-        RowLayout {
+        ColumnLayout {
             spacing: 4
             FontMetrics { id: filenameMetrics; font: filenameInput.font }
             ScrollView {
@@ -160,7 +161,7 @@ ColumnLayout {
             ActionToolButton {
                 objectName: "expandFieldButton"
                 text: "Expand"
-                Layout.alignment: Qt.AlignTop
+                Layout.alignment: Qt.AlignRight
                 focusPolicy: Qt.TabFocus
                 Accessible.name: "Expand file base name"
                 ToolTip.visible: hovered
@@ -178,14 +179,24 @@ ColumnLayout {
             Layout.fillWidth: true
             Layout.minimumWidth: 40
             objectName: "field_" + editor.formField.key
-            text: { editor.fieldIdentity; return editor.committedValue }
+            property bool dirty: false
+            property string draftText: ""
+            property string identity: editor.fieldIdentity
+            onIdentityChanged: { dirty = false; draftText = "" }
+            text: dirty ? draftText : (activeFocus || (editor.formField.kind !== "number" && editor.formField.kind !== "integer") ? editor.committedValue : NumberFormat.compact(editor.committedValue))
+            onTextEdited: { draftText = text; dirty = true }
+            ToolTip.visible: hovered && (editor.formField.kind === "number" || editor.formField.kind === "integer")
+            ToolTip.text: editor.committedValue
             readOnly: editor.readOnly
             selectByMouse: true
             Accessible.name: editor.formField.label || editor.formField.key
             Accessible.description: (editor.formField.error ? "Error: " + editor.formField.error + ". " : "") + (editor.formField.description || "") + (editor.formField.kind === "text" ? " Alt+Enter: full text." : "") + (editor.trailingActionText ? " Alt+B: " + editor.trailingActionText : "")
             placeholderText: editor.formField.kind === "text" ? "" : "Enter a value"
             onEditingFinished: {
-                if (!readOnly && !editor.expanding && (editor.formField.error || text !== editor.committedValue)) editor.committed(text)
+                if (!readOnly && !editor.expanding && dirty) {
+                    editor.committed(draftText)
+                    if (!editor.formField.error) dirty = false
+                }
             }
             Keys.onPressed: event => {
                 if (editor.trailingActionText && editor.trailingActionEnabled && !editor.locked && event.key === Qt.Key_B && (event.modifiers & Qt.AltModifier)) {

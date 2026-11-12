@@ -209,6 +209,9 @@ class CoSweepDerivedTests(unittest.TestCase):
         import json
 
         class Gate:
+            identity = "KEITHLEY INSTRUMENTS INC.,MODEL 2400,x,y"
+            cached_source_voltage_range_v = 20.0
+            def refresh_source_voltage_range(self): return self.cached_source_voltage_range_v
             voltage = 0.0
             def ramp_voltage(self, value, _step): self.voltage = value
             def set_voltage(self, value): self.voltage = value
@@ -376,6 +379,9 @@ class CoSweepDerivedTests(unittest.TestCase):
 
     def test_raw_slow_axis_is_set_once_per_row_before_fast_points(self):
         class Gate:
+            identity = "KEITHLEY INSTRUMENTS INC.,MODEL 2400,x,y"
+            cached_source_voltage_range_v = 20.0
+            def refresh_source_voltage_range(self): return self.cached_source_voltage_range_v
             def __init__(self, name):
                 self.name, self.calls, self.voltage = name, [], 0.0
             def ramp_voltage(self, value, _step):

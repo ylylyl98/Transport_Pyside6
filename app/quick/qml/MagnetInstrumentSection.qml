@@ -1,13 +1,18 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import "NumberFormat.js" as NumberFormat
 
 ColumnLayout {
     id: section
     required property var magnet
     Layout.fillWidth: true
     spacing: 14
-    function value(value, unit) { return value === null || value === undefined ? "unknown" : String(value) + (unit || "") }
+    function value(value, unit) {
+        if (value === null || value === undefined) return "unknown"
+        if (typeof value === "boolean") return value ? "ON" : "OFF"
+        return unit ? NumberFormat.quantity(value, unit.trim()) : NumberFormat.compact(value)
+    }
     function readout() {
         const m = magnet.telemetry.magnet || {}
         const status = m.status || {}

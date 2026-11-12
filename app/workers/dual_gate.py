@@ -31,6 +31,9 @@ class DualGateWorker(RunWorker):
         self.g1 = kw.get("g1")
         self.g2 = kw.get("g2")
         self.g3 = kw.get("g3")
+        self.g4 = kw.get("g4")
+        self.device_manager = kw.get("device_manager")
+        self._outputs_started = False
         self.daq = kw.get("daq")
         self.plot_choice = kw.get("plot_choice")
         self.amp_rate = kw.get("amp_rate", 1e7)
@@ -49,6 +52,8 @@ class DualGateWorker(RunWorker):
                 raise RuntimeError("Averages must be at least 1.")
             if self.p.vds_step <= 0 or self.p.vds_ramp <= 0:
                 raise RuntimeError("Vds point step and Vds ramp step must be greater than zero.")
+            if self.p.vds_source == "Keithley 2400" and self.g3 is None:
+                raise RuntimeError("Required session missing: G3 / Vds")
             if abs(self.p.vtg_set) > 1e-12 and self.g1 is None:
                 raise RuntimeError("G1 / Vtg is required because the fixed Vtg bias is nonzero.")
             if abs(self.p.vbg_set) > 1e-12 and self.g2 is None:
@@ -57,8 +62,18 @@ class DualGateWorker(RunWorker):
             for field in ("vds_start", "vds_stop", "vtg_set", "vbg_set"):
                 value = float(getattr(self.p, field))
                 if abs(value) > V_LIMIT:
-                    raise RuntimeError(f"{field} is {value:.3f} V, above the {V_LIMIT:.1f} V limit.")
+                    raise RuntimeError(f"{field} is {value:.9g} V, above the {V_LIMIT:.1f} V limit.")
 
+            step = self.p.vds_step if self.p.vds_stop >= self.p.vds_start else -abs(self.p.vds_step)
+            trajectory = [{"vtg": self.p.vtg_set, "vbg": self.p.vbg_set, "vds": v}
+                          for v in _frange_inc(self.p.vds_start, self.p.vds_stop, step)]
+            self.validate_source_trajectory(trajectory, gate_ramp=GATE_BIAS_RAMP_STEP_V,
+                                            vds_ramp=min(SAFE_RAMP_STEP_V, self.p.vds_ramp),
+                                            use_g3=self.p.vds_source == "Keithley 2400")
+            self.validate_bias2(self.p, trajectory)
+
+            if self.p.vds_source != "Keithley 2400" and not self.p.vds_source.startswith("NI DAQ"):
+                raise RuntimeError("Vds Sweep requires an enabled Bias1 source.")
             if not csv_path:
                 ts = new_run_id()
                 stem = compose_output_stem(
@@ -84,10 +99,11 @@ class DualGateWorker(RunWorker):
                     },
                 )
 
+            self._outputs_started = True
             self.status.emit("Ramping gates to set voltage...")
             if self.g1 is not None:
                 self.log.emit(
-                    f"Ramping G1/Vtg to {self.p.vtg_set:.3f} V "
+                    f"Ramping G1/Vtg to {self.p.vtg_set:.9g} V "
                     f"({GATE_BIAS_RAMP_STEP_V:g} V/step, {GATE_BIAS_RAMP_STEP_T:g} s/step)"
                 )
                 safe_ramp(
@@ -100,7 +116,7 @@ class DualGateWorker(RunWorker):
                 )
             if self.g2 is not None:
                 self.log.emit(
-                    f"Ramping G2/Vbg to {self.p.vbg_set:.3f} V "
+                    f"Ramping G2/Vbg to {self.p.vbg_set:.9g} V "
                     f"({GATE_BIAS_RAMP_STEP_V:g} V/step, {GATE_BIAS_RAMP_STEP_T:g} s/step)"
                 )
                 safe_ramp(
@@ -113,7 +129,10 @@ class DualGateWorker(RunWorker):
                 )
 
             self.status.emit("Ramping Vds to sweep start...")
-            self._safe_ramp_vds(self.p.vds_start, allow_stop=True)
+            if self.p.bias2_mode == "Follow":
+                self.move_pair(self.p.vds_start, step=SAFE_RAMP_STEP_V)
+            else:
+                self._safe_ramp_vds(self.p.vds_start, allow_stop=True)
             self.check_abort_pause()
 
             step = self.p.vds_step if self.p.vds_stop >= self.p.vds_start else -abs(self.p.vds_step)
@@ -132,33 +151,43 @@ class DualGateWorker(RunWorker):
                     self._run_vds_pass(f, w, backward_seq, "backward", len(forward_seq), grand_total)
             run_status = "finished"
             run_detail = csv_path
-            self.finished.emit(csv_path)
         except RunStopped as ex:
             run_status = "stopped"
             run_detail = f"{ex}. Partial data saved to: {csv_path}" if csv_path else str(ex)
-            self.stopped.emit(run_detail)
         except Exception as ex:
             run_status = "error"
             run_detail = str(ex)
-            self.error.emit(run_detail)
         finally:
             failures = []
             try:
-                if self.g1 is not None:
+                if self._outputs_started and self.g1 is not None:
                     safe_ramp(self.g1.set_voltage, getattr(self.g1, "voltage", None) or 0.0, 0.0, SAFE_RAMP_STEP_V, SAFE_RAMP_STEP_T)
             except Exception as ex:
                 failures.append(f"G1/Vtg zero failed: {ex}")
             try:
-                if self.g2 is not None:
+                if self._outputs_started and self.g2 is not None:
                     safe_ramp(self.g2.set_voltage, getattr(self.g2, "voltage", None) or 0.0, 0.0, SAFE_RAMP_STEP_V, SAFE_RAMP_STEP_T)
             except Exception as ex:
                 failures.append(f"G2/Vbg zero failed: {ex}")
             try:
-                self._safe_ramp_vds(0.0, allow_stop=False)
+                if self._outputs_started:
+                    self._safe_ramp_vds(0.0, allow_stop=False)
             except Exception as ex:
                 failures.append(f"Vds zero failed: {ex}")
+            try:
+                self.cleanup_bias2()
+            except Exception as ex:
+                failures.append(f"Bias2 zero failed: {ex}")
             self.emit_safe_state_report(failures)
-            update_run_metadata_status(self.p.output_metadata_path, run_status, run_detail, failures)
+            if failures:
+                run_status, run_detail = "error", "Output cleanup failed: " + "; ".join(failures)
+            try:
+                update_run_metadata_status(self.p.output_metadata_path, run_status, run_detail, failures)
+            except Exception as ex:
+                run_status, run_detail = "error", f"Run metadata save failed: {ex}"
+            if run_status == "finished": self.finished.emit(csv_path)
+            elif run_status == "stopped": self.stopped.emit(run_detail)
+            else: self.error.emit(run_detail)
 
     def _safe_ramp_vds(self, target: float, allow_stop: bool = False) -> None:
         if self.p.vds_source == "Keithley 2400":
@@ -185,13 +214,17 @@ class DualGateWorker(RunWorker):
         for i, vds in enumerate(vseq, start=1):
             self.check_abort_pause()
             self.status.emit(f"Point {idx_offset + i}/{grand_total}  [{direction}]")
-            if self.p.vds_source == "Keithley 2400":
+            if self.p.bias2_mode == "Follow":
+                self.move_pair(vds)
+            elif self.p.vds_source == "Keithley 2400":
                 if self.g3 is None:
                     raise RuntimeError("G3 / Vds source is not connected.")
                 self.g3.ramp_voltage(vds, self.p.vds_ramp)
             else:
                 self.daq.ramp_voltage(self.p.ao_channel, vds, self.p.vds_ramp)
 
+            if self.p.bias2_mode != "Follow":
+                self.apply_bias2(vds)
             time.sleep(max(0.0, self.p.delay))
 
             sample = self.acquire_currents(self.p.n_sample)
@@ -209,6 +242,8 @@ class DualGateWorker(RunWorker):
             self.point.emit(vds, y)
             self.point_data.emit({
                 **sample,
+                "Bias2": getattr(self, "_bias2_voltage", None),
+                "Ibias2_Keithley": getattr(self, "_bias2_current", None),
                 "x": vds,
                 "Ids_DC": ids_dc,
                 "Ids_X": ids_x,
@@ -223,13 +258,14 @@ class DualGateWorker(RunWorker):
             return None
         try:
             values = self.g3.acquire()
-            return values.get("current", self.g3.current)
+            return values.get("current", getattr(self.g3, "current", None))
         except Exception:
             return None
 
     def _plot_value(self, ids_dc, ids_x, ids_y, ids_keithley):
         if self.plot_choice in getattr(self, "_current_sample", {}):
-            return self._current_sample[self.plot_choice]
+            value = self._current_sample[self.plot_choice]
+            return value if value is not None else float("nan")
         if self.plot_choice == "Ids_X":
             return ids_x
         if self.plot_choice == "Ids_Y":

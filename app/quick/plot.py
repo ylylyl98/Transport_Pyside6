@@ -518,7 +518,7 @@ class PlotModel(QObject):
         self._title = str(snapshot.get('title', ''))
         self._channel = str(snapshot.get('plot_choice', self._channel))
         params = snapshot.get('params', {})
-        available = plot_channel_options(params.get('vds_source', ''), dual_enabled(snapshot.get('signal_chain'))) if params else DEFAULT_CHANNELS
+        available = plot_channel_options(params.get('vds_source', ''), snapshot.get('signal_chain') or {}) if params else DEFAULT_CHANNELS
         self._channels = list(snapshot.get('channels', available))
         if self._channel not in self._channels:
             self._channel = self._channels[0] if self._channels else 'Ids_DC'

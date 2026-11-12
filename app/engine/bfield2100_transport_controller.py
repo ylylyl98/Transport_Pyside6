@@ -21,7 +21,7 @@ from app.engine.transport_tasks import TaskLane
 from app.engine.transport_stability import TemperatureWindow
 from app.engine.stepped_transport import STEP_COLUMNS
 from app.run_output import build_planned_output
-from app.drag_drive import DUAL_COLUMNS, dual_enabled
+from app.drag_drive import acquisition_columns, dual_enabled, measurement_mode
 from app.signal_chain import signal_chain_metadata
 from utils.config import cfg
 
@@ -55,6 +55,7 @@ class BField2100TransportController(QtCore.QObject):
         self._active = self._cleanup_in_progress = False
         self._exclusive_acquired = False
         self._claimed = []
+        self._active_bias2_condition = None
         self.plan = self._transport_outputs = self._manifest = self._checkpoint = None
         self._sdk = self._stop_handle = None
         self._io_lane = self._storage_lane = None
@@ -80,6 +81,8 @@ class BField2100TransportController(QtCore.QObject):
         if self._active or self._cleanup_in_progress:
             return False
         try:
+            if getattr(self, "_active_bias2_condition", None) is not None:
+                raise RuntimeError("Previous Bias2 cleanup is incomplete; resolve the output before another run.")
             review = self._review or getattr(self.tab, "transport_review_valid", None)
             if not callable(review) or not review():
                 raise ValueError("Review the commissioned 2100 connection and limits before starting")
@@ -88,17 +91,23 @@ class BField2100TransportController(QtCore.QObject):
             self.plan = TransportSweepPlan.from_params(params)
             if getattr(self.magnet.state, "name", "") not in {"IDLE", "ARMED", "ACTIVE"}:
                 raise ValueError("Connect the 2100 and wait for pending operations")
-            if not self.magnet.acquire_exclusive(self._owner):
-                raise ValueError("2100 is busy or reserved")
-            self._exclusive_acquired = True
             calibration = verified_calibration
             if calibration is None:
-                calibration = (*self.tab.get_global_rates(), self.tab.get_signal_chain())
+                chain = self.tab.get_signal_chain()
+                capture = getattr(self.tab, "capture_run_signal_chain", None)
+                if chain is not None and callable(capture):
+                    chain = capture(chain)
+                elif chain is not None and measurement_mode(signal_chain_metadata(chain)) != "ordinary":
+                    raise ValueError("Lock-in calibration capture is required before transport")
+                calibration = (*self.tab.get_global_rates(), chain)
             amp, lockin, chain = calibration
             if any(not math.isfinite(float(v)) or float(v) <= 0 for v in (amp, lockin)):
                 raise ValueError("Invalid electrical signal-chain calibration")
             self._signal_chain = signal_chain_metadata(chain) if chain is not None else None
             self._calibration = (amp, 10. / self._signal_chain['drag_drive']['drag_sensitivity_v'] if dual_enabled(self._signal_chain) else lockin)
+            if not self.magnet.acquire_exclusive(self._owner):
+                raise ValueError("2100 is busy or reserved")
+            self._exclusive_acquired = True
             required = ["daq", "g1", "g2"]
             if any(c.vds_source == "Keithley 2400" for c in self.plan.conditions):
                 required.append("g3")
@@ -111,6 +120,7 @@ class BField2100TransportController(QtCore.QObject):
             if not success:
                 raise ValueError("Transport devices are busy: " + ", ".join(blocked))
             self._claimed = required
+            self._validate_biases(required, refresh=True)
             if hasattr(self.tab, "freeze_output_plan"):
                 outputs = self.tab.freeze_output_plan(params)
                 self.tab.validate_transport_output_ready(outputs)
@@ -259,7 +269,7 @@ class BField2100TransportController(QtCore.QObject):
         for i, (condition, path) in enumerate(zip(self.plan.conditions, self._transport_outputs.condition_csv_paths), 1):
             self._writers[i] = TransportCsvWriter(path, condition,
                 extra_columns=STEP_COLUMNS + ("Magnet_temperature_K", "VTI_temperature_K", "Magnet_backend")
-                + (DUAL_COLUMNS if dual_enabled(self._signal_chain) else ()))
+                + (*acquisition_columns(self._signal_chain), "Bias2", "Ibias2_Keithley"))
         self._save_checkpoint("running")
         self._begin_condition()
 
@@ -504,9 +514,11 @@ class BField2100TransportController(QtCore.QObject):
         params, validation, results = deepcopy(self.plan.params), dict(self.plan.validation), list(self._results)
         runtime = {"backend": "2100", "phase": self._measurement_phase,
                    "field_point_index": self._point_index + 1, "condition_index": self._condition_index + 1}
+        paths = (self._manifest, self._checkpoint)
+        csv_paths = tuple(self._transport_outputs.condition_csv_paths)
         def save():
-            for path in (self._manifest, self._checkpoint):
-                write_series_manifest(path, params=params, validation=validation, status=status, results=results, runtime=runtime)
+            for path in paths:
+                write_series_manifest(path, params=params, validation=validation, status=status, results=results, runtime=runtime, csv_paths=csv_paths)
         self._storage_lane.submit(save, self._storage_done)
 
     def _finalize_files(self):
@@ -516,6 +528,7 @@ class BField2100TransportController(QtCore.QObject):
         for path in (self._manifest, self._checkpoint):
             write_series_manifest(path, params=self.plan.params, validation=self.plan.validation,
                 status=status, results=self._results, cleanup_failures=self._cleanup_failures,
+                csv_paths=self._transport_outputs.condition_csv_paths,
                 runtime={"backend": "2100", "detail": self._cleanup_detail,
                          "sample_temperature_control": "retained", "field_stop": "acknowledged" if self._mutation_started else "not requested"})
 

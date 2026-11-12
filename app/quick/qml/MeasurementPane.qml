@@ -22,12 +22,39 @@ ColumnLayout {
     Layout.fillWidth: true
 
     Label {
-        objectName: "measurementCurrentReversalStatus"
-        visible: pane.measurement && (pane.measurement.mode === 4 || pane.measurement.mode === 5) && pane.magnet && pane.magnet.backend === "1000"
-        text: pane.magnet ? pane.magnet.currentReversalStatus + "\nChange in Instruments → Sample temperature while idle." : ""
+        objectName: "measurementSignalRole"
+        text: pane.measurement ? pane.measurement.signalSummary : ""
         wrapMode: Text.Wrap
         color: Theme.muted
         Layout.fillWidth: true
+        ToolTip.visible: roleHover.hovered
+        ToolTip.text: "Wiring role is shared across tabs and fixed during a run. Rewire manually before selecting Drag or Drive."
+        HoverHandler { id: roleHover }
+    }
+
+    Label {
+        objectName: "measurementSourceResolution"
+        text: pane.measurement ? pane.measurement.resolutionSummary : ""
+        visible: text.length > 0
+        wrapMode: Text.Wrap
+        color: Theme.muted
+        font.pointSize: Theme.captionPointSize
+        Layout.fillWidth: true
+        ToolTip.visible: resolutionHover.hovered
+        ToolTip.text: "Cached Keithley source range and minimum programmable increment, not display precision. Refresh source readback if unconfirmed."
+        HoverHandler { id: resolutionHover }
+    }
+
+    Label {
+        objectName: "measurementCurrentReversalStatus"
+        visible: pane.measurement && (pane.measurement.mode === 4 || pane.measurement.mode === 5) && pane.magnet && pane.magnet.backend === "1000"
+        text: pane.magnet ? pane.magnet.currentReversalStatus : ""
+        wrapMode: Text.Wrap
+        color: Theme.muted
+        Layout.fillWidth: true
+        ToolTip.visible: reversalHover.hovered
+        ToolTip.text: "Change in Instruments → Sample temperature while idle."
+        HoverHandler { id: reversalHover }
     }
 
     ActionButton {
@@ -58,7 +85,7 @@ ColumnLayout {
     }
     function isExpanded(section) {
         const key = sectionKey(section.title)
-        return expandedSections[key] === undefined ? !section.advanced : expandedSections[key]
+        return expandedSections[key] === undefined ? !section.advanced && !section.collapsedByDefault && section.title !== "File output" : expandedSections[key]
     }
     function toggleSection(section) {
         const next = Object.assign({}, expandedSections)
@@ -123,6 +150,7 @@ ColumnLayout {
             readonly property bool expanded: pane.isExpanded(modelData)
             readonly property bool fileOutput: modelData.title === "File output"
             readonly property bool rowScoped: (modelData.fields || []).some(field => Boolean(field.rowKey))
+            property bool descriptionExpanded: false
             Layout.fillWidth: true
             visible: section.fileOutput || !section.rowScoped || pane.measurement.mode !== 4 || Boolean(section.modelData.rowKey) || Boolean(pane.recipeDetails[pane.sectionKey("conditions")])
             spacing: 6
@@ -184,17 +212,34 @@ ColumnLayout {
                 }
                 onClicked: pane.toggleSection(section.modelData)
             }
+            Label {
+                objectName: "measurementCollapsedSummary_" + section.index
+                visible: !section.fileOutput && !section.expanded && Boolean(section.modelData.summary)
+                text: section.modelData.summary || ""
+                color: Theme.muted
+                font.pointSize: Theme.captionPointSize
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+            }
             ColumnLayout {
                 visible: !section.fileOutput && section.expanded
                 Layout.fillWidth: true
                 spacing: 6
                 Label {
-                    text: section.modelData.description || ""
+                    readonly property string fullText: section.modelData.description || ""
+                    text: fullText.length > 200 && !section.descriptionExpanded
+                          ? fullText.slice(0, Math.max(0, fullText.indexOf(". ") + 1) || 200) : fullText
                     visible: text.length > 0
                     Layout.fillWidth: true
                     wrapMode: Text.Wrap
                     color: Theme.muted
                     font.pointSize: Theme.captionPointSize
+                }
+                ActionToolButton {
+                    visible: (section.modelData.description || "").length > 200
+                    text: section.descriptionExpanded ? "Hide explanation" : "Show explanation"
+                    subtle: true
+                    onClicked: section.descriptionExpanded = !section.descriptionExpanded
                 }
                 Label {
                     text: section.modelData.error || ""

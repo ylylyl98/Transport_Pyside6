@@ -1172,7 +1172,7 @@ class BFieldTransportSweepTests(unittest.TestCase):
         class Manager:
             def __init__(self):
                 self.events = []
-                self.sessions = {name: type("Session", (), {"voltage": 0.0, "set_voltage": lambda self, value: setattr(self, "voltage", value)})() for name in ("g1", "g2", "g3")}
+                self.sessions = {name: type("Session", (), {"voltage": 0.0, "identity": "KEITHLEY INSTRUMENTS INC.,MODEL 2400,123,1", "cached_source_voltage_range_v": 20., "refresh_source_voltage_range": lambda self: self.cached_source_voltage_range_v, "set_voltage": lambda self, value: setattr(self, "voltage", value)})() for name in ("g1", "g2", "g3")}
             def mark_in_use(self, names): self.events.append(("mark", names)); return True, []
             def release(self, names): self.events.append(("release", names))
             def get_session(self, name): return self.sessions.get(name)
@@ -1206,11 +1206,23 @@ class BFieldTransportSweepTests(unittest.TestCase):
             "evaluate": lambda self, _snapshot: type("Decision", (), {"magnet_permission": True, "reason": "safe"})(),
         })()
         controller = BFieldTransportController(magnet, tab, manager, thermal_safety=thermal)
+        manager.sessions["g1"].cached_source_voltage_range_v = 3.0
+        self.assertFalse(controller.start())
+        self.assertFalse(any(isinstance(event, tuple) and event[0] in ("configure", "move", "sweep") for event in magnet.events))
+        self.assertNotIn("pause", magnet.events)
+        self.assertEqual(manager.sessions["g1"].voltage, 0.)
+        manager.sessions["g1"].cached_source_voltage_range_v = 20.0
+        magnet.events.clear()
         self.assertTrue(controller.start())
         self.assertLess(tab.plot.ax.get_xlim()[0], 0)
         self.assertGreater(tab.plot.ax.get_xlim()[1], 1)
         self.assertEqual(list(tab.plot.ax.lines[0].get_xdata()), [])
         self.assertEqual(controller._manifest, tab.frozen_paths.manifest_path)
+        for path in (controller._manifest, controller._checkpoint):
+            with open(path, encoding="utf-8") as handle:
+                saved = json.load(handle)
+            self.assertEqual(saved["measurement"], "bfield_transport")
+            self.assertEqual(saved["csv_paths"], list(tab.frozen_paths.condition_csv_paths))
         self.assertEqual(magnet.events[1], ("polling", True))
         self.assertEqual(tuple(writer.path for writer in controller._writers.values()), tab.frozen_paths.condition_csv_paths)
         self.assertIn(("configure", .1, 8.0), magnet.events)
@@ -1222,6 +1234,10 @@ class BFieldTransportSweepTests(unittest.TestCase):
             self.app.processEvents()
             time.sleep(0.005)
         self.assertIn(("release", "bfield-transport"), magnet.events)
+        for path in (controller._manifest, controller._checkpoint):
+            with open(path, encoding="utf-8") as handle:
+                saved = json.load(handle)
+            self.assertEqual(saved["csv_paths"], list(tab.frozen_paths.condition_csv_paths))
         tab.temporary.cleanup()
 
 

@@ -37,8 +37,8 @@ ColumnLayout {
         {title: "Signal chain", label: "Signal chain", section: 6, group: 0},
         {title: "Manual controls", label: "Manual", section: 0, group: 1},
         {title: "Magnet & temperature", label: "Magnet & temperature", section: 2, group: 1},
-        {title: "Drag / primary lock-in", label: "Drag / primary lock-in", section: 3, group: 1},
-        {title: "Drive lock-in", label: "Drive lock-in", section: 4, group: 1},
+        {title: "Primary lock-in", label: "Primary lock-in · Drag or Drive", section: 3, group: 1},
+        {title: "Second lock-in", label: "Second lock-in · Dual Drive", section: 4, group: 1},
         {title: "Runtime settings", label: "Runtime settings", section: 7, group: 2}
     ]
     spacing: 10

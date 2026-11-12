@@ -4,6 +4,7 @@ import math
 from collections import deque
 from functools import lru_cache
 
+from app.bias_control import bias2_target
 from app.constants import (
     GATE_BIAS_RAMP_STEP_T, GATE_BIAS_RAMP_STEP_V,
     SAFE_RAMP_STEP_T, SAFE_RAMP_STEP_V,
@@ -30,7 +31,8 @@ def historical_cosweep_match(params: CoParams, connections: Connections | None,
                              device_id: str) -> bool:
     """Limit this local reference to the observed sample, route and instruments."""
     return bool(
-        connections is not None and device_id == "YZ324"
+        getattr(params, "bias2_mode", "Disabled") == "Disabled"
+        and connections is not None and device_id == "YZ324"
         and params.coordinate_mode == "Derived"
         and params.axis_fast == "Vds" and params.axis_slow == "Doping"
         and params.vds_source == "Keithley 2400"
@@ -46,6 +48,8 @@ def historical_cosweep_match(params: CoParams, connections: Connections | None,
 def cosweep_calibration_description(params: CoParams, connections: Connections | None,
                                     device_id: str) -> str:
     if not historical_cosweep_match(params, connections, device_id):
+        if getattr(params, "bias2_mode", "Disabled") != "Disabled":
+            return "Dual-bias model estimate; not calibrated on hardware. Live ETA adapts during acquisition."
         return "Model estimate; no matching historical calibration."
     count = params.n_sample
     if count in (1, 3):
@@ -120,15 +124,29 @@ def estimate_cosweep_seconds(
         raise ValueError("Cannot estimate an empty trajectory.")
     current = {"Vtg": 0.0, "Vbg": 0.0, "Vds": 0.0}
     daq_bias = params.vds_source.startswith("NI DAQ")
+    bias2_mode = getattr(params, "bias2_mode", "Disabled")
+    bias2_current = 0.0
     derived = params.coordinate_mode == "Derived"
     axes = {params.axis_fast, params.axis_slow}
     elapsed = len(trajectory) * (max(0.0, params.delay) + params.n_sample * sample_seconds + 0.01)
-    if not daq_bias:
+    if params.vds_source == "Keithley 2400":
+        elapsed += len(trajectory) * 0.1
+    if bias2_mode != "Disabled":
         elapsed += len(trajectory) * 0.1
 
     def ramp(axis: str, target: float, *, safe: bool = False, initial: bool = False) -> float:
+        nonlocal bias2_current
+        if axis == "Vds" and params.vds_source == "None":
+            return 0.0
         distance = abs(float(target) - current[axis])
         current[axis] = float(target)
+        if axis == "Vds" and bias2_mode == "Follow" and not safe:
+            next2 = bias2_target(params, target)
+            step1 = min(params.vds_ramp, DaqCard.MAX_RAMP_STEP_V) if daq_bias else params.vds_ramp
+            count1 = math.ceil(distance / step1 - 1e-9)
+            count2 = math.ceil(abs(next2 - bias2_current) / params.bias2_ramp - 1e-9)
+            bias2_current = next2
+            return 2 * io_seconds + max(count1, count2, 1) * (SAFE_RAMP_STEP_T + 2 * io_seconds)
         is_daq = axis == "Vds" and daq_bias
         if safe:
             step, delay = SAFE_RAMP_STEP_V, SAFE_RAMP_STEP_T
@@ -153,6 +171,10 @@ def estimate_cosweep_seconds(
                 elapsed += ramp(axis, target, initial=True)
     if "Vds" not in axes:
         elapsed += ramp("Vds", params.vds_start)
+    if bias2_mode == "Fixed":
+        bias2_current = float(params.bias2_voltage)
+        steps2 = math.ceil(abs(bias2_current) / params.bias2_ramp - 1e-9)
+        elapsed += io_seconds + max(0, steps2) * (SAFE_RAMP_STEP_T + io_seconds)
     previous_pass = None
     for point in trajectory:
         new_pass = point["pass_index"] != previous_pass
@@ -167,6 +189,8 @@ def estimate_cosweep_seconds(
         previous_pass = point["pass_index"]
     for axis in current:
         elapsed += ramp(axis, 0.0, safe=True)
+    if bias2_mode != "Disabled":
+        elapsed += math.ceil(abs(bias2_current) / SAFE_RAMP_STEP_V - 1e-9) * (SAFE_RAMP_STEP_T + io_seconds) + io_seconds
     if historical_cosweep_match(params, connections, device_id):
         one = _historical_extra_seconds_per_point(1)
         three = _historical_extra_seconds_per_point(3)
@@ -185,6 +209,9 @@ def estimate_cosweep_cleanup_seconds(params: CoParams, last_point: dict) -> floa
         step = min(SAFE_RAMP_STEP_V, DaqCard.MAX_RAMP_STEP_V) if is_daq else SAFE_RAMP_STEP_V
         steps = max(0, math.ceil(abs(last_point[key]) / step - 1e-9))
         elapsed += steps * (SAFE_RAMP_STEP_T + 0.02) + (0.01 if is_daq else 0)
+    if getattr(params, "bias2_mode", "Disabled") != "Disabled":
+        target2 = bias2_target(params, last_point["vds"])
+        elapsed += math.ceil(abs(target2) / SAFE_RAMP_STEP_V - 1e-9) * (SAFE_RAMP_STEP_T + 0.02) + 0.02
     return elapsed
 
 

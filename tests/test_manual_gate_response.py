@@ -4,13 +4,58 @@ from unittest.mock import patch
 if os.environ.get("TRANSPORT_OFFLINE_VERIFICATION") != "1":
     raise unittest.SkipTest("Requires offline verification wrapper")
 from PySide6 import QtCore, QtTest, QtWidgets
-from app.device_manager import DeviceManager, GateStepWorker
+from app.device_manager import DeviceManager, GateStepWorker, ManualControlWorker
 from app.models import Connections
 from app.ui.dock import ConnDock
 from test_keithley_protection import ManualGateSession, ConnectedKeithleyStub
 
 
 class GateStepTests(unittest.TestCase):
+    def test_invalid_initial_manual_target_never_writes(self):
+        session = ManualGateSession(0.)
+        worker = ManualControlWorker("g1", session, .0001)
+        worker.run()
+        self.assertFalse(worker.success)
+        self.assertIn("not representable", worker.message)
+        self.assertEqual(session.writes, [])
+
+    def test_unrepresentable_dynamic_target_aborts_without_writing_it(self):
+        for cls in (ManualControlWorker, GateStepWorker):
+            with self.subTest(worker=cls.__name__):
+                session = ManualGateSession(0.)
+                worker = (cls("g1", session, .1) if cls is ManualControlWorker
+                          else cls("g1", session, .1, 20.))
+                session.on_write = lambda value: worker.update_target(.1001)
+                worker.run()
+                self.assertFalse(worker.success)
+                self.assertIn("not representable", worker.message)
+                self.assertEqual(session.writes, [.1])
+
+    def test_offgrid_start_zero_uses_bounded_grid_commands(self):
+        session = ManualGateSession(.0007)
+        worker = ManualControlWorker("g1", session, 0.)
+        worker.run()
+        self.assertTrue(worker.success, worker.message)
+        self.assertEqual(session.writes, [.0005, 0.])
+
+    def test_tiny_relative_steps_are_rejected_without_rounding_to_zero(self):
+        for delta in (1e-10, 1e-12):
+            session = ManualGateSession(0.)
+            worker = GateStepWorker("g1", session, delta, 20.)
+            worker.run()
+            self.assertFalse(worker.success)
+            self.assertIn("not representable", worker.message)
+            self.assertEqual(session.writes, [])
+
+        session = ManualGateSession(0.)
+        worker = GateStepWorker("g1", session, .1, 20.)
+        session.on_write = lambda value: worker.add_step(1e-12)
+        worker.run()
+        self.assertFalse(worker.success)
+        self.assertIn("not representable", worker.message)
+        self.assertEqual(session.writes, [.1])
+        self.assertEqual(worker.target, .1)
+
     def test_step_starts_at_live_setpoint(self):
         session = ManualGateSession(2.0)
         worker = GateStepWorker("g1", session, 0.1, 20.0)

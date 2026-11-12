@@ -507,20 +507,27 @@ class MainWindow(QtWidgets.QMainWindow):
         self.connections.gate1 = c.gate1
         self.connections.gate2 = c.gate2
         self.connections.gate3 = c.gate3
+        self.connections.gate4 = c.gate4
         self.connections.gate1_mode = c.gate1_mode
         self.connections.gate2_mode = c.gate2_mode
         self.connections.gate3_mode = c.gate3_mode
+        self.connections.gate4_mode = c.gate4_mode
         self.connections.gate1_max_voltage_v = c.gate1_max_voltage_v
         self.connections.gate2_max_voltage_v = c.gate2_max_voltage_v
         self.connections.gate3_max_voltage_v = c.gate3_max_voltage_v
+        self.connections.gate4_max_voltage_v = c.gate4_max_voltage_v
         self.connections.gate1_current_compliance_a = c.gate1_current_compliance_a
         self.connections.gate2_current_compliance_a = c.gate2_current_compliance_a
         self.connections.gate3_current_compliance_a = c.gate3_current_compliance_a
+        self.connections.gate4_current_compliance_a = c.gate4_current_compliance_a
         self.connections.daq_dev = c.daq_dev
         self.connections.mono = c.mono
         self.connections.lockin = c.lockin
         self.connections.drive_lockin = c.drive_lockin
         self.connections.drag_drive_enabled = c.drag_drive_enabled
+        config = self.conn_dock.drag_drive_settings.configuration()
+        self.connections.signal_chain_mode = config["mode"]
+        self.connections.dc_enabled = config["dc_enabled"]
         self.device_manager.sync_addresses()
         if getattr(self, "tab_cosweep", None) is not None:
             self.tab_cosweep._update_sweep_summary()
@@ -559,6 +566,7 @@ class MainWindow(QtWidgets.QMainWindow):
         lockin_connected = self.device_manager.is_connected("lockin")
         return SignalChainSnapshot(
             drag_drive=values.get("drag_drive"),
+            excitation_source=(values.get("drag_drive") or {}).get("excitation_source", "primary"),
             ac_contact=str(values.get("ac_contact", "")),
             ac_voltage_ratio=values.get("ac_voltage_ratio"),
             lockin_settings=self.lockin_panel.settings_snapshot(),
@@ -603,8 +611,11 @@ class MainWindow(QtWidgets.QMainWindow):
         mode_changed = False
         controls = getattr(getattr(self, 'conn_dock', None), 'drag_drive_settings', None)
         if controls is not None:
-            enabled = controls.configuration()['enabled']
-            mode_changed = self.connections.drag_drive_enabled != enabled
+            config = controls.configuration()
+            enabled = config['enabled']
+            mode_changed = getattr(self.connections, 'signal_chain_mode', 'dual' if self.connections.drag_drive_enabled else 'ordinary') != config['mode']
+            self.connections.signal_chain_mode = config['mode']
+            self.connections.dc_enabled = config['dc_enabled']
             if mode_changed:
                 self._save_plot_mode_settings()
             self.connections.drag_drive_enabled = enabled

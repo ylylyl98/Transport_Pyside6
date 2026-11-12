@@ -31,6 +31,19 @@ class HistoryChoiceTests(unittest.TestCase):
     def view(**changes):
         return {**dict(x='Vtg', map_y='Vbg', signal='Ids_DC', auto_axes=False, primary_path=''), **changes}
 
+    def test_single_role_defaults_and_explicit_choice(self):
+        for mode, role in (("single_drive", "I_drive_X"), ("single_drag", "I_drag_X")):
+            with self.subTest(mode=mode):
+                metadata = {"signal_chain": {"drag_drive": {"mode": mode}}}
+                record = self.record(mode + '.csv', 'Vtg,Ids_DC,I_drag_X,I_drive_X', ['0,1,2,3', '1,2,3,4'], metadata=metadata)
+                result = resolve_choices([record], self.view(), 'gate_scan', self.cache)
+                self.assertEqual(result['view']['signal'], role)
+                self.assertFalse(any('Ids_DC is unavailable' in warning for warning in result['warnings']))
+                explicit = resolve_choices([record], self.view(signal='Ids_DC', signal_explicit=True), 'gate_scan', self.cache)
+                self.assertEqual(explicit['view']['signal'], 'Ids_DC')
+                invalid = resolve_choices([record], self.view(signal='raw_Y', signal_explicit=True), 'gate_scan', self.cache)
+                self.assertEqual(invalid['view']['signal'], role)
+
     def test_finite_overlap_aliases_and_derived_ratios(self):
         record = self.record('alias.csv', 'Vtg,Efield,Keithley_current,I_drag_X,I_drag_Y,I_drive_X,I_drive_Y,Ids_DC',
             ['0,0,1,2,3,1,1,nan', '1,1,2,4,3,0,0,nan'])

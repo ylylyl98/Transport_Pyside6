@@ -127,6 +127,9 @@ class ImmediateLane:
 
 class Source:
     voltage = 0.
+    identity = "KEITHLEY INSTRUMENTS INC.,MODEL 2400,123,1"
+    cached_source_voltage_range_v = 20.
+    def refresh_source_voltage_range(self): return self.cached_source_voltage_range_v
     def set_voltage(self, value): self.voltage = value
     def acquire(self): return {'current': .1}
 
@@ -183,8 +186,37 @@ class BField2100Tests(unittest.TestCase):
             self.engine._tick()
         self.fail(f'Timed out in {self.engine._measurement_phase}: {self.errors}')
 
+    def test_missing_or_invalid_lockin_capture_fails_before_any_mutation(self):
+        chain = {"drag_drive": {"mode": "single_drive"}}
+        self.engine.tab.get_signal_chain = lambda: chain
+        self.assertFalse(self.engine.start())
+        self.assertEqual(self.sdk.calls, [])
+        self.assertEqual(self.manager.claimed, [])
+        self.assertEqual(self.sdk.exclusive_owner, "")
+        def reject(_chain):
+            raise ValueError("invalid lock-in calibration")
+        self.engine.tab.capture_run_signal_chain = reject
+        self.assertFalse(self.engine.start())
+        self.assertEqual(self.sdk.calls, [])
+        self.assertEqual(self.manager.claimed, [])
+        self.assertEqual(self.sdk.exclusive_owner, "")
+
+    def test_unknown_fresh_range_rejected_before_field_or_voltage_output(self):
+        self.manager.sessions["g1"].cached_source_voltage_range_v = 3.
+        self.assertFalse(self.engine.start())
+        self.assertTrue(self.errors)
+        self.assertEqual(self.sdk.calls, [('release',)])
+        self.assertEqual(self.manager.claimed, [])
+        self.assertTrue(all(self.manager.sessions[name].voltage == 0. for name in ("g1", "g2", "g3")))
+
     def test_active_temperature_and_each_target_are_verified_and_saved(self):
         self.assertTrue(self.engine.start())
+        self.run_until(lambda: Path(self.engine._checkpoint).exists())
+        paths = self.engine._transport_outputs
+        for path in (paths.manifest_path, paths.checkpoint_path):
+            saved = json.loads(Path(path).read_text(encoding="utf-8"))
+            self.assertEqual(saved["measurement"], "bfield_transport")
+            self.assertEqual(saved["csv_paths"], list(paths.condition_csv_paths))
         self.run_until(lambda: not self.engine.active)
         self.assertEqual(self.errors, [])
         self.assertEqual([row['B_target_T'] for row in self.records], [0., .05, .1])
@@ -201,7 +233,27 @@ class BField2100Tests(unittest.TestCase):
         self.assertTrue(all(row['Magnet_backend'] == '2100' and row['Sweep_rate_A_per_s'] == '' for row in rows))
         metadata = json.loads(Path(paths.manifest_path).read_text(encoding='utf-8'))
         self.assertEqual(metadata['status'], 'finished')
+        self.assertEqual(metadata['csv_paths'], list(paths.condition_csv_paths))
+        checkpoint = json.loads(Path(paths.checkpoint_path).read_text(encoding='utf-8'))
+        self.assertEqual(checkpoint['csv_paths'], list(paths.condition_csv_paths))
         self.assertNotIn('rate_t_per_min', metadata['params'])
+
+    def test_queued_checkpoint_freezes_csv_path_mapping(self):
+        self.assertTrue(self.engine.start())
+        self.run_until(lambda: Path(self.engine._checkpoint).exists())
+        original_outputs = self.engine._transport_outputs
+        original_lane = self.engine._storage_lane
+        pending = []
+        self.engine._storage_lane = NS(submit=lambda work, done: pending.append(work))
+        self.engine._save_checkpoint("running")
+        self.engine._transport_outputs = NS(condition_csv_paths=("other-run.csv",))
+        pending[0]()
+        saved = json.loads(Path(original_outputs.checkpoint_path).read_text(encoding="utf-8"))
+        self.assertEqual(saved["csv_paths"], list(original_outputs.condition_csv_paths))
+        self.engine._transport_outputs = original_outputs
+        self.engine._storage_lane = original_lane
+        self.engine.stop()
+        self.run_until(lambda: not self.engine.active)
 
     def test_timeout_hold_keeps_monitoring_and_manual_continue_retries_same_point(self):
         self.sdk.sample = 4.2

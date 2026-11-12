@@ -67,6 +67,7 @@ class RecipeModel(QAbstractListModel):
         return None
 
     def cells(self, i):
+        from app.quick.parameters import bias2_keys
         row = self.rows[i]
         values = self.service._values[self.mode]
         overrides = {}
@@ -116,6 +117,8 @@ class RecipeModel(QAbstractListModel):
                 for part in ("start", "stop"):
                     overrides[f"derived_{part}"] = {"label": f"{axis} {part} (V)", "coordinate": axis}
                 overrides["derived_fixed"] = {"label": f"Hold {held} (V)", "coordinate": held}
+        if self.key != "regions":
+            keys += [key for key in bias2_keys(row) if key in row]
         result = []
         for key in keys:
             item = descriptor(key, row[key], self.mode)
@@ -172,7 +175,7 @@ class RecipeModel(QAbstractListModel):
             return False
         changes_shape = self.mode == 4 and (key in {"mode", "vds_source"} or
             (key.startswith("raw_") and key.endswith("_active")))
-        changes_shape = changes_shape or (self.mode == 5 and key == "vds_source")
+        changes_shape = changes_shape or (self.mode == 5 and key == "vds_source") or key == "bias2_mode"
         if changes_shape and value != cell["value"] and not self.flush():
             # Native checkboxes/combos have already changed their visual state.
             # Notify even when the accepted descriptor itself is unchanged.
