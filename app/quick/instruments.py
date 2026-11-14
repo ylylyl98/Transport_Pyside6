@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import math
 
-from PySide6.QtCore import QObject, Property, Signal, Slot
+from PySide6.QtCore import QObject, Property, Signal, Slot, QTimer
 
 from app.device_manager import DeviceManager
 from app.engine.transport_tasks import TaskLane
@@ -42,11 +42,15 @@ class InstrumentService(QObject):
         except (ValueError, TypeError, OverflowError):
             self._manual_step = .1
         self._scan_busy = False
+        self._connection_operation = None
         self._closing = False
         self._daq_readbacks = {}
         self._lockin_calibration = {}
         self._load()
         self.manager = manager or DeviceManager(self.connections)
+        self._connection_state_timer = QTimer(self)
+        self._connection_state_timer.setSingleShot(True)
+        self._connection_state_timer.timeout.connect(self._refresh_connection_state)
         self._scan_lane = TaskLane("quick-resource-scan", self)
         self.manager.status_changed.connect(self._status)
         self.manager.resources_changed.connect(lambda *_: self.changed.emit())
@@ -95,11 +99,37 @@ class InstrumentService(QObject):
 
     @Property(bool, notify=changed)
     def busy(self):
-        return bool(self._closing or self._scan_busy or self.manager.is_busy() or self.manager.current_in_use() or self._active())
+        return bool(self._closing or self._scan_busy or self._connection_operation or self.manager.is_busy() or self.manager.current_in_use() or self._active())
 
     @Property(str, notify=changed)
     def message(self):
         return self._message
+
+    def _configured_devices(self):
+        return {("lockin_drive" if name == "drive_lockin" else name)
+                for attr, name in ADDRESS_KEYS.items()
+                if str(getattr(self.connections, attr) or "").strip()
+                and (attr != "drive_lockin" or self.connections.drag_drive_enabled)}
+
+    @Property('QVariantMap', notify=changed)
+    def connectionActions(self):
+        configured = self._configured_devices()
+        sessions = {name for name, session in self.manager.sessions.items() if session is not None}
+        reconnect = bool(sessions - configured) or any(self.manager.needs_reconnect(name) for name in configured)
+        connected = sum(self.manager.is_connected(name) and not self.manager.needs_reconnect(name)
+                        for name in configured)
+        complete = bool(configured) and connected == len(configured) and not reconnect
+        available = not self.offline and not self.busy and self._connection_operation is None
+        label = ("Apply connection changes" if reconnect else "Connected" if complete else
+                 "Connect remaining" if connected else "Connect all")
+        if self._connection_operation == "connect":
+            label = "Connecting…"
+        status = f"{connected}/{len(configured)} configured instruments connected" if configured else "No instruments configured"
+        if reconnect:
+            status += " · connection changes pending"
+        return dict(connectText=label, connectEnabled=bool(available and (reconnect or connected < len(configured))),
+                    disconnectText="Disconnecting…" if self._connection_operation == "disconnect" else "Disconnect all",
+                    disconnectEnabled=bool(available and sessions), status=status)
 
     @Property(float, notify=changed)
     def manualStep(self):
@@ -160,11 +190,17 @@ class InstrumentService(QObject):
         for name in self.manager.sessions:
             rb = self._readbacks.get(name, {})
             gate = name in ("g1", "g2", "g3", "g4")
+            configured = name in self._configured_devices()
+            connection_status = ("Reconnect required" if self.manager.needs_reconnect(name) else
+                                 "Connected" if self.manager.is_connected(name) else
+                                 "Connection error" if self.manager.state(name) == "err" else
+                                 "Disconnected" if configured else "Not configured")
             target_available = gate and not self._closing and not self._active() and self.manager.can_accept_gate_target(name)
             protection = gate and self.manager.protection_is_applied(name)
             result.append(dict(name=name, label=name.upper(), state=self.manager.state(name),
                                detail=self.manager.detail(name), connected=self.manager.is_connected(name),
                                inUse=self.manager.is_in_use(name), reconnect=self.manager.needs_reconnect(name),
+                               connectionStatus=connection_status,
                                canRamp=bool(target_available and protection), canZero=bool(target_available),
                                canRead=bool(gate and not self.busy and self.manager.is_connected(name)),
                                protectionApplied=bool(protection), mode=str(rb.get("mode", "")),
@@ -283,16 +319,31 @@ class InstrumentService(QObject):
 
     @Slot(str, 'QVariantMap')
     def command(self, name, arguments):
+        connection_started = False
         try:
             if self.offline:
                 raise RuntimeError("Offline preview: hardware commands are disabled")
-            if self._closing or self._active() or self._scan_busy or self.manager.current_in_use():
+            if self._closing or self._active() or self._scan_busy or self._connection_operation or self.manager.current_in_use():
                 raise RuntimeError("Wait for measurement, manual operations and cleanup before using instrument commands")
             args = dict(arguments)
             if name == "connect":
-                self.manager.connect_all()
+                if not self.connectionActions["connectEnabled"]:
+                    return
+                connection_started = True
+                self._connection_operation = "connect"
+                self.changed.emit()
+                if not self.manager.connect_all():
+                    self._connection_operation = None
+                    self.changed.emit()
             elif name == "disconnect":
-                self.manager.disconnect_all()
+                if not self.connectionActions["disconnectEnabled"]:
+                    return
+                connection_started = True
+                self._connection_operation = "disconnect"
+                self.changed.emit()
+                if not self.manager.disconnect_all():
+                    self._connection_operation = None
+                    self.changed.emit()
             elif name == "scan":
                 if self.busy:
                     raise RuntimeError("Wait for instrument operations before scanning")
@@ -328,6 +379,8 @@ class InstrumentService(QObject):
                 raise ValueError("Unknown instrument command")
             self.changed.emit()
         except Exception as exc:
+            if connection_started:
+                self._connection_operation = None
             self._report(str(exc))
 
     def _scan_done(self, data, error):
@@ -352,7 +405,20 @@ class InstrumentService(QObject):
             self.signalFieldsChanged.emit()
 
     def _operation(self, _busy, message):
+        if not _busy and self._connection_operation:
+            self._refresh_connection_state()
         self._report(message)
+
+    def _refresh_connection_state(self):
+        if self._closing:
+            return
+        # Worker completion notifications can precede the GUI handler that
+        # releases its busy state. Observe local state only, never the device.
+        if self.manager.is_busy():
+            self._connection_state_timer.start(25)
+            return
+        self._connection_operation = None
+        self.changed.emit()
 
     def _read(self, currents, message):
         self._readbacks.update({name: dict(value) if isinstance(value, dict) else {} for name, value in currents.items()})
@@ -396,5 +462,6 @@ class InstrumentService(QObject):
 
     def close(self):
         self._closing = True
+        self._connection_state_timer.stop()
         self.changed.emit()
         self._scan_lane.close()

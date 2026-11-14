@@ -1,14 +1,15 @@
-"""Magnet/temperature presentation with session-bound commissioning review."""
+"""Magnet/temperature presentation with setup-bound commissioning review."""
 from __future__ import annotations
 
 from dataclasses import asdict, is_dataclass
 from copy import deepcopy
 import json
+import hashlib
 import math
 import time
 import uuid
 
-from PySide6.QtCore import QObject, Property, Signal, Slot, QTimer
+from PySide6.QtCore import QObject, Property, Signal, Slot, QTimer, QSettings
 
 from controllers.magnet_controller import MagnetController
 from controllers.attodry2100_controller import AttoDRY2100Controller
@@ -19,6 +20,7 @@ from app.sample_heater_ranges import validate_heater_ranges, select_heater_range
 from app.sample_heating_interlock import SampleHeatingInterlock
 from app.lakeshore_input_state import current_reversal_summary, input_state_fresh, input_change_magnet_block
 from utils.config import cfg
+from app.settings import get_app_settings
 
 
 class MagnetService(QObject):
@@ -29,12 +31,13 @@ class MagnetService(QObject):
     messageRaised = Signal(str)
     confirmationRequested = Signal(str, str, str)
 
-    def __init__(self, parent=None, *, offline=False, magnet1000=None, magnet2100=None, lakeshore=None):
+    def __init__(self, parent=None, *, offline=False, magnet1000=None, magnet2100=None, lakeshore=None, settings=None):
         super().__init__(parent)
         self.offline = offline
         cfg.setup.validate()
         self._setup = deepcopy(cfg.setup)
         self._backend = self._setup.magnet_backend
+        self._settings = settings if settings is not None else get_app_settings()
         self.heating_interlock = (getattr(magnet1000, "heating_interlock", None)
                                   or getattr(lakeshore, "heating_interlock", None)
                                   or SampleHeatingInterlock())
@@ -46,10 +49,18 @@ class MagnetService(QObject):
             raise ValueError("APS100 and LS335 controllers must share their heating interlock")
         self.thermal_safety = ThermalSafetyEvaluator(cfg.lakeshore335)
         self._review = None
+        self._review_invalidated = False
+        if not self.offline and self._backend != "none":
+            saved = self._settings.value(self._review_key(), "")
+            if saved and saved == self._review_digest():
+                self._review = self._fingerprint()
+            elif saved:
+                self._settings.remove(self._review_key())
         self._connected = {"1000": False, "2100": False, "temperature": False}
         self._pending = set()
         self._snapshots = {}
         self._message = ("Temperature is controlled externally; no magnet configured" if self._backend == "none"
+                         else "Commissioning review saved for this setup" if self._review is not None
                          else "Review configured limits before connecting")
         self._log = []
         self._active = lambda: False
@@ -115,8 +126,20 @@ class MagnetService(QObject):
                        else [asdict(cfg.attodry2100)] if self._backend == "2100" else [])
         return json.dumps(configs, sort_keys=True, default=str)
 
+    def _review_key(self):
+        return f"commissioning/review_v1/{self._backend}"
+
+    def _review_digest(self):
+        return hashlib.sha256(self._fingerprint().encode("utf-8")).hexdigest()
+
     def review_valid(self):
-        return self._review is not None and self._review == self._fingerprint()
+        valid = (self._review is not None and not self._review_invalidated
+                 and self._review == self._fingerprint())
+        if self._review is not None and not valid:
+            self._review_invalidated = True
+            if not self.offline:
+                self._settings.remove(self._review_key())
+        return valid
 
     @Property(str, notify=changed)
     def backend(self):
@@ -262,6 +285,19 @@ class MagnetService(QObject):
     def connections(self):
         return dict(self._connected)
 
+    @Property('QVariantMap', notify=changed)
+    def connectionActions(self):
+        def action(name, available):
+            connected = self._connected.get(name, False)
+            state = ("connecting" if "connect" + name in self._pending else
+                     "disconnecting" if "disconnect" + name in self._pending else
+                     "connected" if connected else "disconnected")
+            allowed = available and cfg.setup == self._setup and not self.offline and not self.busy
+            return dict(state=state, connectEnabled=bool(allowed and not connected and self.review_valid()),
+                        disconnectEnabled=bool(allowed and connected))
+        return dict(magnet=action(self._backend, self._backend != "none"),
+                    temperature=action("temperature", self._backend == "1000" and self.lakeshore335 is not None))
+
     @Property('QVariantList', notify=fieldsChanged)
     def fields(self):
         if self._backend == "none":
@@ -350,6 +386,8 @@ class MagnetService(QObject):
             cfg.lakeshore335.sample_auto_heater_ranges = bands
             cfg.save()
             self._review = None
+            if not self.offline:
+                self._settings.remove(self._review_key())
             self._report("Heater bands saved. Review the changed configuration before connecting or moving.")
         except Exception as exc:
             cfg.lakeshore335.sample_auto_heater_ranges = previous
@@ -378,6 +416,15 @@ class MagnetService(QObject):
     @Slot(bool)
     def acknowledgeReview(self, accepted):
         self._review = self._fingerprint() if accepted else None
+        self._review_invalidated = False
+        if not self.offline and self._backend != "none":
+            if accepted:
+                self._settings.setValue(self._review_key(), self._review_digest())
+            else:
+                self._settings.remove(self._review_key())
+            self._settings.sync()
+            if self._settings.status() != QSettings.Status.NoError:
+                self._report("Could not save commissioning review locally; review may be required again")
         self.changed.emit()
 
     @Slot(str, 'QVariant')
@@ -449,7 +496,7 @@ class MagnetService(QObject):
                         except Exception as exc:
                             self._report(f"{backend} connection failed: {exc}")
             elif action == "disconnect":
-                self.magnet1000.disconnect_instrument() if self._backend == "1000" else self.magnet2100.disconnect_async()
+                self._submit("disconnect" + self._backend, self.magnet1000.disconnect_instrument if self._backend == "1000" else self.magnet2100.disconnect_async)
             elif action == "refresh":
                 self.magnet1000.refresh_snapshot() if self._backend == "1000" else self.magnet2100.read_snapshot_async()
                 if self._backend == "1000" and self._connected["temperature"]:
@@ -460,11 +507,13 @@ class MagnetService(QObject):
             elif action == "connect_temperature":
                 if self._backend != "1000":
                     raise RuntimeError("LS335 belongs to the attoDRY1000 system")
-                self._submit("connecttemperature", self.lakeshore335.connect_instrument, use_mock=False)
+                if not self._connected["temperature"]:
+                    self._submit("connecttemperature", self.lakeshore335.connect_instrument, use_mock=False)
             elif action == "disconnect_temperature":
                 if self._backend != "1000":
                     raise RuntimeError("LS335 belongs to the attoDRY1000 system")
-                self.lakeshore335.disconnect_instrument()
+                if self._connected["temperature"]:
+                    self._submit("disconnecttemperature", self.lakeshore335.disconnect_instrument)
             elif action == "move":
                 self._move()
             elif action == "temperature":
@@ -563,6 +612,8 @@ class MagnetService(QObject):
 
     def _connection(self, name, connected):
         self._connected[name] = connected
+        if not connected:
+            self._pending.discard("disconnect" + name)
         if connected:
             self._pending.discard("connect" + name)
             if name == "2100":
@@ -669,7 +720,8 @@ class MagnetService(QObject):
             if operation != "read_control":
                 self._control_failed = False
                 self._stable_since = None
-            self._report(f"Sample setpoint verified: {result['setpoint']:g} K")
+            if operation != "read_control":
+                self._report(f"Sample setpoint verified: {result['setpoint']:g} K")
         self._notify_readiness()
 
     def is_ready(self):
@@ -709,6 +761,7 @@ class MagnetService(QObject):
             self._poll_2100_temperature()
         if self._review is not None and not self.review_valid():
             self._review = None
+            self._review_invalidated = False
             # Commissioned field and temperature limits may have changed.
             self.fieldsChanged.emit()
             self.changed.emit()
@@ -761,10 +814,13 @@ class MagnetService(QObject):
         self._pending.discard(name)
         if name == "connect":
             self._pending.discard("connect2100")
+        if name == "disconnect" and not success:
+            self._pending.discard("disconnect2100")
         self._report(f"2100 {name}: " + ("complete" if success else str(error)))
 
     def _error(self, name, message):
         self._pending.discard("connect" + name)
+        self._pending.discard("disconnect" + name)
         if name == "temperature":
             self._input_configurations = self._input_configurations_stamp = None
             self._snapshots.pop("temperature", None)

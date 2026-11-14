@@ -389,7 +389,7 @@ ApplicationWindow {
                             objectName: "historyMainPlot"; darkMode: backend.dark
                             visible: !backend.hasMap || !window.narrowPlots || plotTabs.currentIndex === 0
                             Layout.fillWidth: true; Layout.fillHeight: true
-                            plotModel: backend.plotModel; showAxisSelector: false; showChannelSelector: false; showLayoutSelector: false
+                            plotModel: backend.plotModel; showAxisSelector: false; showChannelSelector: false; showLayoutSelector: backend.currentType === "bfield_transport" && !backend.hasMap
                             showExport: false; exportEnabled: backend.exportReady; showEmptyState: false
                         }
                         }

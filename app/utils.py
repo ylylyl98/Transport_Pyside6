@@ -45,9 +45,9 @@ def ramp_quantized(set_fn, current_v, target_v, step_v, step_t, quantum, check_f
     max_ticks = math.floor((step_v + quantum * 1e-9) / quantum)
     if max_ticks < 1:
         raise ValueError("Ramp step is smaller than the source resolution.")
+    from app.voltage_resolution import round_voltage
+    target_v = round_voltage(target_v, quantum)
     target_tick = round(target_v / quantum)
-    if abs(target_v / quantum - target_tick) > 1e-7:
-        raise ValueError("Ramp target is not representable at the source resolution.")
     current_tick = round(current_v / quantum)
     if abs(current_v / quantum - current_tick) > 1e-7:
         if not allow_unaligned_start:
@@ -79,11 +79,11 @@ def safe_ramp(
     step_v: float,
     step_t: float,
     check_fn=None,
-) -> None:
+) -> float:
     """Ramp with bounded progress from the actual source setpoint.
 
-    Keithley intermediates lie on its verified source grid; final targets
-    never get rounded. Plain callback users retain the original numeric ramp.
+    Keithley targets and intermediates lie on its verified source grid.
+    Plain callback users retain the original numeric ramp.
     """
     target_v, step_v, step_t = float(target_v), float(step_v), float(step_t)
     if not math.isfinite(target_v):
@@ -109,9 +109,10 @@ def safe_ramp(
         set_fn = owner.set_voltage_fast
     if quantum is not None:
         ramp_quantized(set_fn, current_v, target_v, step_v, step_t, quantum, check_fn, allow_unaligned_start=True)
-        return
+        from app.voltage_resolution import round_voltage
+        return round_voltage(target_v, quantum)
     if abs(target_v - current_v) < 1e-9:
-        return
+        return target_v
     sign = 1.0 if target_v > current_v else -1.0
     v = current_v
     while abs(target_v - v) > 1e-9:
@@ -125,3 +126,4 @@ def safe_ramp(
         set_fn(v)
         if step_t:
             time.sleep(step_t)
+    return target_v

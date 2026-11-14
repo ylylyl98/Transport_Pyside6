@@ -11,8 +11,9 @@ ColumnLayout {
     Label { text: "Connect instruments and verify protection first. Gate ramps require idle, 2-wire voltage-source mode."; color: Theme.muted; wrapMode: Text.Wrap; Layout.fillWidth: true }
     RowLayout {
         Layout.fillWidth: true
-        Label { text: "Step size (V)"; color: Theme.muted; Layout.fillWidth: true }
+        Label { text: "Step size (V)"; color: Theme.muted }
         InputField { text: String(section.instruments.manualStep); enabled: !section.instruments.busy; Layout.preferredWidth: 100; onEditingFinished: section.instruments.setManualStep(text); Accessible.name: "Manual gate step voltage" }
+        Item { Layout.fillWidth: true }
     }
     Repeater {
         // Readback values change frequently; keep the three editable gate rows alive.
@@ -31,19 +32,22 @@ ColumnLayout {
                 text: "Limit " + NumberFormat.quantity(gate.device.maxVoltage, "V") + " / " + NumberFormat.quantity(gate.device.currentCompliance, "A") + " · compliance " + (!gate.device.connected || gate.device.complianceTripped === null ? "unknown" : gate.device.complianceTripped ? "TRIPPED" : "clear")
                 color: gate.device.complianceTripped ? Theme.danger : Theme.muted; wrapMode: Text.Wrap; Layout.fillWidth: true
             }
+            ActionButton { id: gateControls; objectName: "manualGateControls_" + gate.modelData; text: (checked ? "- " : "+ ") + gate.device.label + " controls"; checkable: true; Layout.fillWidth: true }
             RowLayout {
+                visible: gateControls.checked
                 Layout.fillWidth: true
                 Label { text: "Target (V)"; color: Theme.muted }
                 InputField { id: target; objectName: "manualGateTarget_" + gate.modelData; text: "0"; placeholderText: "Target (V)"; Layout.fillWidth: true; Layout.minimumWidth: 60; Accessible.name: gate.device.label + " target voltage" }
                 ActionButton { tone: "primary"; text: "Ramp to target"; Accessible.name: gate.device.label + ": ramp to target voltage"; enabled: gate.device.canRamp; onClicked: section.instruments.command("ramp", {device: gate.device.name, target: target.text}) }
             }
             Flow {
+                visible: gateControls.checked
                 Layout.fillWidth: true; spacing: 6
                 ActionButton { text: "−" + section.instruments.manualStep + " V"; Accessible.name: gate.device.label + ": decrease voltage by " + section.instruments.manualStep + " V"; enabled: gate.device.canRamp; onClicked: section.instruments.command("step", {device: gate.device.name, delta: -section.instruments.manualStep}) }
                 ActionButton { text: "+" + section.instruments.manualStep + " V"; Accessible.name: gate.device.label + ": increase voltage by " + section.instruments.manualStep + " V"; enabled: gate.device.canRamp; onClicked: section.instruments.command("step", {device: gate.device.name, delta: section.instruments.manualStep}) }
                 ActionButton { text: "Read back"; Accessible.name: gate.device.label + ": read voltage and current"; enabled: gate.device.canRead; onClicked: section.instruments.command("read", {device: gate.device.name}) }
-                ActionButton { text: "Ramp to 0 V"; Accessible.name: gate.device.label + ": ramp voltage to zero"; enabled: gate.device.canZero; onClicked: section.instruments.command("ramp", {device: gate.device.name, target: 0}) }
             }
+            ActionButton { text: "Ramp to 0 V"; Accessible.name: gate.device.label + ": ramp voltage to zero"; enabled: gate.device.canZero; onClicked: section.instruments.command("ramp", {device: gate.device.name, target: 0}) }
             Label { text: gate.device.reconnect ? "Address or mode changed — reconnect" : gate.device.detail; visible: text.length > 0; color: Theme.muted; wrapMode: Text.Wrap; Layout.fillWidth: true }
             Label { text: gate.device.readbackError; visible: text.length > 0; color: Theme.danger; wrapMode: Text.Wrap; Layout.fillWidth: true }
         }
@@ -51,7 +55,7 @@ ColumnLayout {
     ColumnLayout {
         Layout.fillWidth: true; spacing: 6
         Rectangle { Layout.fillWidth: true; implicitHeight: 1; color: Theme.border }
-        Label { text: "DAQ analog output"; font.bold: true; color: Theme.text }
+        ActionButton { id: daqControls; objectName: "manualDaqControls"; text: (checked ? "- " : "+ ") + "DAQ analog output controls"; checkable: true; Layout.fillWidth: true }
         Repeater {
             model: section.instruments.daqOutputs
             delegate: Label { required property var modelData; text: "AO" + modelData.channel + ": commanded " + NumberFormat.quantity(modelData.commanded, "V") + " · measured " + NumberFormat.quantity(modelData.measured, "V") + (modelData.error ? "\n" + modelData.error : ""); wrapMode: Text.Wrap; Layout.fillWidth: true; color: modelData.error ? Theme.danger : Theme.muted }
@@ -60,20 +64,22 @@ ColumnLayout {
             Layout.fillWidth: true
             Label { text: "Channel"; color: Theme.muted }
             InputField { id: aoChannel; text: "0"; Layout.preferredWidth: 44; Accessible.name: "DAQ output channel" }
-            Label { text: "Target (V)"; color: Theme.muted }
-            InputField { id: aoTarget; text: "0"; placeholderText: "Target (V)"; Layout.fillWidth: true; Layout.minimumWidth: 60; Accessible.name: "DAQ output target voltage" }
+            Label { visible: daqControls.checked; text: "Target (V)"; color: Theme.muted }
+            InputField { id: aoTarget; visible: daqControls.checked; text: "0"; placeholderText: "Target (V)"; Layout.fillWidth: true; Layout.minimumWidth: 60; Accessible.name: "DAQ output target voltage" }
+            ActionButton { text: "Ramp AO to 0 V"; enabled: !section.instruments.busy; onClicked: section.instruments.command("daq", {channel: aoChannel.text, target: 0}) }
         }
         Flow {
+            visible: daqControls.checked
             Layout.fillWidth: true; spacing: 6
             ActionButton { tone: "primary"; text: "Ramp AO to target"; enabled: !section.instruments.busy; onClicked: section.instruments.command("daq", {channel: aoChannel.text, target: aoTarget.text}) }
-            ActionButton { text: "Ramp AO to 0 V"; enabled: !section.instruments.busy; onClicked: section.instruments.command("daq", {channel: aoChannel.text, target: 0}) }
         }
     }
     ColumnLayout {
         Layout.fillWidth: true; spacing: 6
         Rectangle { Layout.fillWidth: true; implicitHeight: 1; color: Theme.border }
-        Label { text: "Monochromator wavelength (nm)"; font.bold: true; color: Theme.text }
+        ActionButton { id: wavelengthControls; objectName: "manualWavelengthControls"; text: (checked ? "- " : "+ ") + "Monochromator wavelength"; checkable: true; Layout.fillWidth: true }
         RowLayout {
+            visible: wavelengthControls.checked
             Layout.fillWidth: true
             InputField { id: wavelength; text: "550"; Layout.fillWidth: true; Accessible.name: "Monochromator wavelength" }
             ActionButton { tone: "primary"; text: "Set wavelength"; enabled: !section.instruments.busy; onClicked: section.instruments.command("wavelength", {target: wavelength.text}) }

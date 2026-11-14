@@ -25,7 +25,8 @@ class GridTests(unittest.TestCase):
         self.assertEqual(validate_source_targets(source, [0., .0005, .001], 'Bias1', .0006, True), .0005)
         self.assertEqual(source.events.count(('query', ':SOUR:VOLT:RANG?')), 1)
         self.assertEqual(self.writes(source), [])
-        for target, step in ((.0001, .001), (.001, .0001), (21., .001)):
+        validate_source_targets(source, [.0001], 'Bias1', .001)
+        for target, step in ((.001, .0001), (21., .001)):
             with self.subTest(target=target,step=step), self.assertRaises(ValueError):
                 validate_source_targets(source, [target], 'Bias1', step)
         self.assertEqual(source.events.count(('query', ':SOUR:VOLT:RANG?')), 1)
@@ -50,14 +51,13 @@ class GridTests(unittest.TestCase):
         self.assertTrue(all(abs(b-a) <= .00075 + 1e-12 for a,b in zip([0.,*values], values)))
         self.assertEqual(source.events.count(('query', ':SOUR:VOLT:RANG?')), 1)
 
-    def test_existing_unaligned_level_ramps_to_zero_and_rejects_unaligned_final(self):
+    def test_existing_unaligned_level_ramps_to_zero_and_rounds_unaligned_final(self):
         source = self.source(.0007)
         safe_ramp(source.set_voltage, 0., 0., .05, 0.)
         self.assertEqual(self.writes(source), [.0005, 0.])
         before = list(self.writes(source))
-        with self.assertRaisesRegex(ValueError, 'not representable'):
-            safe_ramp(source.set_voltage, 0., .0007, .05, 0.)
-        self.assertEqual(self.writes(source), before)
+        safe_ramp(source.set_voltage, 0., .0007, .05, 0.)
+        self.assertEqual(self.writes(source), before + [.0005])
 
     def test_plain_tiny_step_fails_instead_of_hanging(self):
         for step in (0., -1., float('nan'), 1e-12):

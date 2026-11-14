@@ -248,7 +248,8 @@ def build_sweep_preview(mode, params, connections):
             if len(values) <= 9:
                 tick_values[axis] = values.tolist()
     return dict(traces=limited, xLabel=axes[0], yLabel=axes[1], title=title, tickValues=tick_values,
-                summary=summary, pointCount=None if mode == 5 and params.measurement_mode == "continuous" else len(points))
+                summary=summary + ' Requested trajectory shown; Keithley voltage targets round to the active source increment at execution.',
+                pointCount=None if mode == 5 and params.measurement_mode == "continuous" else len(points))
 
 
 class _PreviewTask(QRunnable):

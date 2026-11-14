@@ -51,7 +51,7 @@ class RunWorker(QObject):
 
     def validate_source_trajectory(self, points, *, gate_ramp, vds_ramp, use_g1=True, use_g2=True, use_g3=True):
         """Verify every commanded Keithley target before any outputs begin."""
-        from app.voltage_resolution import validate_source_targets
+        from app.voltage_resolution import validate_source_targets, rounded_source_target
         for name, key, label, ramp, enabled in (
             ("g1", "vtg", "G1 / Vtg", gate_ramp, use_g1),
             ("g2", "vbg", "G2 / Vbg", gate_ramp, use_g2),
@@ -61,6 +61,19 @@ class RunWorker(QObject):
             if enabled and session is not None:
                 validate_source_targets(session, [point[key] for point in points], label,
                                         ramp_step=ramp, refresh=True)
+                manager = getattr(self, "device_manager", None)
+                limit = manager.applied_gate_voltage_limit(name) if manager is not None else None
+                changed = 0
+                for point in points:
+                    requested = point[key]
+                    point[key] = rounded_source_target(session, requested, label, limit=limit)
+                    changed += abs(point[key] - requested) > 1e-12
+                    if "moves" in point:
+                        point["moves"] = [(axis, rounded_source_target(session, value, label, limit=limit)
+                                           if axis.lower() == key else value)
+                                          for axis, value in point["moves"]]
+                if changed:
+                    self.log.emit(f"{label}: rounded {changed} targets to the active source resolution; requested coordinates remain in the recipe.")
 
     def validate_bias2(self, params, points, bias1_enabled=True):
         if getattr(params, "bias2_mode", "Disabled") == "Disabled":

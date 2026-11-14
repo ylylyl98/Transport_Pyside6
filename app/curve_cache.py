@@ -13,7 +13,7 @@ class CsvColumns:
 
     @classmethod
     def from_rows(cls, headers, rows, numeric):
-        text_columns = {"Direction", "FastDirection", "Condition", "Condition_index", "PassIndex"}
+        text_columns = {"Direction", "FastDirection", "Condition", "Condition_index", "PassIndex", "Field_reversal_warning", "Field_quality"}
         columns = []
         for i, name in enumerate(headers):
             values = [row[i] for row in rows]

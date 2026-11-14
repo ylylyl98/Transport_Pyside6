@@ -2,32 +2,41 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
-ColumnLayout {
+GridLayout {
     id: form
     property var fields: []
     property var target
     property bool locked: false
-    spacing: 12
+    columns: width >= 380 ? 2 : 1
+    columnSpacing: 12
+    rowSpacing: 8
     Repeater {
-        model: form.fields.length
-        delegate: ColumnLayout {
+        // A separate, invisible-when-unused header keeps editors alive as values refresh.
+        model: form.fields.length * 2
+        delegate: Loader {
             id: row
             required property int index
-            readonly property var modelData: form.fields[index] || ({})
+            readonly property int fieldIndex: Math.floor(index / 2)
+            readonly property bool header: index % 2 === 0
+            readonly property var modelData: form.fields[fieldIndex] || ({})
+            readonly property bool fieldVisible: modelData.visible !== false && !modelData.hidden
+            readonly property bool compact: ["number", "integer", "choice", "bool"].indexOf(modelData.kind) >= 0
+            visible: fieldVisible && (!header || (modelData.group && (fieldIndex === 0 || form.fields[fieldIndex - 1].group !== modelData.group)))
+            active: header ? visible : true
             Layout.fillWidth: true
-            visible: modelData.visible !== false && !modelData.hidden
-            spacing: 8
-            Label {
-                visible: row.modelData.group && (row.index === 0 || form.fields[row.index - 1].group !== row.modelData.group)
-                text: row.modelData.group || ""
-                color: Theme.muted
-                font.bold: true
-                topPadding: row.index === 0 ? 0 : 12
-                Layout.fillWidth: true
-            }
-            Loader {
-                Layout.fillWidth: true
-                sourceComponent: row.modelData.kind === "rows" ? rowsEditor : normalEditor
+            Layout.alignment: Qt.AlignTop
+            Layout.minimumWidth: 0
+            Layout.preferredWidth: 160
+            Layout.columnSpan: header || !compact ? form.columns : 1
+            sourceComponent: header ? groupHeader : modelData.kind === "rows" ? rowsEditor : normalEditor
+            Component {
+                id: groupHeader
+                Label {
+                    text: row.modelData.group || ""
+                    color: Theme.muted
+                    font.bold: true
+                    topPadding: row.fieldIndex === 0 ? 0 : 12
+                }
             }
             Component {
                 id: normalEditor

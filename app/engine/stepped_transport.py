@@ -17,12 +17,12 @@ from app.engine.sample_reversal import SampleReversalMixin, REVERSAL_COLUMNS
 STEPPED_FIELD_TOLERANCE_T = 0.010  # 2100 retains its existing tolerance
 
 
-STEP_COLUMNS = ("Field_point_index", "Temperature_target_K", "Temperature_window_s",
+STEP_COLUMNS = ("Field_approach", "Field_point_index", "Temperature_target_K", "Temperature_window_s",
                 "Temperature_span_K", "Temperature_drift_K_per_min",
                 "B_after_T", "Sample_temperature_after_K", "B_before_T",
                 "B_readback_min_T", "B_readback_max_T", "B_max_reverse_T",
                 "Field_history_started_monotonic_s", "Field_history_finished_monotonic_s",
-                "Field_readback_count", "Field_gap_T", "Field_quality", "Skipped_nominal_points",
+                "Field_readback_count", "Field_gap_T", "Field_quality", "Field_reversal_warning", "Field_quality_warning", "Skipped_nominal_points",
                 "Field_window_span_T", "Field_window_drift_T_per_s") + REVERSAL_COLUMNS
 
 
@@ -45,15 +45,15 @@ class SteppedTransportMixin(SampleReversalMixin, HysteresisTransportMixin):
         self._last_point_direction = None
         self._history_point_identity = None
         self._point_history = {}
+        self._step_overshoot_pending = False
+        self._carry_point_history = None
+        self._initial_history_uncertain = False
         self._skipped_nominal = []
 
     def _move_step(self, *, reposition=False):
         if not self._active or self._cleanup_in_progress or self._thermal_hold or self._monitor_hold is not None:
             return
         if self._reversal_before_move():
-            return
-        if self._hysteresis_enabled() and getattr(self, "_hysteresis_history_gap", False):
-            self._quality_failure("Magnet telemetry gap left field history unverified; restart a prepared loop")
             return
         # A manual continuation cannot queue a second acquisition behind a
         # read that was interrupted by a protection or monitoring hold.
@@ -71,12 +71,25 @@ class SteppedTransportMixin(SampleReversalMixin, HysteresisTransportMixin):
             identity = (self._condition_index, self._step_index)
             if self._history_point_identity != identity:
                 self._history_point_identity = identity
-                self._point_history = (dict(getattr(self, "_initial_field_history", {}))
-                                       if self._step_index == 0 else {})
+                carry = getattr(self, "_carry_point_history", None)
+                self._carry_point_history = None
+                self._point_history = (dict(carry) if carry is not None else
+                                       dict(getattr(self, "_initial_field_history", {})) if self._step_index == 0 else {})
                 self._history_stamp = -math.inf
                 if hasattr(self, "_history_extreme"):
                     del self._history_extreme
+            if getattr(self, "_hysteresis_history_gap", False) or (self._step_index == 0 and getattr(self, "_initial_history_uncertain", False)):
+                self._hysteresis_history_gap = False
+                self._initial_history_uncertain = False
+                prior = self._point_history
+                self._point_history = {"quality_warning_reasons": list(prior.get("quality_warning_reasons", [])),
+                                       "reversal_exceeded": bool(prior.get("reversal_exceeded"))}
+                self._history_stamp = -math.inf
+                if hasattr(self, "_history_extreme"):
+                    del self._history_extreme
+                self._quality_warning("history_uncertain", {"detail": "Fresh baseline required after missing history or monitoring gap"})
         self._step_repositioning = reposition
+        self._step_overshoot_pending = False
         if not reposition:
             self._step_corrections = 0
         self._step_pending_row = None
@@ -102,8 +115,13 @@ class SteppedTransportMixin(SampleReversalMixin, HysteresisTransportMixin):
         self._checkpoint_runtime("step_moving", detail)
         try:
             self._step_move_inflight = True
-            direction_kwargs = {"monotonic_direction": self._step_direction,
-                                "hysteresis_options": self._hysteresis_move_options()} if aps else {}
+            direction_kwargs = {}
+            if aps:
+                if self._strict_field_history():
+                    direction_kwargs = {"monotonic_direction": self._step_direction,
+                                        "hysteresis_options": self._hysteresis_move_options()}
+                else:
+                    direction_kwargs = {"field_approach": self._field_approach()}
             tolerance = self._step_position_tolerance()
             if aps:
                 tolerance = min(self.plan.params.field_tolerance_t, self._point_acceptance())
@@ -164,7 +182,8 @@ class SteppedTransportMixin(SampleReversalMixin, HysteresisTransportMixin):
         return (isinstance(stamp, (float, int)) and math.isfinite(stamp)
                 and self._step_paused_at < stamp <= now and now - stamp <= 3.0
                 and isinstance(value, (float, int)) and math.isfinite(value)
-                and (not check_target or abs(value - self._target) <= self._step_position_tolerance() + 1e-12)
+                and (not check_target or getattr(self, "_step_overshoot_pending", False)
+                     or abs(value - self._target) <= self._step_position_tolerance() + 1e-12)
                 and getattr(status, "sweep_active", None) is False
                 and (self.plan.params.magnet_backend != "1000" or any(word in str(getattr(snapshot, "sweep_state", "")).lower() for word in ("pause", "standby")))
                 and getattr(snapshot, "heater_on", None) is True
@@ -204,8 +223,8 @@ class SteppedTransportMixin(SampleReversalMixin, HysteresisTransportMixin):
 
     def _step_overshoot_hold(self):
         self._target = self._step_targets[self._step_index]
-        if self._hysteresis_enabled():
-            self._quality_failure("Approach exceeded permitted acceptance; no backwards correction")
+        if self._strict_field_history():
+            self._step_overshoot_pending = True
             return
         self._step_timeout(overshoot=True)
 
@@ -220,7 +239,7 @@ class SteppedTransportMixin(SampleReversalMixin, HysteresisTransportMixin):
                 or not self._step_field_valid(magnet, now, check_target=False)):
             self._step_outside_stamps = []
             return False
-        if self.plan.params.magnet_backend == "1000" and self._step_direction * (magnet.field_t - self._target) > self._step_position_tolerance():
+        if self._strict_field_history() and self._step_direction * (magnet.field_t - self._target) > self._step_position_tolerance():
             self._step_overshoot_hold()
             return True
         stamps = self._step_outside_stamps
@@ -312,12 +331,42 @@ class SteppedTransportMixin(SampleReversalMixin, HysteresisTransportMixin):
         if self._measurement_phase == "step_settling" and now - self._step_wait_started >= self.plan.params.temperature_timeout_s:
             self._step_timeout()
         elif self._measurement_phase in {"step_acquiring", "step_verifying"}:
-            if now - self._step_sample_started > max(180., float(cfg.magnet.operation_timeout_s)):
+            if now - self._step_sample_started > self._acquisition_timeout_s():
                 self._fail("Stepped acquisition or post-acquisition telemetry timed out")
 
-    def _step_timeout(self, *, overshoot=False):
+    def _step_timeout(self, *, overshoot=False, reason="Field correction or qualification timed out"):
         if self._hysteresis_enabled():
-            self._quality_failure("Field correction or qualification timed out")
+            # Qualification starts only after the pause acknowledgement. Do not
+            # offer Continue if that stationary state cannot still be verified.
+            now = time.monotonic()
+            magnet = self._step_snapshot
+            stamp = getattr(magnet, "monotonic_s", None)
+            value = getattr(magnet, "field_t", None)
+            if not isinstance(value, (int, float)) or not math.isfinite(value):
+                self._fail("Invalid field readback at qualification timeout")
+                return
+            if not isinstance(stamp, (int, float)) or not math.isfinite(stamp) or not 0 <= now - stamp <= 3.:
+                self._begin_monitor_hold("APS100 telemetry stale at qualification timeout")
+                return
+            if not self._step_field_valid(magnet, now, check_target=False):
+                self._fail("APS100 stationary driven state is not confirmed at qualification timeout")
+                return
+            if self._measurement_phase != "step_settling":
+                self._fail("Qualification timeout outside acknowledged stationary settling")
+                return
+            self._step_invalidate()
+            self._step_pending_row = None
+            self._step_wait_started = now
+            self._field_unready_since = self._temperature_unready_since = now
+            self._step_diagnostic_at = now
+            summary = self.plan.validation.setdefault("qualification_waits", {"count": 0, "events": []})
+            summary["count"] += 1
+            if len(summary["events"]) < 100:
+                summary["events"].append(dict(condition_index=self._condition_index + 1,
+                                              point_index=self._step_index + 1,
+                                              reason=reason, monotonic_s=now))
+            self._quality_event("qualification_wait", {"reason": reason})
+            self.state_changed.emit("step_settling", f"{reason}; waiting for fresh field and temperature stability")
             return
         diagnostics = self._step_diagnostics(time.monotonic())
         self._step_invalidate()
@@ -326,7 +375,7 @@ class SteppedTransportMixin(SampleReversalMixin, HysteresisTransportMixin):
         self._thermal_resume_action = "step"
         self._measurement_phase = "thermal_hold"
         self._monitor_generation += 1
-        detail = (("Directional overshoot; no reverse move will be commanded. " if overshoot else "Stability timeout. ") + f"At {self._target:+.6f} T / {self.plan.params.temperature_target_k:g} K. "
+        detail = (("Directional overshoot; no reverse move will be commanded. " if overshoot else reason + ". ") + f"At {self._target:+.6f} T / {self.plan.params.temperature_target_k:g} K. "
                   f"{diagnostics}. "
                   "No point accepted. Field remains paused; Continue retries this point, Stop ends the run.")
         self._log(detail)
@@ -346,6 +395,30 @@ class SteppedTransportMixin(SampleReversalMixin, HysteresisTransportMixin):
         self._step_sample_finished = time.monotonic()
         self._measurement_phase = "step_verifying"
         self._refresh_snapshot()
+
+    def _skip_duplicate_point(self, value):
+        event = dict(condition_index=self._condition_index + 1, point_index=self._step_index + 1,
+                     target_t=self._target, readback_t=value, reason="duplicate_or_subresolution",
+                     endpoint=self._point_is_endpoint())
+        summary = self.plan.validation.setdefault("skipped_quality_points", {"count": 0, "events": []})
+        summary["count"] += 1
+        if len(summary["events"]) < 100:
+            summary["events"].append(event)
+        self._quality_event("point_skipped", {"skip": event})
+        self._step_pending_row = None
+        self._step_index += 1
+        self._advance_after_step(value)
+
+    def _advance_after_step(self, value):
+        if self._hysteresis_enabled():
+            self._advance_hysteresis_target(value)
+        if self._step_index < len(self._step_targets):
+            self._move_step()
+        elif (self._condition_index < len(self.plan.conditions) - 1
+              and normalize_cooldown_policy(self.plan.params.cooldown_policy) == "persistent_each_row"):
+            self._begin_row_persistent_transition()
+        else:
+            self._next_condition()
 
     def _step_verify_sample(self, now):
         lake, magnet = self._latest_lakeshore(), self._step_snapshot
@@ -368,6 +441,9 @@ class SteppedTransportMixin(SampleReversalMixin, HysteresisTransportMixin):
             if not self._check_actual_point(magnet.field_t):
                 return
             history = self._point_history
+            warning = bool(history.get("reversal_exceeded"))
+            offset = abs(row["B_measured_T"]-self._target) > self.plan.params.field_tolerance_t + 1e-12
+            quality = ("readback_reversal_offset" if offset else "readback_reversal") if warning else ("accepted_offset" if offset else "accepted")
             row.update(B_before_T=row.get("B_measured_T"),
                        B_readback_min_T=history.get("min_t"), B_readback_max_T=history.get("max_t"),
                        B_max_reverse_T=history.get("max_reverse_t"),
@@ -375,12 +451,13 @@ class SteppedTransportMixin(SampleReversalMixin, HysteresisTransportMixin):
                        Field_history_finished_monotonic_s=history.get("finished_monotonic_s"),
                        Field_readback_count=history.get("read_count"),
                        Field_gap_T=abs(row["B_measured_T"]-self._last_point_field) if self._last_point_field is not None else None,
-                       Field_quality="accepted_offset" if abs(row["B_measured_T"]-self._target) > self.plan.params.field_tolerance_t + 1e-12 else "accepted",
+                       Field_quality=quality, Field_reversal_warning=warning,
+                       Field_quality_warning=",".join(history.get("quality_warning_reasons", [])),
                        Skipped_nominal_points=",".join(str(item["index"]) for item in self._skipped_nominal),
                        Field_window_span_T=self._step_field_metrics[0], Field_window_drift_T_per_s=self._step_field_metrics[1])
         self._step_pending_row = None
         elapsed, span, drift = self._step_window.metrics()
-        row.update(Field_point_index=self._step_index + 1,
+        row.update(Field_approach=self._field_approach(), Field_point_index=self._step_index + 1,
                    Temperature_target_K=self.plan.params.temperature_target_k,
                    Temperature_window_s=elapsed, Temperature_span_K=span,
                    Temperature_drift_K_per_min=drift, B_after_T=magnet.field_t,
@@ -394,14 +471,7 @@ class SteppedTransportMixin(SampleReversalMixin, HysteresisTransportMixin):
             self._last_point_field = row["B_measured_T"]
             self._last_point_history = dict(self._point_history)
             self._last_point_direction = self._step_direction
-            self._advance_hysteresis_target(magnet.field_t)
-        if self._step_index < len(self._step_targets):
-            self._move_step()
-        elif (self._condition_index < len(self.plan.conditions) - 1
-              and normalize_cooldown_policy(self.plan.params.cooldown_policy) == "persistent_each_row"):
-            self._begin_row_persistent_transition()
-        else:
-            self._next_condition()
+        self._advance_after_step(magnet.field_t)
 
     def _step_watchdog(self):
         phase = self._measurement_phase
@@ -418,8 +488,15 @@ class SteppedTransportMixin(SampleReversalMixin, HysteresisTransportMixin):
             # safe_move owns the APS worker and polls status/thermal interlocks
             # internally, just like initial positioning. Normal snapshot polling
             # resumes after its result; old snapshots never qualify a point.
-            if now - self._phase_started > self._step_move_timeout:
-                self._fail("No acknowledgement in step_moving")
+            # The worker owns the motion deadline. Give its final pause,
+            # readback and queued result a bounded delivery allowance before
+            # declaring it unresponsive; progress never extends this deadline.
+            elapsed = now - self._phase_started
+            if elapsed > self._step_move_timeout + self._communication_timeout_s():
+                self._fail(
+                    f"Stepped field move timed out after {elapsed:.1f} s waiting for completion "
+                    f"at {self._target:+.6f} T (move budget {self._step_move_timeout:.1f} s)"
+                )
             return True
         last = self._last_telemetry_monotonic
         if last is not None and now - last > self._communication_timeout_s():

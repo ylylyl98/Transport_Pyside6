@@ -215,20 +215,24 @@ class BFieldTransportCondition:
 
 @dataclass
 class BFieldTransportParams:
-    """Continuous APS100 B-field transport sweep setup."""
+    """B-field transport setup, defaulting to a fine stepped sweep."""
 
     base_name: str = "bfield_transport"
     magnet_backend: str = "1000"
     start_field_t: float = -0.5
     stop_field_t: float = 0.5
-    rate_t_per_min: float = 0.1
+    rate_t_per_min: float = 0.06  # 10 Oe/s maximum approach rate
     round_trip: bool = True
-    measurement_mode: str = "continuous"
+    measurement_mode: str = "stepped"
+    field_approach: str = "auto"
+    wait_for_temperature: bool = False
+    pre_sweep_settle_s: float = 0.0
+    turnaround_delay_s: float = 0.0
     sample_reversal_mode: str = "unchanged"
     sample_reversal_settle_s: float = 2.0
     field_spacing: str = "step"
-    field_points: int = 11
-    field_step_t: float = 0.1
+    field_points: int = 201
+    field_step_t: float = 0.005
     # APS100 stepped hysteresis: field qualification is separate from
     # temperature qualification and the additional pre-measurement delay.
     field_tolerance_t: float = 0.0002
@@ -242,6 +246,9 @@ class BFieldTransportParams:
     field_max_gap_t: float = 0.0  # zero: twice the largest planned interval
     field_timeout_s: float = 60.0
     field_no_progress_s: float = 15.0
+    # Optional communication A/B test; does not alter instrument settings.
+    aps100_polling_profile: str = "standard"
+    aps100_no_overshoot_profile: str = "standard"
     temperature_target_k: float = 4.0
     temperature_tolerance_k: float = 0.05
     temperature_window_s: float = 10.0
@@ -256,6 +263,7 @@ class BFieldTransportParams:
     final_mode: str = "driven"
     acquisition_delay_s: float = 0.1
     averages: int = 1
+    read_delay_s: float = 0.0  # Delay between DAQ readings in one average.
     conditions: list[BFieldTransportCondition] = field(
         default_factory=lambda: [BFieldTransportCondition()]
     )
@@ -268,16 +276,19 @@ BFIELD_HYSTERESIS_LABELS = {
     "field_tolerance_t": "Approach stopping tolerance (±mT)",
     "field_acceptance_t": "Point acceptance (±mT)",
     "field_endpoint_tolerance_t": "Endpoint acceptance (±mT)",
-    "field_reversal_t": "Maximum history reversal (mT)",
+    "field_reversal_t": "Readback reversal warning (mT)",
     "field_span_t": "Maximum field window span (mT)",
     "field_drift_t_per_s": "Maximum field drift (mT/s)",
-    "field_max_gap_t": "Maximum actual point gap (mT; 0 = auto)",
+    "field_max_gap_t": "Point gap warning (mT; 0 = auto)",
     "field_stability_s": "Field stability window (s)",
     "field_settle_s": "Delay after stability (s)",
     "field_timeout_s": "Field qualification timeout (s)",
     "field_no_progress_s": "No-progress timeout (s)",
 }
 BFIELD_MT_FIELDS = {"field_step_t", *(k for k in BFIELD_HYSTERESIS_LABELS if k.endswith("_t") or k == "field_drift_t_per_s")}
+BFIELD_RATE_DISPLAY_SCALE = 10000.0 / 60.0  # Oe/s per stored T/min
+BFIELD_DISPLAY_SCALES = {**dict.fromkeys(BFIELD_MT_FIELDS, 1000.0),
+                        "rate_t_per_min": BFIELD_RATE_DISPLAY_SCALE}
 
 # Friendly aliases used by integrations that call the workflow a B-field
 # sweep rather than a transport sweep.

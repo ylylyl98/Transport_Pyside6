@@ -18,7 +18,7 @@ MEASUREMENT_TYPES = {"vds_sweep": "Vds Sweep", "gate_scan": "Gate Scan", "map_2d
 X_COLUMNS = ("Bias2", "Bias2_measured", "Vds", "Vtg", "Vbg", "Doping", "E-field", "B_measured_T", "Wavelength", "Step Index")
 from app.drag_drive import DUAL_COLUMNS, DUAL_SIGNALS
 
-SIGNAL_COLUMNS = ("Ibias2_Keithley", "Ids_DC", "Ids_X", "Ids_Y", "Ids_Keithley", "raw_DC", "raw_X", "raw_Y", *DUAL_COLUMNS, *RATIO_SIGNALS)
+SIGNAL_COLUMNS = ("Ibias2_Keithley", "Ids_DC", "Ids_X", "Ids_Y", "Ids_Keithley", "raw_DC", "raw_X", "raw_Y", *DUAL_COLUMNS, "Vds_measured", "Sample_temperature_K", "Reservoir_temperature_K", *RATIO_SIGNALS)
 _UNITS = {"", "v", "a", "mv", "ma", "ua", "µa", "μa", "na", "pa", "t", "k", "s", "hz", "ohm", "ω", "#", "deg", "rad", "a.u.", "nm"}
 
 
@@ -49,6 +49,7 @@ class CurveData:
     warnings: list[str]
     groups: tuple[str, ...] = ()
     saved_conditions: dict = field(default_factory=dict)
+    reversal_warning: np.ndarray = field(default_factory=lambda: np.array([], dtype=bool))
 
 
 @dataclass
@@ -62,6 +63,7 @@ class CurveTrace:
     y_unit: str
     condition: str = ""
     saved_conditions: dict = field(default_factory=dict)
+    reversal_warning: np.ndarray = field(default_factory=lambda: np.array([], dtype=bool))
 
 
 def device_history_folder(save) -> Path:
@@ -81,7 +83,7 @@ def _header(reader):
     # The native B-field writer has no units row. Its named schema carries
     # field in tesla, converted/Keithley currents in amperes and biases in volts.
     if not has_units and "B_measured_T" in headers:
-        units = {name: "T" if name in {"B_measured_T", "B_target_T"} else "A" if name.startswith("Ids_") or name == "Ibias2_Keithley" or name in DUAL_SIGNALS or name == "Keithley_current" else "V" if name.startswith('raw_') or name in {"Vtg", "Vbg", "Vds", "Bias2", "Bias2_measured", "Doping", "E-field", "Efield"} else "" for name in headers}
+        units = {name: "T" if name.startswith("B_") and name.endswith("_T") else "K" if name.endswith("_temperature_K") else "A" if name.startswith("Ids_") or name == "Ibias2_Keithley" or name in DUAL_SIGNALS or name == "Keithley_current" else "V" if name.startswith('raw_') or name in {"Vtg", "Vbg", "Vds", "Vds_measured", "Bias2", "Bias2_measured", "Doping", "E-field", "Efield"} else "" for name in headers}
     return headers, units, [] if has_units else second
 
 
@@ -361,22 +363,32 @@ def load_curve(path, x_name, signal, cache=None, fingerprint=None) -> CurveData:
     warnings = list(warnings)
     x_name = resolve_column(headers, x_name)
     signal = resolve_column(headers, signal)
+    if x_name == "B_measured_T":
+        source_field = {"Ids_Keithley": "B_Keithley_T", "Keithley_current": "B_Keithley_T",
+                        "Ibias2_Keithley": "B_Bias2_T"}.get(signal)
+        if source_field in headers:
+            x_name = source_field
     if x_name != "Step Index" and x_name not in headers:
         raise ValueError(f"Missing column: {x_name}")
     y, y_unit, signal_warnings = signal_values(headers, units, rows, signal)
     warnings.extend(signal_warnings)
-    xs, directions, groups = [], [], []
+    xs, directions, groups, reversals = [], [], [], []
+    wi = headers.index("Field_reversal_warning") if "Field_reversal_warning" in headers else None
+    qi = headers.index("Field_quality") if "Field_quality" in headers else None
     xi = headers.index(x_name) if x_name != "Step Index" else None
     di = next((headers.index(name) for name in ("Direction", "FastDirection") if name in headers), None)
     group_names = [name for name in ("Condition", "Condition_index", "PassIndex") if name in headers]
     for index, row in enumerate(rows):
         xs.append(float(index) if xi is None else numeric(row[xi]))
+        warning = str(row[wi]).strip().lower() if wi is not None else ""
+        quality = str(row[qi]).strip().lower() if qi is not None else ""
+        reversals.append(warning in ("true", "1", "1.0", "yes") or quality in ("readback_reversal", "readback_reversal_offset"))
         directions.append(normalize_direction(row[di]) if di is not None else "unknown")
         groups.append(", ".join(f"{name}={row[headers.index(name)]}" for name in group_names))
     x = np.asarray(xs, dtype=float)
     if not np.any(np.isfinite(x) & np.isfinite(y)):
         raise ValueError("No finite measurements for selected columns")
-    return CurveData(x, y, tuple(directions), units.get(x_name, ""), y_unit, warnings, tuple(groups), saved_conditions)
+    return CurveData(x, y, tuple(directions), units.get(x_name, ""), y_unit, warnings, tuple(groups), saved_conditions, np.asarray(reversals, dtype=bool))
 
 
 def comparison_traces(records, x_name, signal, direction="All", cache=None):
@@ -400,7 +412,7 @@ def comparison_traces(records, x_name, signal, direction="All", cache=None):
                     continue
                 group = curve.groups[start]
                 label = f"{record.path.stem} [{value}] {group}"
-                traces.append(CurveTrace(record.path, label, value, x, y, *units, group, curve.saved_conditions))
+                traces.append(CurveTrace(record.path, label, value, x, y, *units, group, curve.saved_conditions, curve.reversal_warning[start:end]))
                 added = True
             if added:
                 expected_units = units

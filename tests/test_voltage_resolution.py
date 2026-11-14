@@ -47,19 +47,21 @@ class ResolutionTests(unittest.TestCase):
         self.assertTrue(status.refreshable)
         self.assertIn("VISA timeout", status.message)
 
-    def test_raw_step_and_fixed_value_checked_without_rounding(self):
+    def test_raw_step_and_fixed_value_round_to_source_increment(self):
         from app.voltage_resolution import validate_voltage_points
         validate_voltage_points([{"vtg":0,"vbg":0,"vds":.00005}], {"vds":.00005})
-        with self.assertRaisesRegex(ValueError, "Vds"):
-            validate_voltage_points([{"vtg":0,"vbg":0,"vds":.00001}], {"vds":.00005})
+        points = [{"vtg":0,"vbg":0,"vds":.00001}]
+        validate_voltage_points(points, {"vds":.00005})
+        self.assertEqual(points[0]['vds'], 0.)
 
     def test_derived_grid_checked_after_conversion(self):
         from app.voltage_resolution import validate_voltage_points
         from app.workers.cosweep import build_cosweep_points
         from app.models import CoParams
         p=CoParams(coordinate_mode="Derived",axis_fast="Doping",axis_slow="Vds",doping_start=0,doping_stop=.0001,doping_step=.0001,efield_start=0,ratio=2,ratio_target="Vtg",vds_start=0,vds_stop=0,vds_step=.001)
-        with self.assertRaisesRegex(ValueError, "Vtg"):
-            validate_voltage_points(build_cosweep_points(p), {"vtg":.00005,"vbg":.00005})
+        points = build_cosweep_points(p)
+        validate_voltage_points(points, {"vtg":.00005,"vbg":.00005})
+        self.assertEqual(points[-1]['vtg'], .00005)
 
     def test_fine_step_does_not_allocate_millions_of_points(self):
         from app.models import CoParams
@@ -130,9 +132,9 @@ class ResolutionTests(unittest.TestCase):
                 tab.sp_vds_stop.setValue(.0001)
                 tab.sp_vds_step.setValue(.00001)
                 tab._update_sweep_summary()
-                self.assertIn("not representable",tab.lbl_precision.text())
+                self.assertIn("round to the nearest",tab.lbl_precision.text())
                 from app.ui.measurement_workflow import parameter_issues
-                self.assertTrue(any("not representable" in message for _,message in parameter_issues(tab)))
+                self.assertFalse(any("not representable" in message for _,message in parameter_issues(tab)))
                 tab.sp_vds_step.setValue(.00005)
                 tab._update_sweep_summary()
                 self.assertEqual(tab._precision_error, "")
@@ -306,9 +308,10 @@ class ResolutionStartupTests(unittest.TestCase):
         read.assert_not_called()
         source._identity = "MODEL 2401"
         self.tab.sp_vds_start.setValue(.000001)
+        self.warning.reset_mock()
         self.tab.start_run()
-        self.assertIn("not representable", self.warning.call_args.args[2])
-        self.calibration.assert_not_called()
+        self.warning.assert_not_called()
+        self.calibration.assert_called_once()
 
     def test_daq_source_does_not_require_g3_resolution(self):
         self.manager.sessions["g3"] = None

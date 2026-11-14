@@ -32,6 +32,23 @@ class BFieldGateScanTabTests(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
+    def test_field_settle_setting_round_trip_and_lock(self):
+        settings = get_app_settings()
+        settings.remove(BFieldGateScanTab.SETTINGS_PREFIX)
+        connections = Connections()
+        tab = BFieldGateScanTab(SaveRoot(base="."), connections, DeviceManager(connections))
+        self.assertEqual(tab.bfield_extra_settle.value(), 0)
+        self.assertEqual(tab.bfield_approach.currentData(), "linear")
+        tab.bfield_extra_settle.setValue(2.5)
+        self.assertEqual(tab.get_field_control_settings()["field_settle_s"], 2.5)
+        tab.set_batch_locked(True)
+        self.assertFalse(tab.bfield_extra_settle.isEnabled())
+        restored = BFieldGateScanTab(SaveRoot(base="."), connections, DeviceManager(connections))
+        self.assertEqual(restored.bfield_extra_settle.value(), 2.5)
+        tab.deleteLater()
+        restored.deleteLater()
+        settings.remove(BFieldGateScanTab.SETTINGS_PREFIX)
+
     def test_conditions_are_independent_snapshots_of_full_gate_editor(self):
         connections = Connections()
         manager = DeviceManager(connections)
@@ -64,7 +81,7 @@ class BFieldGateScanTabTests(unittest.TestCase):
         self.assertEqual(requests[1][3], "E-field condition")
         tab.deleteLater()
 
-    def test_batch_preflight_rejects_later_unrepresentable_condition_after_claim(self):
+    def test_batch_preflight_accepts_later_offgrid_condition_after_claim(self):
         from copy import deepcopy
         from unittest.mock import Mock
         from app.models import GateScanCondition
@@ -79,14 +96,15 @@ class BFieldGateScanTabTests(unittest.TestCase):
         tab.device_manager.get_session = lambda name: sources.get(name)
         params = deepcopy(tab._conditions[0].params)
         params.n_points = 2
+        params.vds_ramp = .05
         bad = deepcopy(params); bad.raw_vtg_stop = .0003
         tab._conditions = [GateScanCondition("first", params), GateScanCondition("second", bad)]
         tab.finish_field_batch = Mock()
         tab._show_series_error = Mock()
         with patch.object(GateScanTab, "begin_field_batch", return_value=True):
-            self.assertFalse(tab.begin_field_batch(params, ("g1", "g2", "g3")))
-        tab.finish_field_batch.assert_called_once()
-        self.assertIn("not representable", tab._show_series_error.call_args[0][0])
+            self.assertTrue(tab.begin_field_batch(params, ("g1", "g2", "g3")), tab._show_series_error.call_args)
+        tab.finish_field_batch.assert_not_called()
+        tab._show_series_error.assert_not_called()
         self.assertEqual(sources["g1"].reads, 1)
         tab.deleteLater()
 

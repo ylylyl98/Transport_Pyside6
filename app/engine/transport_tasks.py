@@ -1,6 +1,8 @@
 """Serialized blocking work with completion delivered on the owning Qt thread."""
 from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
+from collections import deque
+from contextlib import contextmanager
 
 from PySide6 import QtCore
 
@@ -44,6 +46,8 @@ class LatestTelemetry:
     def __init__(self):
         self._lock = Lock()
         self._snapshot = None
+        self._recent = deque(maxlen=2)
+        self._captures = []
 
     def publish(self, snapshot):
         with self._lock:
@@ -51,11 +55,37 @@ class LatestTelemetry:
             new = getattr(snapshot, "monotonic_s", -1)
             if self._snapshot is None or new >= old:
                 self._snapshot = snapshot
+                self._recent.append(snapshot)
+                for capture in self._captures:
+                    if len(capture[0]) >= 100000:
+                        capture[1] = "Field telemetry capture exceeded its limit"
+                    elif capture[1] is None:
+                        capture[0].append(snapshot)
 
     def clear(self):
         with self._lock:
             self._snapshot = None
+            self._recent.clear()
+            for capture in self._captures:
+                capture[1] = "Field telemetry was cleared during acquisition"
 
     def get(self):
         with self._lock:
             return self._snapshot
+
+    @contextmanager
+    def capture_history(self):
+        """Pin telemetry only while acquiring, including the preceding bracket."""
+        with self._lock:
+            capture = [list(self._recent), None]
+            self._captures.append(capture)
+        def read():
+            with self._lock:
+                if capture[1] is not None:
+                    raise RuntimeError(capture[1])
+                return tuple(capture[0])
+        try:
+            yield read
+        finally:
+            with self._lock:
+                self._captures = [active for active in self._captures if active is not capture]

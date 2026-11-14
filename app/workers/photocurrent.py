@@ -124,6 +124,10 @@ class PhotocurrentWorker(RunWorker):
                                             vds_ramp=min(SAFE_RAMP_STEP_V, self.p.vds_ramp),
                                             use_g1=self._uses_g1, use_g2=self._uses_g2,
                                             use_g3=self.p.use_vds and self.p.vds_source == "Keithley 2400")
+            from dataclasses import replace
+            requested_conditions = conditions
+            conditions = [replace(condition, vtg=point["vtg"], vbg=point["vbg"], vds=point["vds"])
+                          for condition, point in zip(conditions, trajectory)]
             for condition in conditions:
                 bias2 = condition
                 self.validate_bias2(bias2, [condition.vds], self.p.use_vds and self.p.vds_source != "None")
@@ -142,7 +146,7 @@ class PhotocurrentWorker(RunWorker):
                 )
                 csv_path = unique_planned_output(planned_output_at(self.save.path(), stem, ts)).csv_path
             os.makedirs(os.path.dirname(csv_path), exist_ok=True)
-            condition_paths = self.condition_csv_paths(csv_path, conditions, self.p.use_vds)
+            condition_paths = self.condition_csv_paths(csv_path, requested_conditions, self.p.use_vds)
             self.log.emit(f"Save -> {len(condition_paths)} condition CSV file(s) in {os.path.dirname(csv_path)}")
             if self.p.output_metadata_path:
                 write_run_metadata(

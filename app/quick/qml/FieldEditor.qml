@@ -34,6 +34,7 @@ ColumnLayout {
     }
     Loader {
         Layout.fillWidth: true
+        Layout.maximumWidth: ["number", "integer"].indexOf(editor.formField.kind) >= 0 ? 260 : Infinity
         sourceComponent: editor.formField.kind === "bool" ? toggleEditor : editor.formField.kind === "choice" ? choiceEditor : editor.formField.key === "base_name" ? filenameEditor : textEditor
     }
     Label {

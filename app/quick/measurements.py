@@ -15,7 +15,7 @@ import os
 
 from PySide6.QtCore import QObject, Property, Signal, Slot, QTimer
 
-from app.models import LineSweepParams, BFIELD_MT_FIELDS
+from app.models import LineSweepParams, BFIELD_DISPLAY_SCALES, BFIELD_RATE_DISPLAY_SCALE
 from utils.config import cfg
 from app.constants import V_LIMIT
 from app.experiment_metadata import capture_run_signal_chain
@@ -35,6 +35,7 @@ from app.quick.sampling import SamplingPreview
 from app.quick.sweep_preview import SweepPreview
 from app.quick.parameters import MODES, defaults, schema, convert, row_default, build_params, legacy_values, measurement_sections, label, descriptor, normalize_transport_spacing
 from app.quick.run_state import MeasurementThread, PreflightThread, WorkerRelay
+from app.quick.timing import MeasurementTiming
 
 
 class MeasurementService(QObject):
@@ -116,10 +117,16 @@ class MeasurementService(QObject):
             input_pending.connect(lambda *_: self.changed.emit())
         self._batch = self._transport = None
         self._settings = settings
+        self._timing = MeasurementTiming(self)
         self._factories = {0: DualGateWorker, 1: LineSweepWorker, 2: CoSweepWorker, 3: PhotocurrentWorker, 4: LineSweepWorker}
         self._factories.update(worker_factories or {})
         self._load_settings()
         self._validate_2100_saved_options()
+        self.fieldsChanged.connect(self._refresh_timing)
+        self.recordReady.connect(self._timing.record)
+        self.runCompleted.connect(lambda result: self._timing.finish(result.get("status", "finished")))
+        self.changed.connect(lambda: self._timing.set_phase(self._phase, self._continuation[0]))
+        self._refresh_timing()
         self.fieldsChanged.connect(self.outputPreviewChanged)
         self.fieldsChanged.connect(self._invalidate_sweep_preview)
         self.fieldsChanged.connect(self.resolutionSummaryChanged)
@@ -279,7 +286,7 @@ class MeasurementService(QObject):
             else:
                 source_range = getattr(session, "cached_source_voltage_range_v", None)
                 parts.append(f"{name.upper()}: {float(source_range):g} V range / {status.quantum:g} V step")
-        return " · ".join(parts)
+        return " · ".join(parts) + (" · Targets round to nearest source increment" if parts else "")
 
     @Property("QVariantMap", notify=fieldsChanged)
     def filenameField(self):
@@ -377,6 +384,12 @@ class MeasurementService(QObject):
     phase = Property(str, lambda self: self._phase, notify=changed)
     message = Property(str, lambda self: self._message, notify=changed)
     progress = Property(float, lambda self: self._progress, notify=changed)
+    timing = Property(QObject, lambda self: self._timing, constant=True)
+
+    def _refresh_timing(self):
+        self._timing.request(self._mode, self._values[self._mode], self.conns, self.save,
+                             self._selected_backend(), bool(self._field_errors[self._mode]))
+
     active = Property(bool, lambda self: bool(self.worker_thread is not None or self._preflight_thread is not None or self._batch_claimed or
         self._confirmation is not None or (self._batch and self._batch.active) or
         (self._transport and (self._transport.active or self._transport._cleanup_in_progress))), notify=changed)
@@ -450,7 +463,7 @@ class MeasurementService(QObject):
                 if params.magnet_backend == "2100":
                     return (step_detail + f"attoDRY2100: {params.start_field_t:+g} → {params.stop_field_t:+g} T; SDK-managed ramp\n"
                             f"{len(plan.conditions)} enabled fixed-bias conditions; active SDK temperature control")
-                return (step_detail + f"APS100: {params.start_field_t:+g} → {params.stop_field_t:+g} T; maximum {params.rate_t_per_min:g} T/min; stored range limits may be slower\n"
+                return (step_detail + f"APS100: {params.start_field_t:+g} → {params.stop_field_t:+g} T; maximum {params.rate_t_per_min * BFIELD_RATE_DISPLAY_SCALE:g} Oe/s; stored range limits may be slower\n"
                         f"{len(plan.conditions)} enabled fixed-bias conditions; {'round trip' if params.round_trip else 'one way'}\n"
                         f"Cooldown: {params.cooldown_policy}; success: Driven (heater ON); stop/error: Persistent")
             from app.workers.cosweep import sequence_point_count
@@ -672,8 +685,10 @@ class MeasurementService(QObject):
                 supported = {"measurement_mode": "stepped", "sample_reversal_mode": "unchanged"}
                 if key in supported and converted != supported[key]:
                     raise ValueError(f"attoDRY2100 requires {supported[key]} for {label(key)}")
-            if self._mode == 5 and key in BFIELD_MT_FIELDS:
-                converted /= 1000.  # The editor uses mT; recipes and hardware retain T.
+            if self._mode == 5 and key in BFIELD_DISPLAY_SCALES:
+                converted /= BFIELD_DISPLAY_SCALES[key]  # Preserve stored physical units.
+            if self._mode == 4 and key == "field_rate_t_per_min":
+                converted /= BFIELD_RATE_DISPLAY_SCALE
             if self._mode == 2 and key in {"coordinate_mode", "axis_fast", "axis_slow"} and not self._flush_recipes():
                 self.uiSectionsChanged.emit()
                 return
@@ -940,6 +955,8 @@ class MeasurementService(QObject):
                 params.plot_choice = channels[0]
         if self._mode == 5:
             params.magnet_backend = self._selected_backend()
+            if params.magnet_backend == "2100":
+                params.field_approach = "auto"  # 2100 controls field motion in its SDK.
         return params
 
     def _trajectory(self, params, mode):
@@ -984,7 +1001,7 @@ class MeasurementService(QObject):
         for key, value in asdict(params).items():
             if isinstance(value, float) and not math.isfinite(value):
                 raise ValueError(f"{key} must be finite")
-        for name in ("delay", "acquisition_delay_s"):
+        for name in ("delay", "acquisition_delay_s", "read_delay_s"):
             if hasattr(params, name) and getattr(params, name) < 0:
                 raise ValueError("Acquisition delay must be non-negative")
         for name in ("vg_ramp", "vds_ramp"):
@@ -1078,8 +1095,6 @@ class MeasurementService(QObject):
                             getattr(params, "vg_ramp", None) if mode in (1, 2, 4) else GATE_BIAS_RAMP_STEP_V)
                     if ramp is not None and float(ramp) + 1e-12 < quantum:
                         raise ValueError(f"{device.upper()} ramp step {float(ramp):g} V is below the {quantum:g} V source resolution.")
-                    if mode == 0 and axis == "vds" and float(params.vds_step) + 1e-12 < quantum:
-                        raise ValueError(f"G3 Vds sample step {float(params.vds_step):g} V is below the {quantum:g} V source resolution.")
             if refresh:
                 if not refresh_missing:
                     raise ValueError("Source range remains unavailable after refresh; check source readback.")
@@ -1087,6 +1102,11 @@ class MeasurementService(QObject):
                     raise ValueError("Refreshing source ranges. Review readback and press Start again.")
                 raise ValueError("Source ranges unavailable; refresh readback before starting")
             validate_voltage_points(points, resolutions)
+            for device, axis in (("g1", "vtg"), ("g2", "vbg"), ("g3", "vds")):
+                if axis in resolutions:
+                    limit = min(V_LIMIT, self.device_manager.applied_gate_voltage_limit(device))
+                    if any(abs(p[axis]) > limit + 1e-12 for p in points):
+                        raise ValueError(f"{device.upper()} rounded trajectory exceeds verified {limit:g} V protection")
         return required, points
 
     def _claim(self, required):
@@ -1176,12 +1196,16 @@ class MeasurementService(QObject):
                         raise ValueError(f"{name.upper()}: source range refresh is unavailable.")
                     refresh()
                 for configuration in configurations:
-                    self._validate(configuration, mode, refresh_missing=False)
+                    _, resolved_points = self._validate(configuration, mode, refresh_missing=False)
+                    if configuration is params:
+                        points[:] = resolved_points
             return self._rates()
         task = PreflightThread(verify_before_start, self)
         self._preflight_thread = task
         task.finished.connect(self._preflight_finished)
         self._phase, self._message, self._progress = "preparing", "Verifying signal-chain settings", 0.
+        self._refresh_timing()
+        self._timing.begin()
         self.changed.emit()
         task.start()
 
@@ -1194,11 +1218,13 @@ class MeasurementService(QObject):
         self._preflight_thread = self._preflight_request = None
         task.deleteLater()
         if task.cancel.is_set():
+            self._timing.finish("stopped")
             self._release()
             self._phase, self._message = "stopped", "Stopped after the in-flight preflight read completed"
             self.changed.emit()
             return
         if task.error or task.result is None:
+            self._timing.finish("error")
             self._release()
             self._fail(task.error or "Signal-chain verification returned no result")
             return
@@ -1216,6 +1242,7 @@ class MeasurementService(QObject):
                 self._launch(params, mode, calibration, self._run_snapshot)
         except Exception as exc:
             self._release()
+            self._timing.finish("error")
             self._fail(str(exc))
         self.changed.emit()
 
@@ -1259,7 +1286,7 @@ class MeasurementService(QObject):
             source = "None"
         bias2 = (any(row.get("enabled", True) and row.get("bias2_mode", "Disabled") != "Disabled" for row in rows)
                  if rows else values.get("bias2_mode", "Disabled") != "Disabled")
-        return plot_channel_options(source, metadata, bias2=bias2)
+        return plot_channel_options(source, metadata, bias2=bias2, b_field_diagnostics=self._mode == 5)
 
     def _launch(self, params, mode, calibration, snapshot, *, batch_metadata=None):
         amp, lockin, chain = calibration
@@ -1482,6 +1509,7 @@ class MeasurementService(QObject):
             self._batch_snapshots = []
             if not self._batch.start(self._values[4]["fields_t"], resume_checkpoint=self._values[4]["resume_checkpoint"] or None):
                 self._confirmation_granted = None
+                self._timing.finish("not started")
         else:
             self._transport.start(verified_calibration=self._engine_calibration)
             if self._transport.active:
@@ -1492,6 +1520,8 @@ class MeasurementService(QObject):
                     "channels": self._plot_channels("Keithley 2400", self._engine_calibration[2]),
                     "planned_ranges": {"B-field": (min(params.start_field_t, params.stop_field_t), max(params.start_field_t, params.stop_field_t))}}
                 self.runPrepared.emit(self._run_snapshot)
+            else:
+                self._timing.finish("not started")
         self.changed.emit()
 
     @Slot(str, bool)
@@ -1534,6 +1564,11 @@ class MeasurementService(QObject):
 
     def set_sweep_locked(self, locked):
         self.changed.emit()
+
+    def get_field_control_settings(self):
+        values = self._values[4]
+        return {"field_approach": values["field_approach"], "rate_t_per_min": values["field_rate_t_per_min"],
+                "field_settle_s": values["field_settle_s"]}
 
     def accept_transport_record(self, record):
         self.recordReady.emit({**record, "x": record["B_measured_T"], "B-field": record["B_measured_T"],

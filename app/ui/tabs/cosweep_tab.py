@@ -1352,7 +1352,7 @@ class CoSweepTab(BaseMeasurementTab):
                 resolutions[axis] = status.quantum
             messages.append(message)
         validate_voltage_points(points, resolutions)
-        return " ".join(messages) or "Keithley source resolution: not applicable."
+        return (" ".join(messages) + " Targets round to the nearest source increment.") if messages else "Keithley source resolution: not applicable."
 
     @run_filename_snapshot
     def start_run(self):

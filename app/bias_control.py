@@ -4,7 +4,7 @@ import time
 
 from app.constants import V_LIMIT, SAFE_RAMP_STEP_T, SAFE_RAMP_STEP_V
 from app.utils import safe_ramp
-from app.voltage_resolution import source_resolution_status, validate_source_targets
+from app.voltage_resolution import source_resolution_status, validate_source_targets, round_voltage, rounded_source_target
 
 
 def bias2_target(params, bias1_voltage):
@@ -48,6 +48,8 @@ def validate_bias2(params, points, manager, bias1_enabled=True, bias1_source=Non
     source1 = bias1_source if bias1_source is not None else getattr(params, "vds_source", None)
     if mode == "Follow" and source1 == "Keithley 2400":
         validate_source_targets(manager.get_session("g3"), values1, "Bias1", refresh=refresh)
+        values1 = [rounded_source_target(manager.get_session("g3"), value, "Bias1",
+                                        limit=manager.applied_gate_voltage_limit("g3")) for value in values1]
     targets = [bias2_target(params, value) for value in values1]
     if not targets:
         raise ValueError("Bias2 requires at least one target.")
@@ -55,7 +57,7 @@ def validate_bias2(params, points, manager, bias1_enabled=True, bias1_source=Non
         if not math.isfinite(target) or abs(target) > limit + 1e-9:
             raise ValueError(f"Bias2 target {target:g} V exceeds verified {limit:g} V protection.")
     validate_source_targets(session, targets, "Bias2", ramp_step=ramp, refresh=refresh)
-    return targets
+    return [rounded_source_target(session, target, "Bias2", limit=limit) for target in targets]
 
 
 def ramp_bias2(session, params, bias1_voltage, check_fn=None):
@@ -64,9 +66,8 @@ def ramp_bias2(session, params, bias1_voltage, check_fn=None):
         return None
     if session is None:
         raise RuntimeError("Bias2 G4 is not connected.")
-    safe_ramp(session.set_voltage, getattr(session, "voltage", None) or 0.0,
-              target, float(getattr(params, "bias2_ramp", .05)), SAFE_RAMP_STEP_T, check_fn)
-    return target
+    return safe_ramp(session.set_voltage, getattr(session, "voltage", None) or 0.0,
+                     target, float(getattr(params, "bias2_ramp", .05)), SAFE_RAMP_STEP_T, check_fn)
 
 
 def zero_bias2(session, params):
@@ -97,6 +98,8 @@ def ramp_pair(primary, daq, channel, secondary, params, target, primary_step, ch
         start1 = float(read1() if callable(read1) else getattr(primary, "voltage"))
         set1 = getattr(primary, "set_voltage_fast", primary.set_voltage)
         quantum1 = validate_source_targets(primary, (target,), "Bias1", primary_step)
+        target = round_voltage(target, quantum1)
+        target2 = bias2_target(params, target)
     else:
         start1 = float(daq.adopt_measured_output_as_ramp_start(channel))
         set1 = lambda value: daq.set_voltage(channel, value)
@@ -105,6 +108,7 @@ def ramp_pair(primary, daq, channel, secondary, params, target, primary_step, ch
     start2 = float(read2() if callable(read2) else getattr(secondary, "voltage"))
     set2 = getattr(secondary, "set_voltage_fast", secondary.set_voltage)
     quantum2 = validate_source_targets(secondary, (target2,), "Bias2", params.bias2_ramp)
+    target2 = round_voltage(target2, quantum2)
     if not all(math.isfinite(v) for v in (start1, start2, target, target2)):
         raise ValueError("Paired ramp setpoints must be finite.")
     step1 = float(primary_step)

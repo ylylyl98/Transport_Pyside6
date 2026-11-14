@@ -26,10 +26,10 @@ class QuickFormTests(unittest.TestCase):
         with patch.object(cfg.magnet, "maximum_rate_a_per_s", .01), patch.object(cfg.magnet, "coil_constant_t_per_a", .2):
             sections = measurement_sections(values, 5)
         rate = next(s for s in sections if any(f['key'] == 'rate_t_per_min' for f in s['fields']))
-        self.assertIn('Configured maximum: 20 Oe/s', rate['description'])
-        self.assertIn('Current request: 20 Oe/s', rate['description'])
-        self.assertIn('voltage limits', rate['description'])
+        self.assertIn('Rate limit: 20 Oe/s.', rate['samplingText'])
         fields = {f['key']: f for s in sections for f in s['fields']}
+        self.assertEqual(fields['rate_t_per_min']['label'], 'Max approach rate (Oe/s)')
+        self.assertAlmostEqual(fields['rate_t_per_min']['value'], 20)
         self.assertTrue(set(BFIELD_HYSTERESIS_LABELS).issubset(fields))
         self.assertEqual(fields['field_acceptance_t']['value'], .5)
         self.assertEqual(fields['field_drift_t_per_s']['value'], .1)
@@ -37,7 +37,10 @@ class QuickFormTests(unittest.TestCase):
     def test_stepped_form_exposes_selected_spacing_and_temperature(self):
         from app.quick.parameters import measurement_sections, build_params
         values = defaults(5)
-        self.assertEqual(values["measurement_mode"], "continuous")
+        self.assertEqual(values["measurement_mode"], "stepped")
+        self.assertAlmostEqual(values["rate_t_per_min"], .06)
+        self.assertAlmostEqual(values["field_step_t"], .005)
+        self.assertEqual(values["temperature_window_s"], 10.)
         values.update(measurement_mode="stepped", field_spacing="step", field_step_t=0.2)
         sections = measurement_sections(values, 5)
         keys = {item["key"] for section in sections for item in section.get("fields", [])}
@@ -65,6 +68,48 @@ class QuickFormTests(unittest.TestCase):
         self.assertNotIn("cooldown_policy", keys)
         self.assertIn("temperature_target_k", keys)
         self.assertIn("SDK", " ".join(section.get("description", "") for section in sections))
+
+    def test_bfield_mode_options_preserve_incompatible_reversal_for_recovery(self):
+        from app.quick.parameters import measurement_sections
+        values = defaults(5)
+        values["measurement_mode"] = "continuous"
+        def fields():
+            return {f["key"]: f for s in measurement_sections(values, 5) for f in s.get("fields", [])}
+        self.assertEqual([o["value"] for o in fields()["sample_reversal_mode"]["options"]], ["unchanged"])
+        values.update(measurement_mode="stepped", sample_reversal_mode="per_point", sample_reversal_settle_s=4.5)
+        self.assertEqual([o["value"] for o in fields()["sample_reversal_mode"]["options"]],
+                         ["unchanged", "per_point", "whole_sweep"])
+        values["measurement_mode"] = "continuous"
+        reversal = fields()["sample_reversal_mode"]
+        self.assertEqual(reversal["value"], "per_point")
+        self.assertEqual([o["value"] for o in reversal["options"]], ["unchanged", "per_point"])
+        self.assertIn("Select Keep current setting", reversal["error"])
+        self.assertEqual(fields()["sample_reversal_settle_s"]["value"], 4.5)
+        values["sample_reversal_mode"] = "unchanged"
+        self.assertNotIn("error", fields()["sample_reversal_mode"])
+        self.assertNotIn("sample_reversal_settle_s", fields())
+
+    def test_bfield_mode_sections_and_conditional_wait_fields(self):
+        from app.quick.parameters import measurement_sections
+        values = defaults(5)
+        values.update(measurement_mode="continuous", wait_for_temperature=True, round_trip=True, pre_sweep_settle_s=3., turnaround_delay_s=7.)
+        def sections():
+            return {s["title"]: s for s in measurement_sections(values, 5)}
+        def keys(section):
+            return {f["key"] for f in section["fields"]}
+        continuous = sections()
+        self.assertTrue({"1 · Sweep", "2 · Wait before ramp", "3 · Measure"}.issubset(continuous))
+        self.assertTrue({"temperature_target_k", "pre_sweep_settle_s", "turnaround_delay_s"}.issubset(keys(continuous["2 · Wait before ramp"])))
+        self.assertEqual(next(f for f in continuous["1 · Sweep"]["fields"] if f["key"] == "rate_t_per_min")["label"], "Sweep rate (Oe/s)")
+        values["measurement_mode"] = "stepped"
+        stepped = sections()
+        self.assertIn("2 · Wait at each point", stepped)
+        self.assertNotIn("2 · Wait before ramp", stepped)
+        self.assertTrue(stepped["Field limits"]["advanced"])
+        values["measurement_mode"] = "continuous"
+        wait = sections()["2 · Wait before ramp"]
+        self.assertEqual({f["key"]: f["value"] for f in wait["fields"]}["turnaround_delay_s"], 7.)
+        self.assertEqual({f["key"]: f["value"] for f in wait["fields"]}["pre_sweep_settle_s"], 3.)
 
     @classmethod
     def setUpClass(cls):
@@ -123,7 +168,7 @@ class QuickFormTests(unittest.TestCase):
         self.service.mode = 5
         self.service.setValue("measurement_mode", "stepped")
         self.load()
-        header = self.find("measurement_section_Hysteresis: set, wait, measure")
+        header = self.find("measurement_section_Field limits")
         header.forceActiveFocus()
         QtTest.QTest.keyClick(self.window, QtCore.Qt.Key_Space)
         self.app.processEvents()
@@ -136,6 +181,55 @@ class QuickFormTests(unittest.TestCase):
         self.assertEqual(float(editor.property("text")), .3)
         self.assertTrue(self.find("field_field_stability_s").isVisible())
         self.assertTrue(self.find("field_field_settle_s").isVisible())
+
+    def test_bfield_forms_at_panel_widths_keep_inputs_inside_window(self):
+        self.service.mode = 5
+        self.service.setValue("start_field_t", -0.35)
+        self.service.setValue("stop_field_t", 0.4)
+        self.service.setValue("read_delay_s", 0.25)
+        self.load(width=520)
+        self.window.setHeight(1800)
+        output = Path(__file__).resolve().parents[1] / "tmp/verification"
+        output.mkdir(parents=True, exist_ok=True)
+        for mode in ("continuous", "stepped"):
+            self.service.setValue("measurement_mode", mode)
+            for width in (520, 366):
+                with self.subTest(mode=mode, width=width):
+                    self.window.setWidth(width)
+                    QtTest.QTest.qWait(80)
+                    for key in ("measurement_mode", "start_field_t", "stop_field_t", "rate_t_per_min", "averages", "read_delay_s"):
+                        item = self.find("field_" + key)
+                        self.assertTrue(item.isVisible(), key)
+                        left = item.mapToScene(QtCore.QPointF()).x()
+                        self.assertGreaterEqual(left, -1, key)
+                        self.assertLessEqual(left + item.width(), width + 1, key)
+                    averages = self.find("field_averages")
+                    read_delay = self.find("field_read_delay_s")
+                    self.assertAlmostEqual(averages.mapToScene(QtCore.QPointF()).y(),
+                                           read_delay.mapToScene(QtCore.QPointF()).y(), delta=1)
+                    self.assertLess(averages.mapToScene(QtCore.QPointF()).x(),
+                                    read_delay.mapToScene(QtCore.QPointF()).x())
+                    if mode == "continuous":
+                        interval = self.find("field_acquisition_delay_s")
+                        self.assertGreater(interval.mapToScene(QtCore.QPointF()).y(),
+                                           read_delay.mapToScene(QtCore.QPointF()).y())
+                    start = self.find("field_start_field_t")
+                    stop = self.find("field_stop_field_t")
+                    self.assertAlmostEqual(start.mapToScene(QtCore.QPointF()).y(),
+                                           stop.mapToScene(QtCore.QPointF()).y(), delta=1)
+                    self.assertLess(start.mapToScene(QtCore.QPointF()).x(),
+                                    stop.mapToScene(QtCore.QPointF()).x())
+                    if mode == "stepped":
+                        index = next(i for i, section in enumerate(self.service.uiSections)
+                                     if section["title"] == "Field limits")
+                        summary = self.find(f"measurementCollapsedSummary_{index}")
+                        self.assertTrue(summary.isVisible())
+                        self.assertLessEqual(summary.mapToScene(QtCore.QPointF()).x() + summary.width(), width + 1)
+                        self.assertLessEqual(summary.property("contentWidth"), summary.width() + 1)
+                    self.assertTrue(self.window.grabWindow().save(str(output / f"bfield_{mode}_{width}.png")))
+        self.assertAlmostEqual(self.service.collect_params().start_field_t, -0.35)
+        self.assertAlmostEqual(self.service.collect_params().stop_field_t, 0.4)
+        self.assertAlmostEqual(self.service.collect_params().read_delay_s, 0.25)
 
     def test_measurement_draft_and_focus_survive_sibling_edits_and_telemetry(self):
         self.load()

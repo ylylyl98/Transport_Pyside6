@@ -174,7 +174,13 @@ measurements and safe cleanup.
    restart. In **Magnet & temperature**, read
    **Review commissioning details**, and acknowledge
    **I reviewed the configured limits and connections** only after checking the
-   real installation. This review is required before connection/control.
+   real installation. This review is required before connection/control. In the
+   default Qt Quick interface, the acknowledgement is saved locally for this
+   Windows user and setup; unchanged settings do not require another review on
+   restart. A setup that has not been reviewed, or whose magnet/temperature
+   configuration changes, requires a new review. Unchecking the acknowledgement clears it. Offline preview does
+   not save or restore it. Check the physical wiring and installation whenever
+   they change, even if the saved configuration is unchanged.
 7. Review the chosen measurement's trajectory, ranges, source selection, timing,
    and output location before starting. **View → Save channel PNGs after
    measurements** controls automatic image export. **History** opens saved data

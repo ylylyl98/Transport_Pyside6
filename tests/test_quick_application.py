@@ -7,7 +7,7 @@ from unittest.mock import patch
 if os.environ.get("TRANSPORT_OFFLINE_VERIFICATION") != "1":
     raise unittest.SkipTest("Run with verify_offline.py")
 
-from PySide6 import QtCore, QtQml, QtWidgets, QtTest
+from PySide6 import QtCore, QtGui, QtQml, QtWidgets, QtTest
 from PySide6.QtQuickControls2 import QQuickStyle
 from app.quick.application import ApplicationBackend
 from app.quick.plot import register_types
@@ -24,7 +24,9 @@ class QuickApplicationTests(unittest.TestCase):
         self.application = QtWidgets.QApplication.instance()
         setup = (SetupConfig("2100", "2100") if self._testMethodName in {
                  "test_close_preserves_owners_until_manual_operation_drains",
-                 "test_optional_commissioning_limits_display_and_invalidate_review"} else SetupConfig())
+                 "test_optional_commissioning_limits_display_and_invalidate_review",
+                 "test_instrument_groups_keep_state_and_stop_controls_visible",
+                 "test_magnet_log_scroll_survives_live_updates"} else SetupConfig())
         setup_patch = patch.object(cfg, "setup", setup)
         setup_patch.start()
         self.addCleanup(setup_patch.stop)
@@ -44,6 +46,181 @@ class QuickApplicationTests(unittest.TestCase):
         self.application.sendPostedEvents(None, QtCore.QEvent.Type.DeferredDelete)
         self.application.processEvents()
 
+    def test_measurement_log_follows_and_preserves_history_position(self):
+        engine = QtQml.QQmlApplicationEngine()
+        warnings = []
+        engine.warnings.connect(lambda items: warnings.extend(str(item) for item in items))
+        engine.rootContext().setContextProperty("appBackend", self.backend)
+        engine.load(QtCore.QUrl.fromLocalFile(str(Path(__file__).resolve().parents[1] / "app/quick/qml/Main.qml")))
+        self.assertTrue(engine.rootObjects(), warnings)
+        window = engine.rootObjects()[0]
+        window.setProperty("showLog", True)
+        for i in range(80):
+            self.backend._measurement.append_log(f"Log entry {i}")
+        QtTest.QTest.qWait(100)
+        view = window.findChild(QtCore.QObject, "measurementLogView")
+        latest = window.findChild(QtCore.QObject, "latestMeasurementLog")
+        end = view.property("contentHeight") - view.property("height")
+        self.assertGreater(end, 100)
+        self.assertAlmostEqual(view.property("contentY"), end, delta=2)
+        point = view.mapToScene(QtCore.QPointF(view.property("width") / 2, view.property("height") / 2))
+        wheel = QtGui.QWheelEvent(point, point, QtCore.QPoint(), QtCore.QPoint(0, 120),
+                                 QtCore.Qt.MouseButton.NoButton, QtCore.Qt.KeyboardModifier.NoModifier,
+                                 QtCore.Qt.ScrollPhase.NoScrollPhase, False)
+        self.application.sendEvent(window, wheel)
+        QtTest.QTest.qWait(50)
+        self.assertFalse(view.property("followLatest"))
+        self.assertLess(view.property("contentY"), end)
+        view.setProperty("contentY", 50.0)
+        self.backend._measurement.append_log("A new entry while reading history")
+        QtTest.QTest.qWait(50)
+        self.assertAlmostEqual(view.property("contentY"), 50.0, delta=2)
+        self.assertTrue(QtCore.QMetaObject.invokeMethod(latest, "clicked"))
+        QtTest.QTest.qWait(50)
+        self.assertTrue(view.property("followLatest"))
+        self.assertAlmostEqual(view.property("contentY"), view.property("contentHeight") - view.property("height"), delta=2)
+        self.backend._measurement.append_log("Another new entry")
+        QtTest.QTest.qWait(50)
+        self.assertAlmostEqual(view.property("contentY"), view.property("contentHeight") - view.property("height"), delta=2)
+        self.assertEqual(warnings, [])
+        window.hide()
+        engine.deleteLater()
+        self.application.sendPostedEvents(None, QtCore.QEvent.Type.DeferredDelete)
+
+    def test_instrument_groups_keep_state_and_stop_controls_visible(self):
+        engine = QtQml.QQmlApplicationEngine()
+        warnings = []
+        engine.warnings.connect(lambda items: warnings.extend(str(item) for item in items))
+        engine.rootContext().setContextProperty("appBackend", self.backend)
+        engine.load(QtCore.QUrl.fromLocalFile(str(Path(__file__).resolve().parents[1] / "app/quick/qml/Main.qml")))
+        self.assertTrue(engine.rootObjects(), warnings)
+        window = engine.rootObjects()[0]
+        window.setProperty("showInstruments", True)
+        pane = window.findChild(QtCore.QObject, "instrumentPane")
+        pane.setProperty("section", 0)
+        QtTest.QTest.qWait(50)
+        def visual_find(item, name):
+            if item.objectName() == name:
+                return item
+            for child in item.childItems():
+                found = visual_find(child, name)
+                if found is not None:
+                    return found
+            return None
+        gate = visual_find(window.contentItem(), "manualGateControls_g1")
+        target = visual_find(window.contentItem(), "manualGateTarget_g1")
+        self.assertFalse(gate.property("checked"))
+        gate.setProperty("checked", True)
+        target.setProperty("text", "0.123")
+        self.backend._instruments.changed.emit()
+        pane.setProperty("section", 2)
+        QtTest.QTest.qWait(50)
+        field = window.findChild(QtCore.QObject, "magnetFieldSettings")
+        temperature = window.findChild(QtCore.QObject, "magnetTemperatureSettings")
+        self.assertTrue(field.property("checked"))
+        self.assertFalse(temperature.property("checked"))
+        field.setProperty("checked", False)
+        temperature.setProperty("checked", True)
+        self.backend._magnet.changed.emit()
+        QtTest.QTest.qWait(30)
+        self.assertTrue(window.findChild(QtCore.QObject, "magnetStopField").property("visible"))
+        self.assertTrue(window.findChild(QtCore.QObject, "magnetStopTemperature").property("visible"))
+        pane.setProperty("section", 1)
+        QtTest.QTest.qWait(30)
+        connection = visual_find(window.contentItem(), "connectionGateDetails_1")
+        self.assertFalse(connection.property("checked"))
+        connection.setProperty("checked", True)
+        pane.setProperty("section", 0)
+        QtTest.QTest.qWait(30)
+        self.assertTrue(gate.property("checked"))
+        self.assertEqual(target.property("text"), "0.123")
+        pane.setProperty("section", 2)
+        QtTest.QTest.qWait(30)
+        self.assertFalse(field.property("checked"))
+        self.assertTrue(temperature.property("checked"))
+        pane.setProperty("section", 1)
+        self.assertTrue(connection.property("checked"))
+        pane.setProperty("section", 6)
+        QtTest.QTest.qWait(30)
+        signal_group = visual_find(window.contentItem(), "signalGroup_Lock-in calibration")
+        self.assertFalse(signal_group.property("checked"))
+        signal_group.setProperty("checked", True)
+        self.backend._instruments.signalFieldsChanged.emit()
+        pane.setProperty("section", 7)
+        QtTest.QTest.qWait(30)
+        appearance = visual_find(window.contentItem(), "runtimeGroup_Appearance")
+        self.assertTrue(appearance.property("checked"))
+        appearance.setProperty("checked", False)
+        pane.setProperty("section", 6)
+        self.assertTrue(signal_group.property("checked"))
+        pane.setProperty("section", 7)
+        self.assertFalse(appearance.property("checked"))
+        self.assertEqual(warnings, [])
+        window.hide()
+        engine.deleteLater()
+        self.application.sendPostedEvents(None, QtCore.QEvent.Type.DeferredDelete)
+
+    def test_magnet_log_scroll_survives_live_updates(self):
+        engine = QtQml.QQmlApplicationEngine()
+        warnings = []
+        engine.warnings.connect(lambda items: warnings.extend(str(item) for item in items))
+        engine.rootContext().setContextProperty("appBackend", self.backend)
+        engine.load(QtCore.QUrl.fromLocalFile(str(Path(__file__).resolve().parents[1] / "app/quick/qml/Main.qml")))
+        self.assertTrue(engine.rootObjects(), warnings)
+        window = engine.rootObjects()[0]
+        window.setProperty("showInstruments", True)
+        pane = window.findChild(QtCore.QObject, "instrumentPane")
+        pane.setProperty("section", 2)
+        QtTest.QTest.qWait(100)
+        diagnostics = window.findChild(QtCore.QObject, "magnetDiagnostics")
+        self.assertIsNotNone(diagnostics)
+        diagnostics.setProperty("checked", True)
+        for i in range(500):
+            self.backend._magnet._report(f"Instrument entry {i:03d}")
+        QtTest.QTest.qWait(100)
+        view = window.findChild(QtCore.QObject, "magnetLogView")
+        latest = window.findChild(QtCore.QObject, "latestMagnetLog")
+        outer = window.findChild(QtCore.QObject, "instrumentScroller2").property("contentItem")
+        outer.setProperty("contentY", outer.property("contentHeight") - outer.property("height"))
+        QtTest.QTest.qWait(50)
+        end = view.property("contentHeight") - view.property("height")
+        self.assertGreater(end, 100)
+        self.assertAlmostEqual(view.property("contentY"), end, delta=2)
+        point = view.mapToScene(QtCore.QPointF(view.property("width") / 2, view.property("height") / 2))
+        wheel = QtGui.QWheelEvent(point, point, QtCore.QPoint(), QtCore.QPoint(0, 120),
+                                 QtCore.Qt.MouseButton.NoButton, QtCore.Qt.KeyboardModifier.NoModifier,
+                                 QtCore.Qt.ScrollPhase.NoScrollPhase, False)
+        outer_y = outer.property("contentY")
+        self.application.sendEvent(window, wheel)
+        QtTest.QTest.qWait(50)
+        self.assertFalse(view.property("followLatest"))
+        self.assertLess(view.property("contentY"), end)
+        self.assertAlmostEqual(outer.property("contentY"), outer_y, delta=2)
+        view.setProperty("contentY", 200.0)
+        wheel_down = QtGui.QWheelEvent(point, point, QtCore.QPoint(), QtCore.QPoint(0, -120),
+                                      QtCore.Qt.MouseButton.NoButton, QtCore.Qt.KeyboardModifier.NoModifier,
+                                      QtCore.Qt.ScrollPhase.NoScrollPhase, False)
+        self.application.sendEvent(window, wheel_down)
+        QtTest.QTest.qWait(20)
+        history_y = view.property("contentY")
+        self.assertGreater(history_y, 200)
+        self.assertAlmostEqual(outer.property("contentY"), outer_y, delta=2)
+        for i in range(5):
+            self.backend._magnet._report(f"New instrument entry {i}")
+            QtTest.QTest.qWait(20)
+            self.assertAlmostEqual(view.property("contentY"), history_y, delta=2)
+        self.assertTrue(QtCore.QMetaObject.invokeMethod(latest, "clicked"))
+        QtTest.QTest.qWait(50)
+        self.assertTrue(view.property("followLatest"))
+        self.assertAlmostEqual(view.property("contentY"), view.property("contentHeight") - view.property("height"), delta=2)
+        self.backend._magnet._report("Latest entry")
+        QtTest.QTest.qWait(50)
+        self.assertAlmostEqual(view.property("contentY"), view.property("contentHeight") - view.property("height"), delta=2)
+        self.assertEqual(warnings, [])
+        window.hide()
+        engine.deleteLater()
+        self.application.sendPostedEvents(None, QtCore.QEvent.Type.DeferredDelete)
+
     def test_all_measurement_and_instrument_pages_load_without_widget_views(self):
         prior_widgets = len(QtWidgets.QApplication.allWidgets())
         engine = QtQml.QQmlApplicationEngine()
@@ -59,6 +236,10 @@ class QuickApplicationTests(unittest.TestCase):
             for i in range(len(self.backend._measurement.modes)):
                 self.backend._measurement.mode = i
                 self.application.processEvents()
+                estimate = window.findChild(QtCore.QObject, "measurementTimeEstimate")
+                self.assertIsNotNone(estimate)
+                self.assertEqual(estimate.property("text"), self.backend._measurement.timing.summary)
+                self.assertTrue(estimate.property("text"))
             for i in range(8):
                 pane.setProperty("section", i)
                 self.application.processEvents()

@@ -39,8 +39,8 @@ ColumnLayout {
             Layout.fillWidth: true
             spacing: 6
             Rectangle { Layout.fillWidth: true; implicitHeight: 1; color: Theme.border }
-            Label { text: group.modelData; font.bold: true; color: Theme.text }
-            FieldForm { fields: section.lockin.fields.filter(item => item.group === group.modelData).map(item => Object.assign({}, item, {group: ""})); target: section.lockin; locked: section.lockin.busy || section.measurementActive; Layout.fillWidth: true }
+            ActionButton { id: groupToggle; objectName: "lockinGroup_" + group.modelData; text: (checked ? "- " : "+ ") + group.modelData; checkable: true; Layout.fillWidth: true }
+            FieldForm { visible: groupToggle.checked; fields: section.lockin.fields.filter(item => item.group === group.modelData).map(item => Object.assign({}, item, {group: ""})); target: section.lockin; locked: section.lockin.busy || section.measurementActive; Layout.fillWidth: true }
         }
     }
     ColumnLayout {
@@ -48,8 +48,9 @@ ColumnLayout {
         Layout.fillWidth: true
         spacing: 6
         Rectangle { Layout.fillWidth: true; implicitHeight: 1; color: Theme.border }
-        Label { text: "SR850 display"; font.bold: true; color: Theme.text }
+        ActionButton { id: displayToggle; objectName: "lockinDisplayToggle"; text: (checked ? "- " : "+ ") + "SR850 display"; checkable: true; Layout.fillWidth: true }
         RowLayout {
+            visible: displayToggle.checked
             Layout.fillWidth: true
             ColumnLayout {
                 Layout.fillWidth: true; spacing: 4
@@ -62,7 +63,7 @@ ColumnLayout {
                 InputField { id: displayCenter; placeholderText: "Center"; Layout.fillWidth: true; Accessible.name: "Lock-in display center" }
             }
         }
-        ActionButton { tone: "primary"; text: "Apply display scale"; enabled: section.lockin.displayAvailable && displayScale.text.trim().length > 0 && displayCenter.text.trim().length > 0; onClicked: section.lockin.applyDisplay(Number(displayScale.text), Number(displayCenter.text)) }
+        ActionButton { visible: displayToggle.checked; tone: "primary"; text: "Apply display scale"; enabled: section.lockin.displayAvailable && displayScale.text.trim().length > 0 && displayCenter.text.trim().length > 0; onClicked: section.lockin.applyDisplay(Number(displayScale.text), Number(displayCenter.text)) }
     }
     ColumnLayout {
         Layout.fillWidth: true; spacing: 6

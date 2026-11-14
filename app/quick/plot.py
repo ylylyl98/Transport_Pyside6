@@ -33,6 +33,20 @@ AXIS_KEYS = {'Step Index': 'index', 'Vtg': 'vtg', 'Vbg': 'vbg', 'Vds': 'vds',
 DEFAULT_CHANNELS = ['Ids_DC', 'Ids_X', 'Ids_Y', 'Ids_Keithley']
 
 
+def channel_unit(channel):
+    if channel.startswith('B_') and channel.endswith('_T'):
+        return 'T'
+    if channel.endswith('_temperature_K'):
+        return 'K'
+    if channel.startswith('raw_') or channel == 'Vds_measured':
+        return 'V'
+    return 'A'
+
+
+def default_channel_label(channel):
+    return f'{channel} ({channel_unit(channel)})'
+
+
 class NumericBuffer:
     """Amortized O(1) append, zero-copy views, incrementally maintained bounds."""
     def __init__(self, values=()):
@@ -279,7 +293,7 @@ class PlotModel(QObject):
         self._queue(True)
     title = Property(str, _get_title, _set_title, notify=changed)
     xLabel = Property(str, lambda s: s._x_label, notify=changed)
-    yLabel = Property(str, lambda s: s._y_label or f'{s._channel} (A)', notify=changed)
+    yLabel = Property(str, lambda s: s._y_label or default_channel_label(s._channel), notify=changed)
     zLabel = Property(str, lambda s: s._z_label, notify=changed)
     isHeatmap = Property(bool, lambda s: s._heatmap is not None, notify=changed)
     pointCount = Property(int, lambda s: s._count, notify=frameReady)
@@ -288,8 +302,16 @@ class PlotModel(QObject):
 
     @Property('QStringList', notify=changed)
     def legendEntries(self):
-        return list(dict.fromkeys(self.display_legend(trace, channel) for channel in self.channels()
-                                 for trace, _, _ in self.traces(channel) if (trace.label or self._overlay) and not trace.marker))
+        entries = list(dict.fromkeys(self.display_legend(trace, channel) for channel in self.channels()
+                                     for trace, _, _ in self.traces(channel) if (trace.label or self._overlay) and not trace.marker))
+        if any(self._has_reversal(trace) for channel in self.channels() for trace, _, _ in self.traces(channel)):
+            entries.append('Readback reversal')
+        return entries
+
+    @staticmethod
+    def _has_reversal(trace):
+        flags = trace.columns.get('Field_reversal_warning')
+        return flags is not None and np.any(np.isfinite(flags.values) & (flags.values != 0))
 
     def display_legend(self, trace, channel):
         text = self.legend_text(trace)
@@ -555,11 +577,15 @@ class PlotModel(QObject):
                 values[canonical] = float(value) if value is not None else math.nan
             except (TypeError, ValueError):
                 pass
+        if str(record.get('Field_quality', '')).lower() in ('readback_reversal', 'readback_reversal_offset'):
+            values['Field_reversal_warning'] = 1.0
+        elif isinstance(record.get('Field_reversal_warning'), str):
+            values['Field_reversal_warning'] = float(record['Field_reversal_warning'].strip().lower() in ('true', '1', '1.0', 'yes'))
         values.setdefault('index', float(self._count))
         values.setdefault('x', float(self._count))
         self._traces[-1].append(values)
         self._count += 1
-        self._queue(metadata=new_group)
+        self._queue(metadata=new_group or bool(values.get('Field_reversal_warning', 0)))
 
     @Slot('QVariantMap')
     def finishRun(self, result):
@@ -577,7 +603,13 @@ class PlotModel(QObject):
             x, y = (np.asarray(trace[k], dtype=float).reshape(-1) for k in ('x', 'y'))
             if len(x) != len(y):
                 raise ValueError('Trace X and Y lengths must match')
-            result.append(Trace({'x': NumericBuffer(x), 'y': NumericBuffer(y)},
+            flags = np.asarray(trace.get('reversal_warning', np.zeros(len(x))), dtype=float).reshape(-1)
+            if not len(flags):
+                flags = np.zeros(len(x))
+            if len(flags) != len(x):
+                raise ValueError('Trace reversal flags must match X and Y lengths')
+            result.append(Trace({'x': NumericBuffer(x), 'y': NumericBuffer(y),
+                                 'Field_reversal_warning': NumericBuffer(flags)},
                                 str(trace.get('label', '')), str(trace.get('direction', '')),
                                 str(trace.get('channel', '')), str(trace.get('color', '')),
                                 marker=str(trace.get('marker', '')), style=str(trace.get('style', 'auto'))))
@@ -634,15 +666,21 @@ class PlotModel(QObject):
 
     def channelLabel(self, channel):
         if self._overlay or self._two:
-            return self._channel_labels.get(channel, f'{channel} (A)')
+            return self._channel_labels.get(channel, default_channel_label(channel))
         if self._heatmap is not None or not self._four:
             return self.yLabel
-        return self._channel_labels.get(channel, f'{channel} (A)')
+        return self._channel_labels.get(channel, default_channel_label(channel))
 
     def traces(self, channel):
         for trace in self._traces:
             if self._run:
                 xkey = AXIS_KEYS.get(self._resolved_axis, 'x')
+                if self._resolved_axis in ('B', 'B-field'):
+                    source_field = {'Ids_Keithley': 'B_Keithley_T',
+                                    'Keithley_current': 'B_Keithley_T',
+                                    'Ibias2_Keithley': 'B_Bias2_T'}.get(channel)
+                    if source_field in trace.columns:
+                        xkey = source_field
                 if xkey not in trace.columns:
                     xkey = 'x'
                 if channel not in trace.columns:
@@ -820,7 +858,7 @@ class PlotModel(QObject):
                             'status': snapshot.get('status', 'running' if self._run else 'preview'),
                             'fingerprint': [0, 0], 'metadata': deepcopy(snapshot)})
         x_name, x_unit = split_label(self._x_label, self._resolved_axis, '')
-        signal, y_unit = split_label(self._y_label, self._channel, 'A')
+        signal, y_unit = split_label(self._y_label, self._channel, channel_unit(self._channel))
         if self._overlay or self._two:
             signal = self.channels()[0]
         view = self.captureView()
@@ -840,9 +878,11 @@ class PlotModel(QObject):
                     direction = 'backward'
                 if direction in ('forwards', '1', 'fwd'):
                     direction = 'forward'
+                flags = trace.columns.get('Field_reversal_warning')
                 data['traces'].append({'path': str(source_paths[path_index]), 'x': frozen(x.values),
                                        'y': frozen(y.values), 'direction': direction or 'unknown',
-                                       'condition': trace.label})
+                                       'condition': trace.label,
+                                       'reversal_warning': frozen(flags.values if flags is not None else np.zeros(x.size))})
             return data
 
         if self._heatmap is not None:
@@ -1052,7 +1092,7 @@ class QuickPlot(QQuickPaintedItem):
             if self._editable_y_axis:
                 text = model.channelLabel(channel) if channel else 'Choose Y'
                 if model.layout == 'overlay' and model.overlayAxis == 'shared':
-                    text = 'Current (A)' if model._run or all(model.channelLabel(c).endswith('(A)') for c in model.channels()) else model.yLabel
+                    text = 'Current (A)' if all(model.channelLabel(c).endswith('(A)') for c in model.channels()) else 'Signal'
                 color = 'first' if model.layout == 'overlay' and model.overlayAxis == 'dual' else ''
                 rows.append(dict(role='y', channel=channel, panel=index, text=text,
                                  cx=rect.left()-63, cy=rect.center().y(), extent=rect.height(), rotation=-90, color=color))
@@ -1211,7 +1251,7 @@ class QuickPlot(QQuickPaintedItem):
         painter.rotate(-90)
         ylabel = model.channelLabel(channel)
         if overlay and not dual:
-            ylabel = 'Current (A)' if model._run or all(model.channelLabel(c).endswith('(A)') for c in display_channels) else model.yLabel
+            ylabel = 'Current (A)' if all(model.channelLabel(c).endswith('(A)') for c in display_channels) else 'Signal'
         if model.isHeatmap or not self._editable_y_axis:
             painter.drawText(QRectF(-rect.height() / 2, -15, rect.height(), 22), Qt.AlignmentFlag.AlignHCenter,
                              ylabel)
@@ -1271,6 +1311,22 @@ class QuickPlot(QQuickPaintedItem):
                                     endpoints.append((trace, index, px, py))
                             else:
                                 painter.drawEllipse(QPointF(px, py), 2.1, 2.1)
+                flags = trace.columns.get('Field_reversal_warning')
+                if flags is not None:
+                    size = min(x.size, y.size, flags.size)
+                    mask = np.isfinite(flags.values[:size]) & (flags.values[:size] != 0) & np.isfinite(x.values[:size]) & np.isfinite(y.values[:size])
+                    painter.setPen(QPen(QColor('#6b4200'), 1))
+                    painter.setBrush(QColor('#e39a16'))
+                    for xx, yy in zip(x.values[:size][mask], y.values[:size][mask]):
+                        px = rect.left() + (xx - xlim[0]) / (xlim[1] - xlim[0]) * rect.width()
+                        py = rect.bottom() - (yy - ylim[0]) / (ylim[1] - ylim[0]) * rect.height()
+                        diamond = QPainterPath()
+                        diamond.moveTo(px, py - 5)
+                        diamond.lineTo(px + 5, py)
+                        diamond.lineTo(px, py + 5)
+                        diamond.lineTo(px - 5, py)
+                        diamond.closeSubpath()
+                        painter.drawPath(diamond)
         painter.restore()
         if dual:
             self._paint_right_axis(painter, rect, display_channels[1])
@@ -1279,6 +1335,9 @@ class QuickPlot(QQuickPaintedItem):
         else:
             legends = [(trace, model.channels().index(name) if overlay or model.layout == 'two' else i, name)
                        for i, (name, trace, _, _) in enumerate(curve_rows) if (trace.label or overlay) and not trace.marker]
+            if any(model._has_reversal(trace) for _, trace, _, _ in curve_rows):
+                warning = Trace(label='Readback reversal', color='#b87400')
+                legends.insert(0, (warning, 0, ''))
             if legends:
                 available = max(1, min(4, int(rect.height() / 36)))
                 shown = legends[:available]

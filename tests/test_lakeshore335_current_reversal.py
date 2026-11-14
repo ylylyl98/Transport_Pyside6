@@ -29,6 +29,60 @@ class CurrentReversalTests(unittest.TestCase):
     def adapter(self):
         resource=Resource(); adapter=LakeShore335Adapter(visa_resource=resource); adapter.connect()
         return adapter, resource
+    def test_query_timeout_does_not_resend_and_invalid_response_never_writes(self):
+        adapter, resource = self.adapter()
+        calls = []
+        def timed_out(command):
+            calls.append(command)
+            raise TimeoutError("response timeout")
+        resource.query = timed_out
+        with self.assertRaisesRegex(LakeShore335Error, "Before INTYPE write.*response timeout"):
+            adapter.set_current_reversal('B', False)
+        self.assertEqual(calls, ['INTYPE? B'])
+        self.assertEqual(resource.writes, [])
+        resource.query = lambda command: ';'
+        with self.assertRaisesRegex(LakeShore335Error, "Before INTYPE write.*Malformed INTYPE B readback"):
+            adapter.set_current_reversal('B', False)
+        self.assertEqual(resource.writes, [])
+
+    def test_message_pacing_and_verification_failure(self):
+        class Clock:
+            now = 0.0
+            def clock(self): return self.now
+            def sleep(self, seconds): self.now += seconds
+        clock = Clock()
+        resource = Resource()
+        events = []
+        original_query, original_write = resource.query, resource.write
+        def query(command):
+            events.append((clock.now, command))
+            if command == 'INTYPE? B' and resource.writes:
+                return ';'
+            return original_query(command)
+        def write(command):
+            events.append((clock.now, command))
+            original_write(command)
+        resource.query, resource.write = query, write
+        adapter = LakeShore335Adapter(visa_resource=resource, io_clock=clock.clock, io_sleep=clock.sleep)
+        adapter.connect()
+        with self.assertRaisesRegex(LakeShore335Error, "INTYPE verification readback.*Malformed"):
+            adapter.set_current_reversal('B', False)
+        self.assertEqual([command for _, command in events],
+                         ['*IDN?', 'INTYPE? B', 'INTYPE B,3,1,8,0,1', 'INTYPE? B'])
+        for (before, _), (after, _) in zip(events, events[1:]):
+            self.assertGreaterEqual(after - before, 0.05 - 1e-12)
+        self.assertEqual(resource.writes, ['INTYPE B,3,1,8,0,1'])
+
+    def test_resource_without_query_uses_one_write_and_read(self):
+        class LegacyResource:
+            def __init__(self): self.commands = []
+            def write(self, command): self.commands.append(command)
+            def read(self): return 'LSCI,MODEL335,SN,2.2'
+            def close(self): pass
+        resource = LegacyResource()
+        adapter = LakeShore335Adapter(visa_resource=resource)
+        self.assertEqual(adapter.connect(), 'LSCI,MODEL335,SN,2.2')
+        self.assertEqual(resource.commands, ['*IDN?'])
     def test_both_channels_and_off_keeps_temperature_reads(self):
         adapter,resource=self.adapter()
         initial=adapter.read_input_configurations()['inputs']

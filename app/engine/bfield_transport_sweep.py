@@ -410,8 +410,7 @@ def validate_2100_fields(params):
     return start, stop
 
 
-def validate_stepped_params(params: BFieldTransportParams) -> tuple[float, ...]:
-    targets = build_stepped_targets(params)
+def validate_temperature_wait(params):
     for key in ("temperature_target_k", "temperature_tolerance_k", "temperature_window_s",
                 "temperature_span_k", "temperature_drift_k_per_min", "temperature_timeout_s"):
         value = float(getattr(params, key))
@@ -419,6 +418,11 @@ def validate_stepped_params(params: BFieldTransportParams) -> tuple[float, ...]:
             raise BFieldTransportSafetyError(f"{key} must be positive and finite")
     if params.temperature_timeout_s < params.temperature_window_s:
         raise BFieldTransportSafetyError("Temperature timeout must cover the stability window")
+
+
+def validate_stepped_params(params: BFieldTransportParams) -> tuple[float, ...]:
+    targets = build_stepped_targets(params)
+    validate_temperature_wait(params)
     if params.magnet_backend == "1000":
         tol = float(params.field_tolerance_t)
         dwell = float(params.field_stability_s)
@@ -439,9 +443,9 @@ def validate_stepped_params(params: BFieldTransportParams) -> tuple[float, ...]:
                 raise BFieldTransportSafetyError(f"{key} must be positive and finite")
         gap = float(params.field_max_gap_t)
         if not math.isfinite(gap) or gap < 0:
-            raise BFieldTransportSafetyError("Maximum actual field gap must be nonnegative and finite")
+            raise BFieldTransportSafetyError("Point gap warning threshold must be nonnegative and finite")
         if gap and gap + 1e-12 < max(abs(b-a) for a, b in zip(targets, targets[1:])):
-            raise BFieldTransportSafetyError("Maximum actual field gap must cover the largest planned interval")
+            raise BFieldTransportSafetyError("Point gap warning threshold must cover the largest planned interval")
         if not math.isfinite(dwell) or dwell <= 0 or not math.isfinite(settle) or settle < 0:
             raise BFieldTransportSafetyError("Field stability must be positive and settle time nonnegative")
         if params.field_timeout_s < dwell + settle:
@@ -575,11 +579,28 @@ def write_series_manifest(path: str, *, params: BFieldTransportParams, validatio
         payload["runtime"] = dict(runtime)
     if params.magnet_backend == "1000" and params.measurement_mode == "stepped":
         payload["hysteresis_policy"] = {
-            "version": 1, "quality_failure_action": "stop_and_preserve",
+            "version": 5, "quality_failure_action": "stop_and_preserve",
+            "reversal_action": "flag_and_continue",
+            "reversal_warning_threshold_t": params.field_reversal_t,
+            "reversal_diagnostic": "current_derived_readback_not_independent_sample_field",
+            "reversal_warning_points": sum(bool(row.get("Field_reversal_warning")) for row in payload["results"]),
+            "reversal_warnings_observed": dict(validation.get("readback_reversal_warnings", {"point_count": 0, "events": []})),
+            "coverage_gap_action": "flag_and_continue",
+            "qualification_timeout_action": "automatic_requalification_wait",
+            "qualification_waits_observed": dict(validation.get("qualification_waits", {"count": 0, "events": []})),
+            "skipped_quality_points": dict(validation.get("skipped_quality_points", {"count": 0, "events": []})),
+            "duplicate_action": "skip_nominal_point",
+            "history_diagnostics_action": "flag_and_requalify",
+            "target_overshoot_action": "skip_interior_or_record_actual_endpoint",
+            "requested_scan_envelope_action": "flag_within_commissioned_limits",
+            "field_quality_warnings_observed": dict(validation.get("field_quality_warnings", {"count": 0, "events": []})),
             "field_axis": "instrument_current_derived_readback_not_calibrated_sample_field",
             "history_scope": "acquired_readbacks_only_unobserved_transients_not_excluded",
             "crossed_nominal_targets": "logged_and_skipped_without_reversal",
             "automatic_gap_limit": "twice_largest_planned_interval_when_zero",
+            "preparation": "one_direction_progressive_70_percent_remaining_rate_floor_20_percent",
+            "preparation_reversal_bound": "active_band_rate_times_no_progress_budget_plus_approach_tolerance",
+            "preparation_qualification": "paused_driven_endpoint_span_drift_and_stability_before_new_acquisition_history",
         }
     temporary = path + ".tmp"
     with open(temporary, "w", encoding="utf-8") as handle:
@@ -602,6 +623,8 @@ class TransportSweepPlan:
         unsupported = set(validation_kwargs) - {"max_field_t"}
         if unsupported:
             raise TypeError(f"Unsupported plan validation options: {sorted(unsupported)}; instrument rate limits come from readback")
+        if not math.isfinite(params.read_delay_s) or params.read_delay_s < 0:
+            raise BFieldTransportSafetyError("DAQ read delay must be finite and nonnegative")
         if params.sample_reversal_mode not in {"unchanged", "per_point", "whole_sweep"}:
             raise BFieldTransportSafetyError("Unknown sample current reversal mode")
         try:
@@ -614,7 +637,36 @@ class TransportSweepPlan:
             raise BFieldTransportSafetyError("Automatic sample reversal requires APS100 stepped measurement")
         if params.magnet_backend not in {"1000", "2100"}:
             raise BFieldTransportSafetyError("Unknown magnet backend")
+        from app.engine.field_approach import normalize_approach, approach_targets
+        try:
+            approach = normalize_approach(getattr(params, "field_approach", "auto"),
+                "no_overshoot" if params.measurement_mode == "stepped" else "linear", allow_hysteresis=True)
+        except ValueError as exc:
+            raise BFieldTransportSafetyError(str(exc)) from exc
+        if approach == "linear_no_backward" and (params.magnet_backend != "1000" or params.measurement_mode != "stepped"):
+            raise BFieldTransportSafetyError("Linear — No Backward requires APS100 Stepped hysteresis measurement")
+        polling_profile = getattr(params, "aps100_polling_profile", "standard")
+        if polling_profile not in {"standard", "reduced_mode_queries"}:
+            raise BFieldTransportSafetyError("Unknown APS100 polling comparison profile")
+        if polling_profile != "standard" and not (
+                params.magnet_backend == "1000" and params.measurement_mode == "stepped"
+                and approach in {"no_overshoot", "linear_no_backward"}):
+            raise BFieldTransportSafetyError(
+                "Polling comparison requires APS100 Stepped No Overshoot or Linear — No Backward; select Standard polling otherwise")
+        no_overshoot_profile = getattr(params, "aps100_no_overshoot_profile", "standard")
+        if no_overshoot_profile not in {"standard", "short_tail"}:
+            raise BFieldTransportSafetyError("Unknown APS100 No Overshoot approach profile")
+        if no_overshoot_profile != "standard" and not (
+                params.magnet_backend == "1000" and params.measurement_mode == "stepped"
+                and approach == "no_overshoot"):
+            raise BFieldTransportSafetyError(
+                "Shorter slow approach requires APS100 Stepped No Overshoot; select Standard otherwise")
+        if params.measurement_mode == "continuous" and approach == "oscillate":
+            raise BFieldTransportSafetyError(
+                "Oscillate requires Stepped mode; choose Linear or No Overshoot for continuous endpoints")
         if params.magnet_backend == "2100":
+            if getattr(params, "field_approach", "auto") != "auto":
+                raise BFieldTransportSafetyError("2100 field approach is SDK-managed")
             if params.measurement_mode != "stepped":
                 raise BFieldTransportSafetyError("2100 B-field Sweep requires Stepped mode")
             start, stop = validate_2100_fields(params)
@@ -637,12 +689,36 @@ class TransportSweepPlan:
                                             max_field_t=validation_kwargs.get("max_field_t"))
         rate_t_per_min_to_a_per_s(params.rate_t_per_min)
         validation = {"start_field_t": start, "stop_field_t": stop,
+                      "field_approach": approach,
                       "rate_control": "requested ceiling capped by stored APS100 RANGE/RATE table",
                       "rate_a_per_s": None, "rate_t_per_min": None}
         if params.measurement_mode not in {"continuous", "stepped"}:
             raise BFieldTransportSafetyError("Measurement mode must be continuous or stepped")
+        for key in ("pre_sweep_settle_s", "turnaround_delay_s"):
+            value = float(getattr(params, key))
+            if not math.isfinite(value) or value < 0:
+                raise BFieldTransportSafetyError(f"{key} must be finite and nonnegative")
+        if params.measurement_mode == "continuous":
+            if params.wait_for_temperature:
+                validate_temperature_wait(params)
+            if not math.isfinite(params.field_timeout_s) or params.field_timeout_s <= 0:
+                raise BFieldTransportSafetyError("Field wait timeout must be positive and finite")
+            if not math.isfinite(params.field_no_progress_s) or params.field_no_progress_s <= 0:
+                raise BFieldTransportSafetyError("Field no-progress timeout must be positive and finite")
         if params.measurement_mode == "stepped":
             params.field_points = len(validate_stepped_params(params))
+        try:
+            # Check every planned excursion before configuring any instrument.
+            targets = (validate_stepped_params(params) if params.measurement_mode == "stepped"
+                       else [start, stop] + ([start] if params.round_trip else []))
+            limit = validation_kwargs.get("max_field_t") or aps100_transport_field_limit()
+            for a, b in zip(targets, targets[1:]):
+                # Direction/history enforcement for this direct path belongs to
+                # the hysteresis worker, never the generic Linear move API.
+                approach_targets(a, b, params.field_tolerance_t,
+                                 "linear" if approach == "linear_no_backward" else approach, limit)
+        except ValueError as exc:
+            raise BFieldTransportSafetyError(str(exc)) from exc
         conditions = enabled_conditions(params.conditions, ratio=params.ratio, ratio_target=params.ratio_target)
         return cls(
             params=params,
@@ -694,8 +770,12 @@ class BFieldTransportSweep:
 
     def run(self, *, persistent_field_confirmed: bool = False) -> list[dict]:
         params = self.plan.params
+        if self.plan.validation.get("field_approach", "linear") != "linear":
+            raise BFieldTransportSafetyError("Nonlinear field approaches require the acknowledged Qt controller")
         if params.measurement_mode == "stepped":
             raise BFieldTransportSafetyError("Stepped transport requires the acknowledged Qt controller")
+        if params.wait_for_temperature or params.pre_sweep_settle_s or params.turnaround_delay_s or params.read_delay_s:
+            raise BFieldTransportSafetyError("Preparation and DAQ read delays require the acknowledged Qt controller")
         final_mode = "driven"
         started = False
         captured_rates = captured_limits = None

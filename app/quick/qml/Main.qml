@@ -339,7 +339,7 @@ ApplicationWindow {
     Drawer {
         id: instrumentDrawer
         objectName: "instrumentDrawer"
-        width: Math.min(500, window.width - 60)
+        width: window.narrow ? window.width : Math.min(500, window.width - 60)
         y: window.header.height
         height: window.height - window.header.height - measurementControls.height
         edge: Qt.RightEdge
@@ -505,6 +505,8 @@ ApplicationWindow {
                         if (preview.error) return "Preview unavailable: " + preview.error
                         if (preview.stale) return "Updating preview for the current page and settings…"
                         return preview.summary + (window.backend.measurement.mode === 4 ? " Selected condition only; repeated at each B-field target." : "")
+                            + "\n" + window.backend.measurement.timing.summary
+                            + (window.backend.measurement.mode === 4 ? " (whole batch)" : "")
                     }
                     color: window.backend.measurement.sweepPreview.error ? Theme.danger : window.backend.measurement.sweepPreview.stale ? Theme.warning : Theme.muted
                     font.pointSize: Theme.captionPointSize
@@ -542,13 +544,46 @@ ApplicationWindow {
                         RowLayout {
                             Layout.fillWidth: true
                             Label { text: "Measurement log"; font.bold: true; color: Theme.text; Layout.fillWidth: true }
+                            ActionToolButton {
+                                objectName: "latestMeasurementLog"
+                                text: "Latest"
+                                Accessible.name: "Jump to latest measurement log"
+                                onClicked: { logView.followLatest = true; logView.jumpToLatest() }
+                            }
                             ActionToolButton { objectName: "closeMeasurementLog"; text: "Close"; Accessible.name: "Close measurement log"; onClicked: window.showLog = false }
                         }
-                        ScrollView {
+                        Flickable {
+                            id: logView
+                            objectName: "measurementLogView"
                             Layout.fillWidth: true; Layout.fillHeight: true
-                            clip: true; contentWidth: availableWidth
-                            ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
-                            TextArea {
+                            clip: true
+                            contentWidth: width
+                            contentHeight: logTextArea.contentHeight
+                            boundsBehavior: Flickable.StopAtBounds
+                            property bool followLatest: true
+                            function jumpToLatest() {
+                                contentY = Math.max(0, contentHeight - height)
+                            }
+                            onFollowLatestChanged: if (followLatest) Qt.callLater(jumpToLatest)
+                            onContentHeightChanged: if (followLatest) Qt.callLater(jumpToLatest)
+                            onHeightChanged: if (followLatest) Qt.callLater(jumpToLatest)
+                            onMovementStarted: followLatest = false
+                            ScrollBar.vertical: ScrollBar {
+                                id: logScrollBar
+                                onPressedChanged: if (pressed) logView.followLatest = false
+                            }
+                            WheelHandler {
+                                onWheel: function(event) {
+                                    logView.followLatest = false
+                                    const delta = event.pixelDelta.y !== 0 ? event.pixelDelta.y : event.angleDelta.y / 120 * 40
+                                    logView.contentY = Math.max(0, Math.min(logView.contentHeight - logView.height,
+                                                                           logView.contentY - delta))
+                                    event.accepted = true
+                                }
+                            }
+                            TextEdit {
+                                id: logTextArea
+                                width: logView.width
                                 text: window.backend.measurement.logText
                                 readOnly: true
                                 selectByMouse: true
@@ -556,7 +591,6 @@ ApplicationWindow {
                                 font.family: "Consolas"
                                 wrapMode: TextEdit.Wrap
                                 color: Theme.text
-                                background: null
                             }
                         }
                     }
@@ -649,26 +683,59 @@ ApplicationWindow {
                 ToolTip.text: text
                 HoverHandler { id: runHover }
             }
-            Flow {
+            GridLayout {
                 Layout.fillWidth: true
-                Layout.preferredHeight: implicitHeight
-                spacing: 4
-                ActionButton { objectName: "startMeasurement"; text: "Start measurement"; highlighted: true; enabled: window.backend.measurement.canStart && !window.backend.offline && !window.backend.closing; onClicked: { measurementMode.focusCurrent(); window.backend.measurement.start() } }
-                ActionButton {
-                    objectName: "locateMeasurementError"
-                    text: "Locate error"
-                    visible: window.backend.measurement.validationIssues.length > 0
-                    Accessible.description: "Expand the first invalid section and focus the field that needs correction"
-                    onClicked: {
-                        window.showParameters = true
-                        window.narrowPage = 0
-                        measurementPane.revealIssue(window.backend.measurement.validationIssues[0])
+                columns: width >= measurementActions.naturalWidth + 240 ? 2 : 1
+                columnSpacing: 12
+                rowSpacing: 4
+                Flow {
+                    id: measurementActions
+                    readonly property real naturalWidth: {
+                        let total = 0
+                        let count = 0
+                        for (let child of children) {
+                            if (child.visible) { total += child.implicitWidth; count++ }
+                        }
+                        return total + Math.max(0, count - 1) * spacing
                     }
+                    Layout.fillWidth: true
+                    Layout.preferredWidth: naturalWidth
+                    Layout.maximumWidth: parent.columns === 2 ? naturalWidth : Infinity
+                    Layout.preferredHeight: implicitHeight
+                    spacing: 4
+                    ActionButton { objectName: "startMeasurement"; text: "Start measurement"; highlighted: true; enabled: window.backend.measurement.canStart && !window.backend.offline && !window.backend.closing; onClicked: { measurementMode.focusCurrent(); window.backend.measurement.start() } }
+                    ActionButton {
+                        objectName: "locateMeasurementError"
+                        text: "Locate error"
+                        visible: window.backend.measurement.validationIssues.length > 0
+                        Accessible.description: "Expand the first invalid section and focus the field that needs correction"
+                        onClicked: {
+                            window.showParameters = true
+                            window.narrowPage = 0
+                            measurementPane.revealIssue(window.backend.measurement.validationIssues[0])
+                        }
+                    }
+                    ActionButton { objectName: "stopMeasurement"; text: "Stop measurement"; tone: "danger"; enabled: window.backend.measurement.canStop; onClicked: window.backend.measurement.stop() }
+                    ActionButton { text: "Continue after check"; visible: window.backend.measurement.continuationRequired; enabled: window.backend.measurement.canContinue; ToolTip.visible: hovered; ToolTip.text: window.backend.measurement.continuationReason; onClicked: window.backend.measurement.continueAfterTemperatureCheck() }
+                    ActionToolButton { objectName: "showStatusDetails"; text: "Status details"; ToolTip.visible: hovered; ToolTip.text: "Read or copy the full measurement and application messages"; onClicked: statusDetails.open() }
+                    ActionButton { text: "Log"; checkable: true; checked: window.showLog; ToolTip.visible: hovered; ToolTip.text: "Show the measurement log (Ctrl+L)"; onClicked: window.showLog = checked }
                 }
-                ActionButton { objectName: "stopMeasurement"; text: "Stop measurement"; tone: "danger"; enabled: window.backend.measurement.canStop; onClicked: window.backend.measurement.stop() }
-                ActionButton { text: "Continue after check"; visible: window.backend.measurement.continuationRequired; enabled: window.backend.measurement.canContinue; ToolTip.visible: hovered; ToolTip.text: window.backend.measurement.continuationReason; onClicked: window.backend.measurement.continueAfterTemperatureCheck() }
-                ActionToolButton { objectName: "showStatusDetails"; text: "Status details"; ToolTip.visible: hovered; ToolTip.text: "Read or copy the full measurement and application messages"; onClicked: statusDetails.open() }
-                ActionButton { text: "Log"; checkable: true; checked: window.showLog; ToolTip.visible: hovered; ToolTip.text: "Show the measurement log (Ctrl+L)"; onClicked: window.showLog = checked }
+                Label {
+                    objectName: "measurementTimeEstimate"
+                    text: window.backend.measurement.timing.summary
+                    color: Theme.text
+                    font.pointSize: Theme.captionPointSize
+                    wrapMode: Text.Wrap
+                    maximumLineCount: 2
+                    elide: Text.ElideRight
+                    horizontalAlignment: Text.AlignRight
+                    Layout.fillWidth: true
+                    Layout.minimumWidth: 0
+                    ToolTip.visible: timingHover.hovered
+                    ToolTip.text: text + "\n" + window.backend.measurement.timing.detail
+                    Accessible.description: window.backend.measurement.timing.detail
+                    HoverHandler { id: timingHover }
+                }
             }
             MeasurementProgress { objectName: "measurementProgress"; Layout.fillWidth: true; Layout.minimumWidth: 40; from: 0; to: 1; tone: Theme.progressTone(window.backend.measurement.phase); value: window.backend.measurement.progress; Accessible.name: "Measurement progress" }
             Label {

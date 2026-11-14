@@ -71,7 +71,9 @@ class RateTableTests(unittest.TestCase):
             def _write(self, command):
                 _, index, value = command.split()
                 index = int(index)
-                if self.fail_once and index == 2:
+                # Range 2 is already below this ceiling and is now skipped.
+                # Fail a genuinely changed range after range 0 was written.
+                if self.fail_once and index == 1:
                     self.fail_once = False
                     raise RuntimeError("injected partial write")
                 self.values[index] = round(float(value), 4)
@@ -182,14 +184,33 @@ class RateTableTests(unittest.TestCase):
         self.assertGreaterEqual(history["read_count"], 3)
         self.assertAlmostEqual(history["max_t"], .0013)
         self.assertTrue(history["complete"])
-        for readings in ([.0006, .0003], [.0021]):
-            adapter = Sim(readings); history = {}; original = adapter.get_rates()
-            with patch("app.devices.aps100_attodry1000_adapter.time.monotonic", side_effect=lambda: adapter.clock):
-                with self.assertRaises(APS100FieldHistoryError):
-                    adapter._hysteresis_field_move(.001, 1, .0002, 30., None, None, options, history)
-            self.assertIn("PAUSE", adapter.writes)
-            self.assertEqual(adapter.get_rates(), original)
-            self.assertIsNotNone(history["finished_monotonic_s"])
+        adapter = Sim([.0006, .0003, .001]); history = {}; original = adapter.get_rates()
+        with patch("app.devices.aps100_attodry1000_adapter.time.monotonic", side_effect=lambda: adapter.clock):
+            adapter._hysteresis_field_move(.001, 1, .0002, 30., None, None,
+                                           dict(options, approach='linear_no_backward'), history)
+        self.assertTrue(history['reversal_exceeded'])
+        self.assertAlmostEqual(history['max_reverse_t'], .0003)
+        self.assertEqual(adapter.get_rates(), original)
+        self.assertIn('PAUSE', adapter.writes)
+        adapter = Sim([.0021]); history = {}; original = adapter.get_rates()
+        with patch("app.devices.aps100_attodry1000_adapter.time.monotonic", side_effect=lambda: adapter.clock):
+            with self.assertRaises(APS100FieldHistoryError):
+                adapter._hysteresis_field_move(.001, 1, .0002, 30., None, None, options, history)
+        self.assertIn("PAUSE", adapter.writes)
+        self.assertEqual(adapter.get_rates(), original)
+        self.assertIsNotNone(history["finished_monotonic_s"])
+        # Reproduce the latest preparation failure with a decreasing field.
+        adapter = Sim([-.1955, -.1936]); history = {}
+        preparation = dict(acceptance_t=.0002, reversal_t=.0002, lower_t=-.2002,
+                           upper_t=.0012, no_progress_s=.2, preparation=True,
+                           stability_s=.5, span_t=.0001, drift_t_per_s=.0001,
+                           stability_timeout_s=2.)
+        with patch("app.devices.aps100_attodry1000_adapter.time.monotonic", side_effect=lambda: adapter.clock):
+            with self.assertRaisesRegex(APS100FieldHistoryError, "Preparation reversal"):
+                adapter._hysteresis_field_move(-.2, -1, .0002, 600., None, None, preparation, history)
+        self.assertAlmostEqual(history["max_reverse_t"], .0019)
+        self.assertIn("SWEEP DOWN SLOW", adapter.writes)
+        self.assertIn("PAUSE", adapter.writes)
         adapter = Sim([.0001]); history = {}
         with patch("app.devices.aps100_attodry1000_adapter.time.monotonic", side_effect=lambda: adapter.clock):
             with self.assertRaises(APS100SafetyError):
@@ -220,6 +241,91 @@ class RateTableTests(unittest.TestCase):
         self.assertAlmostEqual(applied["lower_t"], -.0102)
         self.assertEqual(applied["upper_t"], .0102)
         self.assertGreaterEqual(results[-1]["field_history"]["read_count"], 2)
+
+    def test_worker_reports_typed_quality_overshoot_without_error_signal(self):
+        from app.devices.aps100_attodry1000_adapter import APS100QualityOvershoot
+        adapter = MockAPS100Adapter(); adapter.connect(); adapter._heater = True
+        def overshoot(*args, **kwargs):
+            history = kwargs['field_history']
+            history.update(min_t=0., max_t=.002, end_t=.002, read_count=3,
+                           finished_monotonic_s=history['started_monotonic_s'] + 1., complete=True)
+            raise APS100QualityOvershoot('paused beyond target')
+        adapter.safe_move_to_field = overshoot
+        worker = _MagnetWorker(); worker.adapter = adapter
+        worker.heating_interlock.begin_magnet = lambda *a, **k: None
+        worker.heating_interlock.end_magnet = lambda *a, **k: None
+        worker._check_thermal = lambda *a, **k: None
+        results, errors = [], []
+        worker.safe_move_result.connect(results.append); worker.error.connect(errors.append)
+        options = dict(acceptance_t=.0002, reversal_t=.0002, lower_t=-.1,
+                       upper_t=.1, no_progress_s=1.)
+        worker.safe_move_to_field('request', .001, 'driven', False, True, 0., 60., .0001, False, 1, options)
+        self.assertEqual(errors, [])
+        self.assertTrue(results[-1]['quality_overshoot'])
+        self.assertTrue(results[-1]['overshoot'])
+        self.assertFalse(results[-1]['success'])
+
+    def test_worker_fails_if_readback_after_quality_overshoot_fails(self):
+        from app.devices.aps100_attodry1000_adapter import APS100QualityOvershoot
+        adapter = MockAPS100Adapter(); adapter.connect(); adapter._heater = True
+        original_read = adapter.read_snapshot
+        calls = []
+        def read_snapshot():
+            calls.append(True)
+            if len(calls) > 1:
+                raise OSError('readback failed')
+            return original_read()
+        adapter.read_snapshot = read_snapshot
+        adapter.safe_move_to_field = lambda *a, **k: (_ for _ in ()).throw(APS100QualityOvershoot('past target'))
+        worker = _MagnetWorker(); worker.adapter = adapter
+        worker.heating_interlock.begin_magnet = lambda *a, **k: None
+        worker.heating_interlock.end_magnet = lambda *a, **k: None
+        worker._check_thermal = lambda *a, **k: None
+        results, errors = [], []
+        worker.safe_move_result.connect(results.append); worker.error.connect(errors.append)
+        options = dict(acceptance_t=.0002, reversal_t=.0002, lower_t=-.1, upper_t=.1, no_progress_s=1.)
+        worker.safe_move_to_field('request', .001, 'driven', False, True, 0., 60., .0001, False, 1, options)
+        self.assertTrue(errors)
+        self.assertFalse(results[-1]['quality_overshoot'])
+        self.assertFalse(results[-1]['success'])
+
+    def test_preparation_reversal_preserves_bounded_raw_diagnostics(self):
+        from app.devices.aps100_attodry1000_adapter import APS100FieldHistoryError
+        adapter = MockAPS100Adapter(); adapter.connect()
+        adapter._heater = True
+        def fail_move(*args, **kwargs):
+            observer = adapter.command_observer
+            observer(dict(kind="write", command="SWEEP DOWN SLOW", utc_epoch_s=1.))
+            observer(dict(kind="write", command="LLIM -2.000000", utc_epoch_s=2.))
+            observer(dict(kind="query", command="IOUT?", response="-1.955 kG", utc_epoch_s=3.))
+            for _ in range(70):
+                observer(dict(kind="query", command="IMAG?", response="-1.955 kG", utc_epoch_s=4.))
+            observer(dict(kind="query", command="IMAG?", response="-1.936 kG", utc_epoch_s=5.))
+            h = kwargs["field_history"]
+            h.update(min_t=-.1955, end_t=-.1936, max_reverse_t=.0019)
+            raise APS100FieldHistoryError("Field reversed 0.0019 T beyond 0.0002 T")
+        adapter.safe_move_to_field = fail_move
+        worker = _MagnetWorker(); worker.adapter = adapter
+        worker.heating_interlock.begin_magnet = lambda *a, **k: None
+        worker.heating_interlock.end_magnet = lambda *a, **k: None
+        worker._check_thermal = lambda *a, **k: None
+        results = []; worker.safe_move_result.connect(results.append)
+        options = dict(acceptance_t=.0002, reversal_t=.0002, lower_t=-.2002,
+                       upper_t=.2002, no_progress_s=15., preparation=True)
+        worker.safe_move_to_field("request", -.2, "driven", False, True, 0., 600., .0002, False, 0, options)
+        result = results[-1]
+        self.assertFalse(result["success"])
+        self.assertTrue(result["history_error"])
+        diag = result["field_history"]["failure_diagnostics"]
+        self.assertLessEqual(len(diag["recent_readbacks"]), 64)
+        self.assertEqual(diag["recent_readbacks"][-1]["raw"], "-1.936 kG")
+        self.assertAlmostEqual(diag["recent_readbacks"][-1]["field_t"], -.1936)
+        self.assertEqual(diag["last_output_readback"]["raw"], "-1.955 kG")
+        self.assertEqual(diag["last_sweep_command"], "SWEEP DOWN SLOW")
+        self.assertEqual(diag["last_limit_command"], "LLIM -2.000000")
+        self.assertEqual(diag["target_t"], -.2)
+        self.assertEqual(diag["direction"], -1)
+        self.assertTrue(diag["rates_t_per_min"])
 
     def test_slow_configuration_emits_fresh_real_field_between_rate_steps(self):
         from types import SimpleNamespace

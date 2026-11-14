@@ -1,10 +1,12 @@
 """Magnet presentation tests use only signal-emitting fake controllers."""
 import time
 import unittest
+import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, Signal, QSettings
 from app.quick.magnet import MagnetService
 from app.devices.lakeshore335_adapter import LakeShore335Snapshot
 from app.devices.attodry2100_adapter import AttoDRY2100Snapshot, AttoDRY2100Capabilities
@@ -47,11 +49,14 @@ class SDKController(Controller):
 
 class QuickMagnetTests(unittest.TestCase):
     def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.settings = QSettings(str(Path(directory.name) / "settings.ini"), QSettings.Format.IniFormat)
         setup_patch = patch.object(cfg, "setup", SetupConfig("1000", "ls335"))
         setup_patch.start()
         self.addCleanup(setup_patch.stop)
         self.aps, self.sdk, self.ls = Controller(), SDKController(), Controller()
-        self.service = MagnetService(magnet1000=self.aps, magnet2100=self.sdk, lakeshore=self.ls)
+        self.service = MagnetService(magnet1000=self.aps, magnet2100=self.sdk, lakeshore=self.ls, settings=self.settings)
         self.service._timer.stop()
         self.addCleanup(self.service.close)
         self.service.acknowledgeReview(True)
@@ -60,7 +65,7 @@ class QuickMagnetTests(unittest.TestCase):
         setup_patch = patch.object(cfg, "setup", SetupConfig("2100", "2100"))
         setup_patch.start()
         self.addCleanup(setup_patch.stop)
-        service = MagnetService(magnet2100=self.sdk)
+        service = MagnetService(magnet2100=self.sdk, settings=self.settings)
         service._timer.stop()
         self.addCleanup(service.close)
         service.acknowledgeReview(True)
@@ -113,9 +118,85 @@ class QuickMagnetTests(unittest.TestCase):
     def test_configuration_review_invalidates_when_limits_or_mapping_change(self):
         self.assertTrue(self.service.review_valid())
         with patch.object(cfg.lakeshore335, "sample_channel", "A"):
+            changes = []
+            self.service.changed.connect(lambda: changes.append(True))
             self.assertFalse(self.service.review_valid())
-            self.service._tick()
-            self.assertFalse(self.service.reviewed)
+        self.assertFalse(self.service.review_valid())
+        self.service._tick()
+        self.assertFalse(self.service.reviewed)
+        self.assertTrue(changes)
+
+    def test_review_persists_only_for_unchanged_setup_and_can_be_revoked(self):
+        def new_service(*, offline=False):
+            service = MagnetService(offline=offline, magnet1000=Controller(), magnet2100=SDKController(),
+                                    lakeshore=Controller(), settings=self.settings)
+            service._timer.stop()
+            self.addCleanup(service.close)
+            return service
+
+        self.service.acknowledgeReview(False)
+        self.assertFalse(new_service().reviewed)
+        self.service.acknowledgeReview(True)
+        self.assertTrue(new_service().reviewed)
+        reopened_settings = QSettings(self.settings.fileName(), QSettings.Format.IniFormat)
+        reopened = MagnetService(magnet1000=Controller(), lakeshore=Controller(), settings=reopened_settings)
+        reopened._timer.stop()
+        self.addCleanup(reopened.close)
+        self.assertTrue(reopened.reviewed)
+        with patch.object(cfg.lakeshore335, "sample_channel", "A"):
+            changed = new_service()
+            self.assertFalse(changed.reviewed)
+            changed.command("connect")
+            self.assertIn("Review", changed.message)
+        self.assertFalse(new_service().reviewed)
+
+        self.service.acknowledgeReview(True)
+        with patch.object(cfg, "setup", SetupConfig("2100", "2100")):
+            other = new_service()
+            self.assertFalse(other.reviewed)
+            other.acknowledgeReview(True)
+        self.assertTrue(new_service().reviewed)
+        new_service().acknowledgeReview(False)
+        self.assertFalse(new_service().reviewed)
+        with patch.object(cfg, "setup", SetupConfig("2100", "2100")):
+            self.assertTrue(new_service().reviewed)
+
+    def test_offline_review_does_not_restore_or_modify_saved_approval(self):
+        offline = MagnetService(offline=True, magnet1000=Controller(), lakeshore=Controller(), settings=self.settings)
+        offline._timer.stop()
+        self.addCleanup(offline.close)
+        self.assertFalse(offline.reviewed)
+        offline.acknowledgeReview(False)
+        reopened = MagnetService(magnet1000=Controller(), lakeshore=Controller(), settings=self.settings)
+        reopened._timer.stop()
+        self.addCleanup(reopened.close)
+        self.assertTrue(reopened.reviewed)
+        reopened.acknowledgeReview(False)
+        offline.acknowledgeReview(True)
+        unreviewed = MagnetService(magnet1000=Controller(), lakeshore=Controller(), settings=self.settings)
+        unreviewed._timer.stop()
+        self.addCleanup(unreviewed.close)
+        self.assertFalse(unreviewed.reviewed)
+
+    def test_passive_control_readbacks_do_not_log_setpoint_commands(self):
+        self.service.clearLog()
+        readback = {"operation": "read_control", "ok": True, "setpoint": 4.}
+        with patch.object(self.service, "_notify_readiness", wraps=self.service._notify_readiness) as notify:
+            self.service._control_result(readback)
+            self.service._control_result(readback)
+            self.assertEqual(notify.call_count, 2)
+        self.assertEqual(self.service.logText, "")
+        self.assertEqual(self.service._target, 4.)
+        self.assertEqual(self.service._control_state, readback)
+
+        self.service._control_result({"operation": "sample_control", "ok": True, "setpoint": 4.})
+        self.assertIn("Sample setpoint verified: 4 K", self.service.logText)
+        self.service.clearLog()
+        self.service._control_result({"operation": "setpoint", "ok": True, "setpoint": 5.})
+        self.assertIn("Sample setpoint verified: 5 K", self.service.logText)
+        self.service.clearLog()
+        self.service._control_result({"operation": "read_control", "ok": False, "error": "read failed"})
+        self.assertIn("read failed", self.service.logText)
 
     def test_persistent_confirmation_is_bound_to_displayed_field_and_configuration(self):
         self.service._connected["1000"] = True
@@ -176,6 +257,51 @@ class QuickMagnetTests(unittest.TestCase):
         self.assertNotIn("sample_control", self.service.pendingOperations)
         self.assertTrue(self.service._control_failed)
         self.assertIsNone(self.service.measurement_settings()[1])
+
+    def test_connection_actions_track_pending_failure_and_disconnect(self):
+        for name, controller, connect, disconnect, signal_name in (
+                ("magnet", self.aps, "connect", "disconnect", "1000"),
+                ("temperature", self.ls, "connect_temperature", "disconnect_temperature", "temperature")):
+            with self.subTest(name=name):
+                state = self.service.connectionActions[name]
+                self.assertEqual(state["state"], "disconnected")
+                self.assertTrue(state["connectEnabled"])
+                self.assertFalse(state["disconnectEnabled"])
+                self.service.command(connect)
+                self.assertEqual(self.service.connectionActions[name]["state"], "connecting")
+                self.service.command(connect)
+                controller.connect_instrument.assert_called_once()
+                controller.error.emit("connection failed")
+                self.assertEqual(self.service.connectionActions[name]["state"], "disconnected")
+                self.assertTrue(self.service.connectionActions[name]["connectEnabled"])
+                self.service.command(connect)
+                controller.connected.emit("fake")
+                self.assertEqual(self.service.connectionActions[name]["state"], "connected")
+                self.assertFalse(self.service.connectionActions[name]["connectEnabled"])
+                self.assertTrue(self.service.connectionActions[name]["disconnectEnabled"])
+                self.service.command(connect)
+                self.assertEqual(controller.connect_instrument.call_count, 2)
+                self.service.command(disconnect)
+                self.assertEqual(self.service.connectionActions[name]["state"], "disconnecting")
+                self.service.command(disconnect)
+                controller.disconnect_instrument.assert_called_once()
+                controller.disconnected.emit()
+                self.assertEqual(self.service.connectionActions[name]["state"], "disconnected")
+
+    def test_sdk_connection_actions_and_failure_recovery(self):
+        service = self.sdk_service()
+        service.command("connect")
+        self.assertEqual(service.connectionActions["magnet"]["state"], "connecting")
+        self.sdk.operation_finished.emit("connect", False, "failed")
+        self.assertTrue(service.connectionActions["magnet"]["connectEnabled"])
+        service.command("connect")
+        self.sdk.connected.emit("SDK")
+        self.assertEqual(service.connectionActions["magnet"]["state"], "connected")
+        self.assertTrue(service.connectionActions["magnet"]["disconnectEnabled"])
+        service.command("disconnect")
+        self.assertEqual(service.connectionActions["magnet"]["state"], "disconnecting")
+        self.sdk.operation_finished.emit("disconnect", False, "failed")
+        self.assertTrue(service.connectionActions["magnet"]["disconnectEnabled"])
 
     def test_sdk_connection_starts_polling_and_capability_temperature_updates(self):
         service = self.sdk_service()

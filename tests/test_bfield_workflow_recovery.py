@@ -200,7 +200,7 @@ class TransportRecoveryTests(unittest.TestCase):
     def test_roundtrip_persistent_policy_finishes_reverse_first(self):
         c = self.c
         c.plan = TransportSweepPlan.from_params(BFieldTransportParams(
-            round_trip=True, cooldown_policy="persistent_each_row",
+            measurement_mode="continuous", round_trip=True, cooldown_policy="persistent_each_row",
             conditions=[BFieldTransportCondition(), BFieldTransportCondition()]))
         c._leg_index = 0
         c._begin_endpoint_hold()
@@ -349,6 +349,9 @@ class GateRecoveryTests(unittest.TestCase):
         b._checkpoint_path = os.path.join(self.fixture.tmp.name, "checkpoint.json")
         b._state.request.params = LineSweepParams()
         b._state.request.calibration = None
+        b._state.request.field_approach = None
+        b._state.request.field_rate_t_per_min = None
+        b._state.request.field_settle_s = 0.
         with patch("app.engine.gate_scan_field_batch.os.replace", side_effect=OSError("disk full")):
             b._write_checkpoint("running")
         self.assertIn("disk full", b._checkpoint_write_error)

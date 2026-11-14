@@ -53,6 +53,101 @@ class QuickInstrumentTests(unittest.TestCase):
         connect.assert_not_called()
         self.assertIn("disabled", self.service.message)
 
+    def configure_connection_test(self):
+        from app.quick.instruments import ADDRESS_KEYS
+        for attr in ADDRESS_KEYS:
+            setattr(self.service.connections, attr, "")
+        self.service.connections.lockin = "GPIB0::8::INSTR"
+        self.service.offline = False
+        self.addCleanup(lambda: self.service.manager.sessions.update(
+            {name: None for name in self.service.manager.sessions}))
+
+    def connect_fake_lockin(self):
+        manager = self.service.manager
+        manager.sessions['lockin'] = object()
+        manager.states['lockin'] = 'ok'
+        manager._connected_addresses['lockin'] = self.service.connections.lockin
+
+    def test_connection_actions_follow_connected_and_changed_configuration(self):
+        self.configure_connection_test()
+        self.assertTrue(self.service.connectionActions['connectEnabled'])
+        self.assertFalse(self.service.connectionActions['disconnectEnabled'])
+        self.connect_fake_lockin()
+        self.assertEqual(self.service.connectionActions['connectText'], 'Connected')
+        self.assertFalse(self.service.connectionActions['connectEnabled'])
+        self.assertTrue(self.service.connectionActions['disconnectEnabled'])
+        with patch.object(self.service.manager, 'connect_all') as connect:
+            self.service.command('connect', {})
+            connect.assert_not_called()
+        self.service.connections.lockin = 'GPIB0::9::INSTR'
+        self.assertTrue(self.service.connectionActions['connectEnabled'])
+        self.assertEqual(self.service.connectionActions['connectText'], 'Apply connection changes')
+        self.assertEqual(next(d for d in self.service.devices if d['name'] == 'lockin')['connectionStatus'],
+                         'Reconnect required')
+
+    def test_connection_pending_duplicate_and_failure_recovery(self):
+        self.configure_connection_test()
+        with patch.object(self.service.manager, 'connect_all', return_value=True) as connect:
+            self.service.command('connect', {})
+            self.assertEqual(self.service.connectionActions['connectText'], 'Connecting…')
+            self.assertFalse(self.service.connectionActions['connectEnabled'])
+            self.service.command('connect', {})
+            connect.assert_called_once()
+        self.service._operation(False, 'Connection failed')
+        self.assertTrue(self.service.connectionActions['connectEnabled'])
+        with patch.object(self.service.manager, 'connect_all', side_effect=RuntimeError('failed to start')):
+            self.service.command('connect', {})
+        self.assertTrue(self.service.connectionActions['connectEnabled'])
+        self.assertIn('failed to start', self.service.message)
+
+    def test_connection_actions_exclude_disabled_and_unconfigured_devices(self):
+        self.configure_connection_test()
+        self.service.connections.drive_lockin = 'GPIB0::9::INSTR'
+        self.service.connections.drag_drive_enabled = False
+        self.connect_fake_lockin()
+        self.assertEqual(self.service.connectionActions['status'], '1/1 configured instruments connected')
+        self.service.connections.drag_drive_enabled = True
+        self.assertEqual(self.service.connectionActions['connectText'], 'Connect remaining')
+        self.service.connections.drag_drive_enabled = False
+        self.service.connections.lockin = ''
+        self.assertTrue(self.service.connectionActions['connectEnabled'])
+        self.assertIn('changes pending', self.service.connectionActions['status'])
+        self.service.manager.sessions['lockin'] = None
+        self.assertFalse(self.service.connectionActions['connectEnabled'])
+        self.assertFalse(self.service.connectionActions['disconnectEnabled'])
+
+    def test_connection_completion_waits_for_worker_release_and_notifies_ui(self):
+        from PySide6.QtTest import QTest
+        self.configure_connection_test()
+        self.service._connection_operation = 'connect'
+        worker_busy = [True]
+        changes = []
+        self.service.changed.connect(lambda: changes.append(self.service.connectionActions))
+        with patch.object(self.service.manager, 'is_busy', side_effect=lambda: worker_busy[0]):
+            self.service._operation(False, 'Other operation rejected')
+            self.assertEqual(self.service.connectionActions['connectText'], 'Connecting…')
+            self.connect_fake_lockin()
+            worker_busy[0] = False
+            QTest.qWait(60)
+        self.assertEqual(changes[-1]['connectText'], 'Connected')
+        self.assertTrue(changes[-1]['disconnectEnabled'])
+
+    def test_disconnect_pending_and_measurement_lock(self):
+        self.configure_connection_test()
+        self.connect_fake_lockin()
+        self.service.set_active_provider(lambda: True)
+        self.assertFalse(self.service.connectionActions['disconnectEnabled'])
+        self.service.set_active_provider(lambda: False)
+        with patch.object(self.service.manager, 'disconnect_all', return_value=True) as disconnect:
+            self.service.command('disconnect', {})
+            self.assertEqual(self.service.connectionActions['disconnectText'], 'Disconnecting…')
+            self.service.command('disconnect', {})
+            disconnect.assert_called_once()
+        self.service.manager.sessions['lockin'] = None
+        self.service._operation(False, 'Disconnected')
+        self.assertTrue(self.service.connectionActions['connectEnabled'])
+        self.assertFalse(self.service.connectionActions['disconnectEnabled'])
+
     def test_connected_sensitivity_is_verified_and_voltage_input_required(self):
         class Session:
             def read_sensitivity(self):

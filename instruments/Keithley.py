@@ -293,8 +293,12 @@ class Keithley2400Base(PyvisaInstrument):
                 self.name,
                 f"Requested {volt:g} V exceeds the configured ±{self._max_source_voltage:g} V limit.",
             )
+        from app.voltage_resolution import source_resolution, rounded_source_target
+        if source_resolution(self) is not None:
+            volt = rounded_source_target(self, volt, self.name, limit=self._max_source_voltage)
         with self.lock:
             self._write(":SOUR:VOLT:LEV %.6e" % volt)
+            self._output_values[self.VOLT_OUTPUT] = volt
 
     def set_current_compliance(self, current_a: float):
         current_a = self._validated_current_compliance(current_a)

@@ -219,6 +219,9 @@ ColumnLayout {
                 color: Theme.muted
                 font.pointSize: Theme.captionPointSize
                 Layout.fillWidth: true
+                Layout.minimumWidth: 0
+                Layout.preferredWidth: 0
+                Layout.rightMargin: 8
                 wrapMode: Text.Wrap
             }
             ColumnLayout {
@@ -318,7 +321,8 @@ ColumnLayout {
                         }
                         GridLayout {
                             Layout.fillWidth: true
-                            columns: section.modelData.columns || 2
+                            Layout.minimumWidth: 0
+                            columns: Math.min(section.modelData.columns || 2, Math.max(1, Math.floor((width + 10) / (pane.measurement && pane.measurement.mode === 5 ? 160 : 190))))
                             columnSpacing: 10
                             rowSpacing: 6
                             Repeater {
@@ -327,9 +331,10 @@ ColumnLayout {
                                     required property int index
                                     readonly property var modelData: (section.modelData.fields || [])[index] || ({})
                                     Layout.fillWidth: true
+                                    Layout.alignment: Qt.AlignTop
                                     Layout.minimumWidth: 0
                                     Layout.preferredWidth: 150
-                                    Layout.columnSpan: modelData.columnSpan || (modelData.kind === "text" || (modelData.key === "sweep_both_ways" && section.modelData.columns === 3) ? (section.modelData.columns || 2) : 1)
+                                    Layout.columnSpan: Math.min(parent.columns, modelData.columnSpan || (modelData.kind === "text" || (modelData.key === "sweep_both_ways" && section.modelData.columns === 3) ? parent.columns : 1))
                                     formField: modelData
                                     scopeKey: String(pane.measurement ? pane.measurement.mode : 0)
                                     locked: pane.locked

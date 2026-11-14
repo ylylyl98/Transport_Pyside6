@@ -108,6 +108,7 @@ class ApplicationBackend(QObject):
         for signal in (self._instruments.sampleFieldsChanged, self._instruments.signalFieldsChanged,
                        self._instruments.calibrationChanged):
             signal.connect(self._measurement.outputPreviewChanged)
+            signal.connect(self._measurement._refresh_timing)
         self._history.shutdown_ready.connect(self._retry_close)
         self._exporter = PngExportProcess(self)
         self._exporter.completed.connect(lambda result: self.report(str(result)))
@@ -217,7 +218,7 @@ class ApplicationBackend(QObject):
                 source = 'None'
             bias2 = (any(row.get('enabled', True) and row.get('bias2_mode', 'Disabled') != 'Disabled' for row in rows)
                      if rows else values.get('bias2_mode', 'Disabled') != 'Disabled')
-            channels = plot_channel_options(source, chain, bias2=bias2)
+            channels = plot_channel_options(source, chain, bias2=bias2, b_field_diagnostics=mode == 5)
             if values.get('plot_choice') not in channels and channels:
                 values['plot_choice'] = channels[0]
             plot.setChannelOptions(channels)

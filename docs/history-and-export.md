@@ -8,6 +8,8 @@ Select **Analysis** to open the independent **Transport — Analysis** window fo
 
 The full-height file list is on the left, with time, filename, conditions and status shown on separate lines. Drag the divider to resize it, or click **Expand list** to use the whole content area. **Compare files** restores the split layout without losing checks or plots. Check files to overlay curves. Choose X, signal and direction; forward/unknown traces are solid and backward traces are dashed. Condition blocks and snake rows stay separate, source order is preserved, and units must match. Selections and display choices are remembered per folder and measurement type. The plot toolbar supports zoom and pan; use **Export PNG + CSV…** above the plots to save the displayed view.
 
+On the Quick B-field Sweep page, **Second Y** adds another saved signal to one plot. Choose **Independent left / right Y axes** for separate scales. Available signals come from finite values in the selected files and include recorded raw voltages, measured Vds and temperatures where present. Export preserves both signals and their axis settings.
+
 Long filenames wrap at underscores, with character wrapping for oversized components, and row heights follow the list width. When an existing CSV grows, background refresh updates its data without resetting the list's current row or scroll position. Unchanged refreshes do not rewrite saved view preferences. Use **Reload analysis** to apply analysis UI changes while Transport remains open.
 
 **Restore view…** also opens a Live data overlay or **2 plots** export, restoring its two signals,

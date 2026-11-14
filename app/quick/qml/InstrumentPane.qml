@@ -206,7 +206,18 @@ ColumnLayout {
                         width: signalScroll.availableWidth
                         spacing: 10
                         Label { text: "Set the signal conversion, then read settings in the lock-in pages to verify calibration."; color: Theme.muted; wrapMode: Text.Wrap; Layout.fillWidth: true }
-                        FieldForm { fields: pane.instruments.signalFields; target: pane.instruments; locked: pane.instruments.busy; Layout.fillWidth: true }
+                        Repeater {
+                            model: ["Signal chain", "Optional Drive channel", "Manual signal conversion", "Lock-in calibration", "Sample AC estimate"]
+                            delegate: ColumnLayout {
+                                id: signalGroup
+                                required property string modelData
+                                readonly property var groupFields: pane.instruments.signalFields.filter(item => item.group === modelData)
+                                visible: groupFields.some(item => item.visible !== false && !item.hidden)
+                                Layout.fillWidth: true
+                                ActionButton { id: signalToggle; objectName: "signalGroup_" + signalGroup.modelData; text: (checked ? "- " : "+ ") + signalGroup.modelData; checkable: true; checked: signalGroup.modelData === "Signal chain"; Layout.fillWidth: true }
+                                FieldForm { visible: signalToggle.checked; fields: signalGroup.groupFields.map(item => Object.assign({}, item, {group: ""})); target: pane.instruments; locked: pane.instruments.busy; Layout.fillWidth: true }
+                            }
+                        }
                         Label { text: "Verified instrument readback"; font.bold: true; color: Theme.text }
                         Label { text: Object.keys(pane.instruments.calibrationStatus).map(k => k + ": " + pane.instruments.calibrationStatus[k]).join("\n") || "Connect and refresh the lock-in panels to verify calibration."; color: Theme.muted; wrapMode: Text.Wrap; Layout.fillWidth: true }
                         Label { text: pane.instruments.acVoltageEstimate; color: Theme.muted; wrapMode: Text.Wrap; Layout.fillWidth: true }
@@ -223,7 +234,21 @@ ColumnLayout {
                 ScrollView {
                     id: runtimeScroll; objectName: "instrumentScroller7"
                     clip: true; contentWidth: availableWidth; ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
-                    FieldForm { width: runtimeScroll.availableWidth; fields: appBackend.runtime.fields; target: appBackend.runtime }
+                    ColumnLayout {
+                        width: runtimeScroll.availableWidth
+                        Repeater {
+                            model: ["Appearance", "Magnet sweep · next measurement", "Endpoint settling · next measurement", "Monitor recovery · next measurement"]
+                            delegate: ColumnLayout {
+                                id: runtimeGroup
+                                required property string modelData
+                                readonly property var groupFields: appBackend.runtime.fields.filter(item => item.group === modelData)
+                                visible: groupFields.length > 0
+                                Layout.fillWidth: true
+                                ActionButton { id: runtimeToggle; objectName: "runtimeGroup_" + runtimeGroup.modelData; text: (checked ? "- " : "+ ") + runtimeGroup.modelData; checkable: true; checked: runtimeGroup.modelData === "Appearance"; Layout.fillWidth: true }
+                                FieldForm { visible: runtimeToggle.checked; fields: runtimeGroup.groupFields.map(item => Object.assign({}, item, {group: ""})); target: appBackend.runtime; Layout.fillWidth: true }
+                            }
+                        }
+                    }
                 }
             }
         }

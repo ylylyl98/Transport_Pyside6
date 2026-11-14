@@ -10,15 +10,100 @@ The APS100 field protocol uses kG for limit writes and A/s for rate writes.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from collections import Counter, deque
+from contextlib import contextmanager
 import math
 import re
 import threading
 import time
 from typing import Callable, Optional
 
+from app.engine.aps100_rate_table import reduced_rate_table, validate_rate_table
+from app.engine.field_approach import normalize_approach, approach_targets, no_overshoot_intermediate
+
 
 DEFAULT_RESOURCE = "ASRL5::INSTR"
+
+
+class _ReversalWarnings:
+    """Record threshold-crossing episodes without unbounded per-read growth."""
+
+    def __init__(self, history):
+        self.history = history
+        history.setdefault("reversal_exceeded", False)
+        history.setdefault("reversal_events", [])
+        history.setdefault("reversal_event_count", 0)
+        self.active_event = None
+        self.active = False
+
+    def observe(self, field, peak, direction, limit, now):
+        excursion = peak - direction * field
+        if excursion <= limit + 1e-12:
+            self.active = False
+            self.active_event = None
+            return
+        self.history["reversal_exceeded"] = True
+        if not self.active:
+            self.active = True
+            self.history["reversal_event_count"] += 1
+            if len(self.history["reversal_events"]) < 100:
+                self.active_event = dict(monotonic_s=now, readback_t=field,
+                                         peak_t=direction * peak, excursion_t=excursion,
+                                         limit_t=limit)
+                self.history["reversal_events"].append(self.active_event)
+        elif self.active_event is not None and excursion > self.active_event["excursion_t"]:
+            self.active_event.update(monotonic_s=now, readback_t=field,
+                                     peak_t=direction * peak, excursion_t=excursion)
+
+
+class _FieldMoveDiagnostics:
+    """Bounded bookkeeping using only observations already acquired by a move."""
+
+    def __init__(self, history, started):
+        self.history, self.started = history, started
+        self.trace, self.stages = [], []
+        history.update(trace=self.trace, stages=self.stages, overhead_s=0.0)
+        history["trace_started_monotonic_s"] = started
+        self.last_sample = None
+        self.last_kept_at = None
+        self.stage = None
+        self.sweep_started = None
+        self.sweep_duration = 0.0
+
+    def observe(self, field, now):
+        if not math.isfinite(field):
+            return  # Existing move validation owns invalid readback failures.
+        self.last_sample = [round(now - self.started, 2), round(field, 5)]
+        # Reserve the final slot for the last observation, even on a long move.
+        if len(self.trace) < 239 and (self.last_kept_at is None or now - self.last_kept_at >= 1.0):
+            self.trace.append(self.last_sample)
+            self.last_kept_at = now
+
+    def begin_stage(self, endpoint, factor, field, rate):
+        self.stage = dict(endpoint_t=endpoint, rate_factor=factor,
+                          active_rate_t_per_min=rate, start_field_t=field,
+                          sweep_command_monotonic_s=None)
+        self.stages.append(self.stage)
+
+    def begin_sweep(self, now):
+        self.stage["sweep_command_monotonic_s"] = now
+        self.sweep_started = now
+
+    def end_stage(self, field, now, reason=None):
+        if self.stage is None or "end_monotonic_s" in self.stage:
+            return
+        self.stage.update(end_field_t=field, end_monotonic_s=now)
+        if reason is not None:
+            self.stage["exit_reason"] = reason
+        if self.sweep_started is not None:
+            self.sweep_duration += now - self.sweep_started
+            self.sweep_started = None
+
+    def finish(self, now):
+        if self.last_sample is not None and (not self.trace or self.trace[-1] != self.last_sample):
+            self.trace.append(self.last_sample)
+        self.history["overhead_s"] = max(0.0, now - self.started - self.sweep_duration)
 
 
 class APS100Error(RuntimeError):
@@ -30,11 +115,15 @@ class APS100IdentityError(APS100Error):
 
 
 class APS100FieldHistoryError(APS100Error):
-    """The measured field left its approved range or reversed excessively."""
+    """The measured field left its approved range or violated preparation limits."""
 
 
 class APS100OvershootError(APS100Error):
     """A directional move passed its target; reverse movement is forbidden."""
+
+
+class APS100QualityOvershoot(APS100OvershootError):
+    """A paused strict acquisition move passed its nominal target."""
 
 
 class APS100SafetyError(APS100Error):
@@ -108,6 +197,11 @@ class MagnetSnapshot:
     units: str
     operating_mode: str
     heater_state: Optional[int] = None
+    field_monotonic_s: Optional[float] = None
+    approach_mode: str = ''
+    approach_phase: str = ''
+    approach_complete: bool = False
+    approach_rate_t_per_min: Optional[float] = None
 
     @property
     def driven_mode(self) -> bool:
@@ -239,6 +333,60 @@ class APS100AttoDry1000Adapter:
         self._remote = False
         self._last_target_t: Optional[float] = None
         self.command_observer = None
+        self._io_events = deque(maxlen=512)
+        self._io_sequence = 0
+        self._io_controls = deque(maxlen=64)
+        self._io_control_count = 0
+        self._query_counts = Counter()
+
+    @contextmanager
+    def _io_transaction(self, kind, command):
+        """Record existing serial traffic only; APS feedback is not a field sensor."""
+        selected = (command in {"IMAG?", "IOUT?", "VMAG?", "VOUT?", "SWEEP?", "PSHTR?", "UNITS?"}
+                    or kind == "write" and command.startswith(("SWEEP ", "PAUSE", "LLIM ", "ULIM ", "RATE ", "PSHTR ", "UNITS ")))
+        if not selected:
+            yield None
+            return
+        event = dict(kind=kind, command=command, started_monotonic_s=time.monotonic(),
+                     started_utc_epoch_s=time.time())
+        try:
+            yield event
+        except Exception as exc:
+            event['error'] = f'{type(exc).__name__}: {exc}'[:512]
+            raise
+        finally:
+            event['finished_monotonic_s'] = time.monotonic()
+            event['finished_utc_epoch_s'] = time.time()
+            # Diagnostics cannot replace an instrument exception or prevent cleanup.
+            try:
+                self._io_sequence += 1
+                event['sequence'] = self._io_sequence
+                self._io_events.append(event)
+                if kind == 'write':
+                    self._io_control_count += 1
+                    self._io_controls.append(event)
+            except Exception:
+                pass
+
+    def capture_io_context(self):
+        """Capture preceding polling/settling replies without requesting new ones."""
+        with self._lock:
+            return dict(sequence=self._io_sequence, control_count=self._io_control_count,
+                        preceding=[dict(event) for event in list(self._io_events)[-64:]])
+
+    def move_io_diagnostics(self, context):
+        with self._lock:
+            events = [dict(event) for event in self._io_events if event['sequence'] > context['sequence']]
+            controls = [dict(event) for event in self._io_controls if event['sequence'] > context['sequence']]
+            return dict(schema='aps100_feedback_io_v1',
+                        source='APS100 current feedback / equivalent field; no independent magnetic field sensor',
+                        coil_constant_t_per_a=self.coil_constant_t_per_a,
+                        timing='Sequential serial transactions, not simultaneous measurements; issued marks the host write call',
+                        preceding=context['preceding'], events=events,
+                        control_writes=controls, control_limit=64,
+                        dropped_control_writes=max(0, self._io_control_count - context['control_count'] - len(controls)),
+                        dropped_events=max(0, self._io_sequence - context['sequence'] - len(events)),
+                        event_limit=512, preceding_limit=64, raw_character_limit=512)
 
     @property
     def connected(self) -> bool:
@@ -254,6 +402,11 @@ class APS100AttoDry1000Adapter:
             if self.connected:
                 assert self._identity is not None
                 return self._identity
+            self._io_events.clear()
+            self._io_sequence = 0
+            self._io_controls.clear()
+            self._io_control_count = 0
+            self._query_counts.clear()
             try:
                 if self._resource is None:
                     if self._resource_manager is None:
@@ -310,25 +463,41 @@ class APS100AttoDry1000Adapter:
             raise APS100Error("APS100 is not connected")
         return self._resource
 
-    def _read_line(self) -> str:
+    def _read_line(self, diagnostic=None) -> str:
         resource = self._require_connected()
-        return self._normalized_line(resource.read())
+        raw = resource.read()
+        if diagnostic is not None:
+            diagnostic['raw_echo'] = str(raw)[:512]
+            diagnostic['echo_truncated'] = len(str(raw)) > 512
+            diagnostic['echo_received_monotonic_s'] = time.monotonic()
+            diagnostic['echo_received_utc_epoch_s'] = time.time()
+        return self._normalized_line(raw)
 
     def _query(self, command: str) -> str:
-        with self._lock:
+        with self._lock, self._io_transaction("query", command) as diagnostic:
+            self._query_counts[command.split()[0]] += 1
             resource = self._resource
             if resource is None:
                 raise APS100Error("APS100 resource is not open")
+            if diagnostic is not None:
+                diagnostic['issued_monotonic_s'] = time.monotonic()
+                diagnostic['issued_utc_epoch_s'] = time.time()
             resource.write(command)
             command_norm = self._normalized_line(command).lower()
             last = ""
             for _ in range(8):
-                line = self._normalized_line(resource.read())
+                raw_line = resource.read()
+                line = self._normalized_line(raw_line)
                 if not line:
                     continue
                 last = line
                 if line.lower() == command_norm:
                     continue
+                if diagnostic is not None:
+                    diagnostic['raw_response'] = str(raw_line)[:512]
+                    diagnostic['raw_truncated'] = len(str(raw_line)) > 512
+                    diagnostic['response_received_monotonic_s'] = time.monotonic()
+                    diagnostic['response_received_utc_epoch_s'] = time.time()
                 if "command blocked" in line.lower():
                     raise APS100CommandBlockedError(
                         f"APS100 blocked {command!r}; close the front-panel menu "
@@ -348,7 +517,7 @@ class APS100AttoDry1000Adapter:
             raise APS100Error(f"APS100 returned no response to {command!r}; last line={last!r}")
 
     def _write(self, command: str, *, check_errors: bool = True) -> None:
-        with self._lock:
+        with self._lock, self._io_transaction("write", command) as diagnostic:
             resource = self._require_connected()
             # *ESR? is cumulative and clears on read. Clear historical events
             # before a mutation so only errors caused by this command are
@@ -367,10 +536,15 @@ class APS100AttoDry1000Adapter:
                         "preexisting_esr": preexisting_event_status,
                     }
                 )
+            if diagnostic is not None:
+                diagnostic['issued_monotonic_s'] = time.monotonic()
+                diagnostic['issued_utc_epoch_s'] = time.time()
             resource.write(command)
+            if diagnostic is not None:
+                diagnostic['write_returned_monotonic_s'] = time.monotonic()
             if self.expect_echo:
                 try:
-                    echoed = self._read_line()
+                    echoed = self._read_line(diagnostic)
                 except Exception as exc:
                     raise APS100Error(
                         f"Did not receive APS100 USB echo for {command!r}: {exc}"
@@ -505,12 +679,14 @@ class APS100AttoDry1000Adapter:
             rates[index] = (boundary, rate_a * self.coil_constant_t_per_a * 60.0)
         return rates
 
-    def restore_rates(self, rates: dict[int, tuple[float, float]]) -> dict[int, float]:
+    def restore_rates(self, rates: dict[int, tuple[float, float]], *, step_callback=None) -> dict[int, float]:
         """Restore captured RATE values with command/readback verification.
 
         APS100 RANGE entries are hardware-defined read-only boundaries; the
         captured range is therefore checked while only the programmable RATE
-        value is written back.
+        value is written back. Read every rate afresh; unchanged entries need
+        no write. Changed entries retain post-write verification. No cache is
+        trusted across approach stages or restoration attempts.
         """
         restored = {}
         failures = []
@@ -520,15 +696,22 @@ class APS100AttoDry1000Adapter:
                 if not isinstance(captured, (tuple, list)) or len(captured) < 2:
                     raise APS100Error(f"Invalid captured APS100 RATE entry for range {index}")
                 expected_range, expected_rate = float(captured[0]), float(captured[1])
+                if (not math.isfinite(expected_range) or expected_range < 0
+                        or not math.isfinite(expected_rate) or expected_rate <= 0):
+                    raise APS100Error(f"Invalid captured APS100 RATE entry for range {index}")
                 actual_range = self.get_range_a(index)
-                if abs(actual_range - expected_range) > 1e-6:
+                if not math.isfinite(actual_range) or abs(actual_range - expected_range) > 1e-6:
                     raise APS100Error(
                         f"APS100 range {index} boundary changed from {expected_range:g} A to {actual_range:g} A"
                     )
                 rate_a = expected_rate / (self.coil_constant_t_per_a * 60.0)
-                self._write(f"RATE {index} {rate_a:.7f}")
                 actual_rate = self.get_rate_a_per_s(index)
-                if abs(actual_rate - rate_a) > 1e-6:
+                if not math.isfinite(actual_rate) or actual_rate <= 0:
+                    raise APS100Error(f"APS100 RATE? {index} readback is invalid: {actual_rate!r} A/s")
+                if not math.isclose(actual_rate, rate_a, rel_tol=0.0, abs_tol=1e-12):
+                    self._write(f"RATE {index} {rate_a:.7f}")
+                    actual_rate = self.get_rate_a_per_s(index)
+                if not math.isfinite(actual_rate) or actual_rate <= 0 or abs(actual_rate - rate_a) > 1e-6:
                     raise APS100Error(
                         f"APS100 RATE {index} restoration verification failed: "
                         f"requested {rate_a:g}, read {actual_rate:g} A/s"
@@ -536,12 +719,26 @@ class APS100AttoDry1000Adapter:
                 restored[index] = actual_rate * self.coil_constant_t_per_a * 60.0
             except Exception as exc:
                 failures.append(f"range {index}: {exc}")
+            if step_callback is not None:
+                step_callback()
         if failures:
             raise APS100Error("; ".join(failures))
         return restored
 
     def _ensure_no_fault(self) -> APS100Status:
         self.require_manual_mode()
+        return self._ensure_status_no_fault()
+
+    def _ensure_status_no_fault(self) -> APS100Status:
+        """Always read fault status and run the thermal guard; never cached."""
+        status = self._read_fault_status()
+        thermal_guard = getattr(self, "thermal_guard", None)
+        if callable(thermal_guard):
+            thermal_guard(status)
+        return status
+
+    def _read_fault_status(self) -> APS100Status:
+        """Read and validate status before any thermal/field observation."""
         status = self.get_status()
         if status.quench:
             raise APS100SafetyError("APS100 reports a quench condition")
@@ -549,22 +746,50 @@ class APS100AttoDry1000Adapter:
             raise APS100SafetyError("APS100 reports a power-module failure")
         if status.menu_locked:
             raise APS100SafetyError("APS100 front-panel menu is locking remote commands")
-        thermal_guard = getattr(self, "thermal_guard", None)
-        if callable(thermal_guard):
-            thermal_guard(status)
         return status
+
+    def _hysteresis_safety_observation(self, check_mode: bool):
+        """Return only this iteration's thermal-checked field, never a cache.
+
+        The application worker explicitly opts into this callback contract.
+        Standalone adapters and existing custom safety overrides keep their
+        normal checks and let the caller obtain a separate fresh observation.
+        """
+        guard = getattr(self, "thermal_field_guard", None)
+        if not callable(guard):
+            if check_mode:
+                self._ensure_no_fault()
+            else:
+                self._ensure_status_no_fault()
+            return None
+        if check_mode:
+            self.require_manual_mode()
+        status = self._read_fault_status()
+        observation = guard(status)
+        if observation is None:
+            return None
+        value = getattr(observation, "field_t", None)
+        stamp = getattr(observation, "monotonic_s", None)
+        if (not all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+                    for v in (value, stamp))
+                or not 0.0 <= time.monotonic() - stamp <= 3.0):
+            raise APS100SafetyError("Invalid or stale field observation from thermal check")
+        return observation
 
     def read_snapshot(self) -> MagnetSnapshot:
         with self._lock:
             units = self.get_units()
             operating_mode = self.get_operating_mode()
+            field_started = time.monotonic()
             field_t = self.get_field_t()
+            field_stamp = (field_started + time.monotonic()) / 2.
             output_field_t = self.get_output_field_t()
             low_t, high_t = self.get_limits_t()
             heater_state = self.get_heater_state()
             return MagnetSnapshot(
                 monotonic_s=time.monotonic(),
                 field_t=field_t,
+                field_monotonic_s=field_stamp,
                 output_field_t=output_field_t,
                 output_current_a=output_field_t / self.coil_constant_t_per_a,
                 heater_on={0: False, 1: True}.get(heater_state),
@@ -1314,6 +1539,31 @@ class APS100AttoDry1000Adapter:
                 or lower >= upper or abs(lower) > self.maximum_field_t or abs(upper) > self.maximum_field_t
                 or not lower <= target <= upper or direction not in (-1, 1)):
             raise APS100SafetyError("Unsafe hysteresis acceptance, history limits, or direction")
+        preparation = options.get("preparation") is True
+        polling_profile = options.get("polling_profile", "standard")
+        if polling_profile not in {"standard", "reduced_mode_queries"}:
+            raise APS100SafetyError("Invalid APS100 polling comparison profile")
+        reduced_polling = polling_profile == "reduced_mode_queries" and not preparation
+        approach = options.get("approach", "no_overshoot")
+        if approach not in {"no_overshoot", "linear_no_backward"}:
+            raise APS100SafetyError("Invalid hysteresis approach")
+        no_overshoot_profile = options.get("no_overshoot_profile", "standard")
+        if no_overshoot_profile not in {"standard", "short_tail"}:
+            raise APS100SafetyError("Invalid APS100 No Overshoot profile")
+        if no_overshoot_profile != "standard" and approach != "no_overshoot":
+            raise APS100SafetyError("Shorter slow approach requires No Overshoot")
+        direct = approach == "linear_no_backward" and not preparation
+        if preparation:
+            try:
+                stability = float(options["stability_s"])
+                span_limit = float(options["span_t"])
+                drift_limit = float(options["drift_t_per_s"])
+                stability_timeout = float(options["stability_timeout_s"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise APS100SafetyError("Invalid preparation stability options") from exc
+            if (not all(math.isfinite(v) for v in (stability, span_limit, drift_limit, stability_timeout))
+                    or stability <= 0 or span_limit <= 0 or drift_limit <= 0 or stability_timeout < stability):
+                raise APS100SafetyError("Unsafe preparation stability options")
         start = time.monotonic()
         deadline = start + float(timeout)
         if not history:
@@ -1322,9 +1572,21 @@ class APS100AttoDry1000Adapter:
                            start_t=None, end_t=None, complete=False)
         elif history.get("direction") != direction:
             raise APS100SafetyError("History direction disagrees with requested direction")
+        diagnostics = _FieldMoveDiagnostics(history, start)
+        query_counts_before = dict(self._query_counts)
+        polling = dict(requested_profile=polling_profile,
+                       effective_profile="reduced_mode_queries" if reduced_polling else "standard",
+                       mode_check_interval_s=1.0 if reduced_polling else 0.0,
+                       iterations=0, mode_checks=0, status_checks=0,
+                       shared_field_reads=0,
+                       started_monotonic_s=None, finished_monotonic_s=None)
+        history["polling_diagnostics"] = polling
+        history["approach"] = approach
+        reversal_warnings = _ReversalWarnings(history)
         peak = (None if history.get("min_t") is None else
                 direction * (history["max_t"] if direction > 0 else history["min_t"]))
-        def observe_value(field):
+        active_rates = None
+        def observe_value(field, observed_at=None):
             nonlocal peak
             field = float(field)
             if not math.isfinite(field):
@@ -1335,25 +1597,110 @@ class APS100AttoDry1000Adapter:
             history["read_count"] += 1
             history["min_t"] = field if history["min_t"] is None else min(history["min_t"], field)
             history["max_t"] = field if history["max_t"] is None else max(history["max_t"], field)
+            diagnostics.observe(field, time.monotonic() if observed_at is None else observed_at)
             oriented = direction * field
             peak = oriented if peak is None else max(peak, oriented)
             history["max_reverse_t"] = max(history["max_reverse_t"], peak - oriented)
             if field < lower - 1e-12 or field > upper + 1e-12:
                 raise APS100FieldHistoryError(f"Field {field:g} T outside approved range [{lower:g}, {upper:g}] T")
-            if history["max_reverse_t"] > reversal + 1e-12:
-                raise APS100FieldHistoryError(f"Field reversed {history['max_reverse_t']:g} T beyond {reversal:g} T")
+            if not preparation:
+                reversal_warnings.observe(field, peak, direction, reversal,
+                                          time.monotonic() if observed_at is None else observed_at)
+            if preparation and active_rates is not None:
+                current_a = abs(field) / self.coil_constant_t_per_a
+                rate = next((r for b, r in active_rates.values() if current_a <= b + 1e-9), None)
+                if rate is None or not math.isfinite(rate) or rate <= 0:
+                    raise APS100SafetyError("No valid active APS100 rate for preparation")
+                budget = max(no_progress, .0001 * 60.0 / rate * 1.5)
+                excursion = max(tolerance, .0001) + rate * budget / 60.0
+                history["preparation_last_excursion_limit_t"] = excursion
+                history["preparation_min_excursion_limit_t"] = min(
+                    history.get("preparation_min_excursion_limit_t", excursion), excursion)
+                history["preparation_max_excursion_limit_t"] = max(
+                    history.get("preparation_max_excursion_limit_t", excursion), excursion)
+                if peak - oriented > excursion + 1e-12:
+                    raise APS100FieldHistoryError(f"Preparation reversal exceeds rate-based bound {excursion:g} T")
             return field
         def observe():
             return observe_value(self.get_field_t())
         def confirm_pause():
             self.pause()
+            if reduced_polling:
+                # Stop first, then fully verify mode at the stage boundary.
+                self._ensure_no_fault()
             return observe()
         def accept(field):
+            nonlocal changed, active_rates
             if abs(field - target) > acceptance + 1e-12:
+                if not preparation and direction * (field - target) > acceptance + 1e-12:
+                    raise APS100QualityOvershoot(f"Paused field {field:g} T passed target {target:g} T")
                 raise APS100SafetyError(f"Field stopped {abs(field-target):g} T from target, outside acceptance {acceptance:g} T")
+            # Restore before taking the completion snapshot: these serial
+            # transactions can outlast the transport telemetry freshness limit.
+            # A snapshot captured first would be stale by the time it is emitted.
+            if changed:
+                self.restore_rates(saved)
+                changed = False
+                active_rates = saved
+            if preparation:
+                # Preparation stability must also be qualified after restoration.
+                stable_deadline = min(deadline, time.monotonic() + stability_timeout)
+                values = []
+                def qualified():
+                    if len(values) < 3 or values[-1][0]-values[0][0] < stability:
+                        return False
+                    xmean = sum(t-values[0][0] for t, _ in values) / len(values)
+                    ymean = sum(v for _, v in values) / len(values)
+                    denom = sum((t-values[0][0]-xmean)**2 for t, _ in values)
+                    drift = (sum((t-values[0][0]-xmean)*(v-ymean) for t, v in values) / denom
+                             if denom else math.inf)
+                    return (max(v for _, v in values)-min(v for _, v in values) <= span_limit + 1e-12
+                            and abs(drift) <= drift_limit + 1e-12)
+                while True:
+                    self._raise_if_stopped(stop_event)
+                    status = self._ensure_no_fault()
+                    if status.sweep_active or self.get_heater_state() != 1:
+                        raise APS100SafetyError("Preparation stability requires paused driven mode")
+                    field = observe()
+                    now = time.monotonic()
+                    if now >= stable_deadline:
+                        raise APS100TimeoutError("Preparation field stability timeout")
+                    if abs(field - target) <= acceptance + 1e-12:
+                        if values and now-values[-1][0] > 3.:
+                            values.clear()
+                        values.append((now, field))
+                        while len(values) > 3 and values[1][0] <= now - stability:
+                            values.pop(0)
+                        if qualified():
+                            snapshot = self.read_snapshot()
+                            observed = observe_value(snapshot.field_t)
+                            now = time.monotonic()
+                            if now >= stable_deadline:
+                                raise APS100TimeoutError("Preparation field stability timeout")
+                            if (snapshot.status.sweep_active or snapshot.status.faulted
+                                    or snapshot.heater_on is not True):
+                                raise APS100SafetyError("Preparation snapshot is not paused and driven")
+                            if abs(observed-target) <= acceptance + 1e-12:
+                                if now-values[-1][0] > 3.:
+                                    values.clear()
+                                values.append((now, observed))
+                                while len(values) > 3 and values[1][0] <= now - stability:
+                                    values.pop(0)
+                                if qualified():
+                                    history["preparation_stable"] = True
+                                    return snapshot
+                            else:
+                                values.clear()
+                    else:
+                        values.clear()
+                    if progress:
+                        progress("preparation field", field)
+                    self._sleep(.1)
             snapshot = self.read_snapshot()
             observed = observe_value(getattr(snapshot, "field_t", snapshot))
             if abs(observed - target) > acceptance + 1e-12:
+                if direction * (observed - target) > acceptance + 1e-12:
+                    raise APS100QualityOvershoot(f"Paused field {observed:g} T passed target {target:g} T")
                 raise APS100SafetyError("Paused snapshot is outside field acceptance")
             return snapshot
         saved = None
@@ -1361,20 +1708,67 @@ class APS100AttoDry1000Adapter:
         try:
             current = observe()
             saved = self.get_rates()
+            active_rates = saved
+            history["start_rates_t_per_min"] = {str(i): list(entry) for i, entry in saved.items()}
             distance = direction * (target - current)
+            if approach == "no_overshoot":
+                def band_at(field):
+                    return next((i for i, (boundary, _) in saved.items()
+                                 if abs(field) / self.coil_constant_t_per_a <= boundary + 1e-9), None)
+                initial_band, target_band = band_at(current), band_at(target)
+                intermediate, approach_info = no_overshoot_intermediate(
+                    current, target, tolerance, no_overshoot_profile, preparation=preparation,
+                    same_rate_band=initial_band is not None and initial_band == target_band)
+                if preparation:
+                    # Preparation generates its own progressive endpoints.
+                    approach_info.pop("intermediate_t", None)
+                    approach_info.pop("planned_slow_distance_t", None)
+                history["no_overshoot_diagnostics"] = approach_info
             if distance <= tolerance:
+                if direct:
+                    self._raise_if_stopped(stop_event)
+                    self._ensure_no_fault()
                 return accept(confirm_pause())
-            intermediate = round((current + direction * distance * .8) / .0001) * .0001
-            stages = ([(intermediate, False), (target, True)] if direction * (intermediate-current) > tolerance
-                      and direction * (target-intermediate) > tolerance else [(target, True)])
-            for endpoint, slow in stages:
+            zero_start_slow = not preparation and not direct and abs(current) <= tolerance
+            if zero_start_slow:
+                history["zero_start_slow"] = True
+                history["zero_start_rates_t_per_min"] = reduced_rate_table(saved, self.coil_constant_t_per_a, .2)
+            def stages():
+                if direct:
+                    # One directional command at the verified per-run rate.
+                    # All observation, acceptance and safety checks stay shared.
+                    yield target, 1.0
+                    return
+                if not preparation:
+                    if direction * (intermediate-current) > tolerance and direction * (target-intermediate) > tolerance:
+                        yield intermediate, .2 if zero_start_slow else 1.0
+                    yield target, .2
+                    return
+                index = 0
+                previous_endpoint = None
+                while True:
+                    position = observe()
+                    remaining = direction * (target-position)
+                    final = remaining <= max(4. * tolerance, .0004)
+                    endpoint = target if final else round((position + direction * remaining * .7) / .0001) * .0001
+                    if previous_endpoint is not None and not final:
+                        endpoint = direction * max(direction * endpoint, direction * previous_endpoint + .0001)
+                        if direction * (target-endpoint) <= tolerance:
+                            endpoint, final = target, True
+                    if direction * (endpoint-position) <= tolerance or direction * (target-endpoint) <= tolerance:
+                        endpoint, final = target, True
+                    yield endpoint, max(.2, .7 ** index)
+                    if final:
+                        return
+                    previous_endpoint = endpoint
+                    index += 1
+            for endpoint, rate_factor in stages():
                 self._raise_if_stopped(stop_event)
                 if time.monotonic() >= deadline:
                     raise APS100TimeoutError("Directional field move timed out before stage")
                 self._ensure_no_fault()
-                if slow:
-                    unit = self.coil_constant_t_per_a * 60.0 * .0001
-                    reduced = {i: (b, min(r, max(unit, math.floor((r*.2/unit)+1e-10)*unit))) for i, (b,r) in saved.items()}
+                if rate_factor < 1.0:
+                    reduced = reduced_rate_table(saved, self.coil_constant_t_per_a, rate_factor)
                     changed = True
                     self.restore_rates(reduced)
                     active_rates = reduced
@@ -1384,21 +1778,31 @@ class APS100AttoDry1000Adapter:
                 output = float(self.get_output_field_t())
                 if not math.isfinite(output):
                     raise APS100SafetyError("Nonfinite output field before sweep")
+                current_a = abs(actual) / self.coil_constant_t_per_a
+                rate = next((r for b, r in active_rates.values() if current_a <= b + 1e-9), None)
+                diagnostics.begin_stage(endpoint, rate_factor, actual, rate)
                 if direction * (target - actual) <= tolerance:
+                    diagnostics.end_stage(actual, time.monotonic(), "already_there")
                     return accept(confirm_pause())
                 if direction * (endpoint - actual) <= tolerance:
+                    diagnostics.end_stage(actual, time.monotonic(), "already_there")
                     continue
                 if direction * (endpoint - output) < -tolerance:
                     raise APS100FieldHistoryError("Output crossed the directional stage target")
                 expected = "UP" if direction > 0 else "DOWN"
                 selected = self._set_directional_target(endpoint, actual)
                 fresh = observe()
+                current_a = abs(fresh) / self.coil_constant_t_per_a
+                diagnostics.stage.update(start_field_t=fresh, active_rate_t_per_min=next(
+                    (r for b, r in active_rates.values() if current_a <= b + 1e-9), None))
                 output = float(self.get_output_field_t())
                 if not math.isfinite(output):
                     raise APS100SafetyError("Nonfinite output field before sweep")
                 if direction * (target - fresh) <= tolerance:
+                    diagnostics.end_stage(fresh, time.monotonic(), "already_there")
                     return accept(confirm_pause())
                 if direction * (endpoint - fresh) <= tolerance:
+                    diagnostics.end_stage(fresh, time.monotonic(), "already_there")
                     continue
                 if selected != expected or direction * (endpoint - output) < -tolerance:
                     raise APS100FieldHistoryError("Output crossed the directional stage before command")
@@ -1408,16 +1812,35 @@ class APS100AttoDry1000Adapter:
                     raise APS100TimeoutError("Directional field move timed out before sweep command")
                 self._write(f"SWEEP {expected} SLOW")
                 last_progress_at = time.monotonic()
+                diagnostics.begin_sweep(last_progress_at)
                 best = direction * fresh
+                last_mode_check = None  # No cached mode crosses a stage boundary.
                 while True:
                     self._raise_if_stopped(stop_event)
-                    self._ensure_no_fault()
-                    actual = observe()
+                    polling["iterations"] += 1
+                    if polling["started_monotonic_s"] is None:
+                        polling["started_monotonic_s"] = time.monotonic()
+                    polling["status_checks"] += 1
+                    check_mode = (not reduced_polling or last_mode_check is None
+                                  or time.monotonic() - last_mode_check >= 1.0)
+                    if check_mode:
+                        polling["mode_checks"] += 1
+                    observation = self._hysteresis_safety_observation(check_mode)
+                    if check_mode:
+                        last_mode_check = time.monotonic()
+                    if observation is None:
+                        actual = observe()
+                    else:
+                        polling["shared_field_reads"] += 1
+                        actual = observe_value(observation.field_t, observed_at=observation.monotonic_s)
                     now = time.monotonic()
+                    polling["finished_monotonic_s"] = now
                     if progress: progress("ramping field", actual)
                     if direction * (actual-target) >= -tolerance:
+                        diagnostics.end_stage(actual, time.monotonic(), "target")
                         return accept(confirm_pause())
                     if direction * (endpoint-actual) <= tolerance:
+                        diagnostics.end_stage(actual, time.monotonic(), "endpoint")
                         confirm_pause()
                         break
                     if direction * actual - best >= .0001:
@@ -1431,12 +1854,14 @@ class APS100AttoDry1000Adapter:
                     if now >= deadline:
                         raise APS100TimeoutError("Directional field move timed out")
                     if now - last_progress_at >= budget:
+                        diagnostics.end_stage(actual, time.monotonic(), "no_progress")
                         return accept(confirm_pause())
                     self._sleep(.1)
             return accept(confirm_pause())
         except Exception:
             # Every history violation and all ordinary failures first request a
             # confirmed pause; inability to confirm remains an ordinary failure.
+            diagnostics.end_stage(history["end_t"], time.monotonic())
             self.pause()
             try:
                 observe()
@@ -1449,10 +1874,22 @@ class APS100AttoDry1000Adapter:
                     self.restore_rates(saved)
             finally:
                 try:
-                    observe()
+                    if not (preparation and history.get("preparation_stable")):
+                        observe()
                     history["complete"] = True
                 finally:
                     history["finished_monotonic_s"] = time.monotonic()
+                    diagnostics.finish(history["finished_monotonic_s"])
+                    # Full-move counts include setup and cleanup reads, not just
+                    # the polling loop. No extra hardware transactions are made.
+                    counts = {key: value - query_counts_before.get(key, 0)
+                              for key, value in self._query_counts.items()
+                              if value > query_counts_before.get(key, 0)}
+                    elapsed = history["finished_monotonic_s"] - start
+                    history["communication_diagnostics"] = dict(
+                        query_attempts=counts, total_query_attempts=sum(counts.values()),
+                        started_monotonic_s=start, elapsed_s=elapsed,
+                        queries_per_s=sum(counts.values()) / elapsed if elapsed > 0 else None)
 
     def _monotonic_field_move(self, target, direction, tolerance, timeout, stop_event, progress):
         """Directed, two-stage sweep with a strict deadline and per-run rate restoration."""
@@ -1546,6 +1983,192 @@ class APS100AttoDry1000Adapter:
             if changed:
                 self.restore_rates(saved)
 
+    def approach_field(self, target_t, approach, *, tolerance_t=0.002, timeout_s=3600.,
+                       stop_event=None, progress=None, snapshot_callback=None,
+                       no_progress_s=180., rate_t_per_min=None, safe_limit_t=None,
+                       poll_interval_s=.1):
+        """Execute a bounded driven approach; each intermediate limit is verified."""
+        mode = normalize_approach(approach)
+        tolerance = float(tolerance_t)
+        timeout = float(timeout_s)
+        stall = float(no_progress_s)
+        poll_interval = float(poll_interval_s)
+        if not all(math.isfinite(v) and v > 0 for v in (tolerance, timeout, stall, poll_interval)):
+            raise APS100SafetyError('Invalid approach tolerance or timeout')
+        deadline = time.monotonic() + timeout
+        self._raise_if_stopped(stop_event)
+        self._ensure_no_fault()
+        if self.get_heater_status() is not True:
+            raise APS100SafetyError('Field approach requires driven mode')
+        start = self.get_field_t()
+        limit = min(float(self.maximum_field_t), float(safe_limit_t)) if safe_limit_t is not None else float(self.maximum_field_t)
+        try:
+            targets = approach_targets(start, target_t, tolerance, mode, limit)
+        except ValueError as exc:
+            raise APS100SafetyError(str(exc)) from exc
+        saved = self.get_rates()
+        try:
+            extent = max(abs(start), abs(float(target_t)), *(abs(value) for value in targets), tolerance)
+            saved = validate_rate_table(saved, self.coil_constant_t_per_a, self.maximum_current_a,
+                                        self.maximum_rate_a_per_s, extent)
+        except (ValueError, TypeError) as exc:
+            raise APS100SafetyError(f'Invalid approach rate table: {exc}') from exc
+        changed = False
+        last_publish = [0.]
+        restoring = [False]
+        restoration_callback_error = [None]
+        def publish_during_rates():
+            try:
+                if not restoring[0]:
+                    self._raise_if_stopped(stop_event)
+                    if time.monotonic() >= deadline:
+                        raise APS100TimeoutError('Field approach timed out while setting rates')
+                if snapshot_callback is not None and time.monotonic() - last_publish[0] >= poll_interval:
+                    self._ensure_no_fault()
+                    snap = self.read_snapshot()
+                    snapshot_callback(replace(snap, approach_mode=mode,
+                        approach_phase=('oscillate' if mode == 'oscillate' else 'approach'),
+                        approach_complete=False, approach_rate_t_per_min=None))
+                    last_publish[0] = time.monotonic()
+            except Exception as exc:
+                if not restoring[0]:
+                    raise
+                restoration_callback_error[0] = exc
+        try:
+            if rate_t_per_min is not None:
+                base_rate = float(rate_t_per_min)
+                if not math.isfinite(base_rate) or base_rate <= 0:
+                    raise APS100SafetyError('Invalid field approach rate')
+            else:
+                base_rate = min(float(rate) for _, rate in saved.values())
+            active_rates = saved
+            def apply_table(table):
+                actual = self.restore_rates(table, step_callback=publish_during_rates)
+                return {i: (table[i][0], actual[i]) for i in table}
+            if rate_t_per_min is not None:
+                unit = self.coil_constant_t_per_a * 60. * .0001
+                if base_rate < unit:
+                    raise APS100SafetyError('Approach rate is below APS100 rate resolution')
+                capped = {i: (boundary, min(rate, math.floor(base_rate / unit) * unit))
+                          for i, (boundary, rate) in saved.items()}
+                changed = True
+                active_rates = apply_table(capped)
+            def active_rate(field):
+                current = abs(field) / self.coil_constant_t_per_a
+                for i in sorted(active_rates):
+                    if current <= active_rates[i][0]:
+                        return active_rates[i][1]
+                raise APS100SafetyError('Field exceeds configured rate ranges')
+            if not targets:
+                self.pause()
+            for index, stage in enumerate(targets):
+                self._raise_if_stopped(stop_event)
+                self._ensure_no_fault()
+                if time.monotonic() >= deadline:
+                    raise APS100TimeoutError('Field approach timed out before stage')
+                if mode == 'no_overshoot':
+                    current = self.get_field_t()
+                    if (target_t - start) * (target_t - current) < 0:
+                        raise APS100OvershootError('No-overshoot approach crossed the final target')
+                    if (target_t - start) * (stage - current) < 0:
+                        continue
+                if mode == 'no_overshoot' and index:
+                    changed = True
+                    active_rates = apply_table(reduced_rate_table(
+                        active_rates, self.coil_constant_t_per_a, .5))
+                if mode == 'no_overshoot':
+                    direction = 1 if target_t > start else -1
+                    current, output = self.get_field_t(), self.get_output_field_t()
+                    if not math.isfinite(current) or not math.isfinite(output):
+                        raise APS100SafetyError('Nonfinite field before approach stage')
+                    if direction * (stage - current) <= 0:
+                        continue
+                    if direction * (stage - output) < -tolerance:
+                        raise APS100OvershootError('Output passed the approach stage')
+                    expected = 'UP' if direction > 0 else 'DOWN'
+                    selected = self._set_directional_target(stage, current)
+                    current, output = self.get_field_t(), self.get_output_field_t()
+                    if (not math.isfinite(current) or not math.isfinite(output) or selected != expected
+                            or direction * (stage-current) < 0 or direction * (stage-output) < -tolerance):
+                        raise APS100OvershootError('Field passed approach stage before sweep')
+                    self._raise_if_stopped(stop_event)
+                    self._ensure_no_fault()
+                    if time.monotonic() >= deadline:
+                        raise APS100TimeoutError('Field approach timed out before sweep')
+                    self._write(f'SWEEP {expected} SLOW')
+                else:
+                    current = self.get_field_t()
+                    if not math.isfinite(current):
+                        raise APS100SafetyError('Nonfinite field before approach stage')
+                    if abs(stage-current) <= tolerance:
+                        continue
+                    expected = 'UP' if stage > current else 'DOWN'
+                    selected = self._set_directional_target(stage, current)
+                    current = self.get_field_t()
+                    if not math.isfinite(current) or selected != expected or ((stage-current) * (1 if expected == 'UP' else -1) < 0):
+                        raise APS100SafetyError('Field crossed approach stage before sweep')
+                    self._raise_if_stopped(stop_event)
+                    self._ensure_no_fault()
+                    if time.monotonic() >= deadline:
+                        raise APS100TimeoutError('Field approach timed out before sweep')
+                    self._write(f'SWEEP {expected} SLOW')
+                last_distance = None
+                last_progress = time.monotonic()
+                while True:
+                    self._raise_if_stopped(stop_event)
+                    self._ensure_no_fault()
+                    snapshot = self.read_snapshot()
+                    value = float(snapshot.field_t)
+                    if not math.isfinite(value) or abs(value) > limit:
+                        raise APS100SafetyError('Invalid field during approach')
+                    if snapshot_callback is not None:
+                        phase = 'oscillate' if mode == 'oscillate' else ('ramp' if index == 0 else 'approach')
+                        snapshot_callback(replace(snapshot, approach_mode=mode, approach_phase=phase,
+                                                  approach_complete=False, approach_rate_t_per_min=active_rate(value)))
+                        last_publish[0] = time.monotonic()
+                    if progress is not None:
+                        progress('ramping field', value)
+                    now = time.monotonic()
+                    distance = abs(stage - value)
+                    if last_distance is None or distance < last_distance - .0001:
+                        last_distance, last_progress = distance, now
+                    if mode == 'no_overshoot' and (target_t - start) * (target_t - value) < 0:
+                        raise APS100OvershootError('No-overshoot approach crossed the final target')
+                    if distance <= tolerance:
+                        self.pause()
+                        break
+                    progress_budget = max(stall, .0001 * 60. / active_rate(value) * 1.5)
+                    if now >= deadline or now - last_progress >= progress_budget:
+                        raise APS100TimeoutError('Field approach timed out or stopped progressing')
+                    if not getattr(snapshot.status, 'sweep_active', False):
+                        raise APS100SafetyError('APS100 stopped before approach stage')
+                    if stop_event is not None:
+                        stop_event.wait(poll_interval)
+                    else:
+                        self._sleep(poll_interval)
+        except Exception:
+            self.pause(confirm=False)
+            raise
+        finally:
+            if changed:
+                restoring[0] = True
+                self.restore_rates(saved, step_callback=publish_during_rates)
+        if restoration_callback_error[0] is not None:
+            raise restoration_callback_error[0]
+        self._raise_if_stopped(stop_event)
+        if time.monotonic() >= deadline:
+            raise APS100TimeoutError('Field approach timed out before final verification')
+        self._ensure_no_fault()
+        final = self.read_snapshot()
+        if (not math.isfinite(float(final.field_t)) or abs(float(final.field_t) - float(target_t)) > tolerance
+                or getattr(final.status, 'sweep_active', None) is not False or final.heater_on is not True):
+            raise APS100SafetyError('Final approach field or paused driven state is invalid')
+        final = replace(final, approach_mode=mode, approach_phase='settled', approach_complete=True,
+                        approach_rate_t_per_min=None)
+        if snapshot_callback is not None:
+            snapshot_callback(final)
+        return final
+
     def safe_move_to_field(
         self,
         target_t: float,
@@ -1562,6 +2185,10 @@ class APS100AttoDry1000Adapter:
         monotonic_direction: Optional[int] = None,
         hysteresis_options: Optional[dict] = None,
         field_history: Optional[dict] = None,
+        field_approach=None,
+        rate_t_per_min=None,
+        safe_limit_t=None,
+        poll_interval_s=.1,
     ) -> MagnetSnapshot:
         """Move from either magnet mode to a target and verified final mode."""
         target = self._validate_field(target_t)
@@ -1589,6 +2216,12 @@ class APS100AttoDry1000Adapter:
         heater_on = heater_state == 1
         field_t = self.get_field_t()
         output_t = self.get_output_field_t()
+        if field_approach is not None:
+            limit = min(float(self.maximum_field_t), float(safe_limit_t)) if safe_limit_t is not None else float(self.maximum_field_t)
+            try:
+                approach_targets(field_t, target, tolerance_t, field_approach, limit)
+            except ValueError as exc:
+                raise APS100SafetyError(str(exc)) from exc
         if not heater_on and mode == "persistent" and abs(field_t - target) <= abs(
             float(tolerance_t)
         ):
@@ -1623,6 +2256,8 @@ class APS100AttoDry1000Adapter:
             )
 
         self._raise_if_stopped(stop_event)
+        if field_approach is not None and monotonic_direction is not None:
+            raise APS100SafetyError('Field approach conflicts with directional protection')
         if monotonic_direction is not None:
             if mode != "driven":
                 raise APS100SafetyError("Directional approach requires driven mode")
@@ -1632,7 +2267,11 @@ class APS100AttoDry1000Adapter:
                     direction = 1 if target >= self.get_field_t() else -1
                 return self._hysteresis_field_move(target, direction, abs(float(tolerance_t)), timeout_s, stop_event, progress, hysteresis_options, field_history if field_history is not None else {})
             return self._monotonic_field_move(target, monotonic_direction, abs(float(tolerance_t)), timeout_s, stop_event, progress)
-        if abs(self.get_field_t() - target) > abs(float(tolerance_t)):
+        if field_approach is not None:
+            self.approach_field(target, field_approach, tolerance_t=tolerance_t, timeout_s=timeout_s,
+                                stop_event=stop_event, progress=progress, rate_t_per_min=rate_t_per_min,
+                                safe_limit_t=safe_limit_t, poll_interval_s=poll_interval_s)
+        elif abs(self.get_field_t() - target) > abs(float(tolerance_t)):
             field_progress = (
                 (lambda value: progress("ramping field", value))
                 if progress is not None else None
@@ -1713,12 +2352,19 @@ class APS100AttoDry1000Adapter:
                 self._resource = None
                 self._identity = None
                 self._remote = False
+                self._io_events.clear()
+                self._io_sequence = 0
+                self._io_controls.clear()
+                self._io_control_count = 0
+                self._query_counts.clear()
             # Do not close ResourceManager here.  PyVISA shares manager
             # instances, so doing so can invalidate another instrument.
 
 
 class MockAPS100Adapter:
     """Deterministic APS100 substitute used by the app's mock mode and tests."""
+
+    _range_boundaries_a = (40.0, 44.28, 45.0, 89.0, 100.0)
 
     def __init__(
         self,
@@ -1850,7 +2496,7 @@ class MockAPS100Adapter:
         return self.get_operating_mode()
 
     def get_range_a(self, index):
-        return [40.0, 44.28, 45.0, 89.0, 100.0][index]
+        return self._range_boundaries_a[index]
 
     def get_rate_a_per_s(self, index):
         rate = self._fast_rate_t_per_min if int(index) == 5 else self._rate_t_per_min
@@ -2059,6 +2705,29 @@ class MockAPS100Adapter:
                 ),
             )
 
+    def approach_field(self, target_t, approach, *, tolerance_t=.002, timeout_s=3600.,
+                       stop_event=None, progress=None, snapshot_callback=None,
+                       no_progress_s=180., rate_t_per_min=None, safe_limit_t=None, poll_interval_s=.1):
+        del no_progress_s, rate_t_per_min, poll_interval_s
+        mode = normalize_approach(approach)
+        limit = min(self.maximum_field_t, safe_limit_t) if safe_limit_t is not None else self.maximum_field_t
+        targets = approach_targets(self.get_field_t(), target_t, tolerance_t, mode, limit)
+        deadline = time.monotonic() + timeout_s
+        for index, stage in enumerate(targets):
+            def report(value):
+                if progress:
+                    progress('ramping field', value)
+                if snapshot_callback:
+                    phase = 'oscillate' if mode == 'oscillate' else ('ramp' if index == 0 else 'approach')
+                    snapshot_callback(replace(self.read_snapshot(), approach_mode=mode, approach_phase=phase))
+            self.move_to_field(stage, tolerance_t=tolerance_t, timeout_s=max(0., deadline-time.monotonic()),
+                               stop_event=stop_event, progress=report)
+        self.pause()
+        snapshot = replace(self.read_snapshot(), approach_mode=mode, approach_phase='settled', approach_complete=True)
+        if snapshot_callback:
+            snapshot_callback(snapshot)
+        return snapshot
+
     def safe_move_to_field(
         self,
         target_t,
@@ -2075,6 +2744,10 @@ class MockAPS100Adapter:
         monotonic_direction=None,
         hysteresis_options=None,
         field_history=None,
+        field_approach=None,
+        rate_t_per_min=None,
+        safe_limit_t=None,
+        poll_interval_s=.1,
     ):
         del settle_s
         self.take_remote()
@@ -2108,8 +2781,22 @@ class MockAPS100Adapter:
                     "Confirm the APS100 stored persistent field and polarity before matching"
                 )
             self.enter_driven_mode(progress=progress)
-        if hysteresis_options is not None:
+        if field_approach is not None and monotonic_direction is not None:
+            raise APS100SafetyError('Field approach conflicts with directional protection')
+        if field_approach is not None:
+            self.approach_field(target_t, field_approach, tolerance_t=tolerance_t, timeout_s=timeout_s,
+                                stop_event=stop_event, progress=progress, rate_t_per_min=rate_t_per_min,
+                                safe_limit_t=safe_limit_t, poll_interval_s=poll_interval_s)
+        elif hysteresis_options is not None:
             history = field_history if field_history is not None else {}
+            approach = hysteresis_options.get("approach", "no_overshoot")
+            if approach not in {"no_overshoot", "linear_no_backward"}:
+                raise APS100SafetyError("Invalid hysteresis approach")
+            no_overshoot_profile = hysteresis_options.get("no_overshoot_profile", "standard")
+            if no_overshoot_profile not in {"standard", "short_tail"}:
+                raise APS100SafetyError("Invalid APS100 No Overshoot profile")
+            if no_overshoot_profile != "standard" and approach != "no_overshoot":
+                raise APS100SafetyError("Shorter slow approach requires No Overshoot")
             current = self.get_field_t()
             direction = int(monotonic_direction or (1 if target_t >= current else -1))
             started = time.monotonic()
@@ -2117,31 +2804,59 @@ class MockAPS100Adapter:
                 history.update(direction=direction, start_t=current, end_t=current, min_t=current, max_t=current,
                                max_reverse_t=0., read_count=1, started_monotonic_s=started,
                                finished_monotonic_s=None, complete=False)
+            diagnostics = _FieldMoveDiagnostics(history, started)
+            history["approach"] = approach
+            reversal_warnings = _ReversalWarnings(history)
+            if approach == "no_overshoot":
+                history["no_overshoot_diagnostics"] = dict(
+                    requested_profile=no_overshoot_profile, effective_profile="mock",
+                    reason="mock_single_stage")
+            # The mock's table is local state: do not introduce readback calls.
+            history["start_rates_t_per_min"] = {
+                str(i): [boundary, self._rate_t_per_min]
+                for i, boundary in enumerate(self._range_boundaries_a)
+            }
             peak = direction * (history["max_t"] if direction > 0 else history["min_t"])
             def observe(value):
                 nonlocal peak
                 value = float(value)
+                if not math.isfinite(value):
+                    raise APS100SafetyError("Nonfinite field history readback")
                 history["end_t"] = value
                 history["min_t"] = min(history["min_t"], value)
                 history["max_t"] = max(history["max_t"], value)
                 history["read_count"] += 1
+                diagnostics.observe(value, time.monotonic())
                 peak = max(peak, direction * value)
                 history["max_reverse_t"] = max(history["max_reverse_t"], peak - direction * value)
-                if (not hysteresis_options["lower_t"] <= value <= hysteresis_options["upper_t"]
-                        or history["max_reverse_t"] > hysteresis_options["reversal_t"]):
+                if not hysteresis_options["lower_t"] <= value <= hysteresis_options["upper_t"]:
                     raise APS100FieldHistoryError("Mock field history violated limits")
+                if not hysteresis_options.get("preparation"):
+                    reversal_warnings.observe(value, peak, direction,
+                                              hysteresis_options["reversal_t"], time.monotonic())
                 if progress: progress("ramping field", value)
             try:
                 observe(current)
                 if direction * (target_t-current) > tolerance_t:
+                    # Mock motion remains one unreduced stage; its simulated
+                    # sweep starts at the existing move_to_field invocation.
+                    diagnostics.begin_stage(target_t, 1.0, current, self._rate_t_per_min)
+                    diagnostics.begin_sweep(time.monotonic())
                     self.move_to_field(target_t, tolerance_t=tolerance_t, timeout_s=timeout_s,
                                        stop_event=stop_event, progress=observe)
+                    diagnostics.end_stage(history["end_t"], time.monotonic(), "target")
                 self.pause()
                 observe(self.get_field_t())
                 if abs(history["end_t"] - target_t) > hysteresis_options["acceptance_t"]:
+                    if (not hysteresis_options.get("preparation") and direction * (history["end_t"] - target_t)
+                            > hysteresis_options["acceptance_t"]):
+                        raise APS100QualityOvershoot("Mock paused field passed nominal target")
                     raise APS100SafetyError("Mock directional field outside acceptance")
+                if hysteresis_options.get("preparation"):
+                    history["preparation_stable"] = True
                 return self.read_snapshot()
             except Exception:
+                diagnostics.end_stage(history["end_t"], time.monotonic())
                 self.pause()
                 raise
             finally:
@@ -2150,6 +2865,7 @@ class MockAPS100Adapter:
                     history["complete"] = True
                 finally:
                     history["finished_monotonic_s"] = time.monotonic()
+                    diagnostics.finish(history["finished_monotonic_s"])
         if monotonic_direction is not None:
             current = self.get_field_t()
             direction = int(monotonic_direction) or (1 if target_t >= current else -1)

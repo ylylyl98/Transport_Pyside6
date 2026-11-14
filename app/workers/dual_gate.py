@@ -71,6 +71,7 @@ class DualGateWorker(RunWorker):
                                             vds_ramp=min(SAFE_RAMP_STEP_V, self.p.vds_ramp),
                                             use_g3=self.p.vds_source == "Keithley 2400")
             self.validate_bias2(self.p, trajectory)
+            self._gate_targets = (trajectory[0]["vtg"], trajectory[0]["vbg"])
 
             if self.p.vds_source != "Keithley 2400" and not self.p.vds_source.startswith("NI DAQ"):
                 raise RuntimeError("Vds Sweep requires an enabled Bias1 source.")
@@ -103,26 +104,26 @@ class DualGateWorker(RunWorker):
             self.status.emit("Ramping gates to set voltage...")
             if self.g1 is not None:
                 self.log.emit(
-                    f"Ramping G1/Vtg to {self.p.vtg_set:.9g} V "
+                    f"Ramping G1/Vtg to {self._gate_targets[0]:.9g} V "
                     f"({GATE_BIAS_RAMP_STEP_V:g} V/step, {GATE_BIAS_RAMP_STEP_T:g} s/step)"
                 )
                 safe_ramp(
                     self.g1.set_voltage,
                     getattr(self.g1, "voltage", None) or 0.0,
-                    self.p.vtg_set,
+                    self._gate_targets[0],
                     GATE_BIAS_RAMP_STEP_V,
                     GATE_BIAS_RAMP_STEP_T,
                     self.check_abort_pause,
                 )
             if self.g2 is not None:
                 self.log.emit(
-                    f"Ramping G2/Vbg to {self.p.vbg_set:.9g} V "
+                    f"Ramping G2/Vbg to {self._gate_targets[1]:.9g} V "
                     f"({GATE_BIAS_RAMP_STEP_V:g} V/step, {GATE_BIAS_RAMP_STEP_T:g} s/step)"
                 )
                 safe_ramp(
                     self.g2.set_voltage,
                     getattr(self.g2, "voltage", None) or 0.0,
-                    self.p.vbg_set,
+                    self._gate_targets[1],
                     GATE_BIAS_RAMP_STEP_V,
                     GATE_BIAS_RAMP_STEP_T,
                     self.check_abort_pause,
@@ -130,13 +131,12 @@ class DualGateWorker(RunWorker):
 
             self.status.emit("Ramping Vds to sweep start...")
             if self.p.bias2_mode == "Follow":
-                self.move_pair(self.p.vds_start, step=SAFE_RAMP_STEP_V)
+                self.move_pair(trajectory[0]["vds"], step=SAFE_RAMP_STEP_V)
             else:
-                self._safe_ramp_vds(self.p.vds_start, allow_stop=True)
+                self._safe_ramp_vds(trajectory[0]["vds"], allow_stop=True)
             self.check_abort_pause()
 
-            step = self.p.vds_step if self.p.vds_stop >= self.p.vds_start else -abs(self.p.vds_step)
-            forward_seq = _frange_inc(self.p.vds_start, self.p.vds_stop, step)
+            forward_seq = [point["vds"] for point in trajectory]
             backward_seq = list(reversed(forward_seq)) if self.p.sweep_both_ways else []
             grand_total = len(forward_seq) + len(backward_seq)
             self.clear_plot.emit()
@@ -231,7 +231,7 @@ class DualGateWorker(RunWorker):
             raw_x, raw_y, raw_dc = (sample[key] for key in ("raw_X", "raw_Y", "raw_DC"))
             ids_x, ids_y, ids_dc = (sample[key] for key in ("Ids_X", "Ids_Y", "Ids_DC"))
             ids_keithley = self._read_keithley_current()
-            w.writerow([self.p.vtg_set, self.p.vbg_set, vds, raw_x, raw_y, raw_dc, ids_x, ids_y, ids_dc, ids_keithley, direction, *self.extra_values()])
+            w.writerow([*getattr(self, "_gate_targets", (self.p.vtg_set, self.p.vbg_set)), vds, raw_x, raw_y, raw_dc, ids_x, ids_y, ids_dc, ids_keithley, direction, *self.extra_values()])
             try:
                 f.flush()
                 os.fsync(f.fileno())

@@ -261,8 +261,9 @@ The preview shows points per pass and per condition, including any shorter final
 Saved step values retain their internal tesla units; remembered point-count recipes
 are converted to the equivalent step when opened.
 
-For each APS100 run, set **Maximum sweep rate (T/min)**. Above this input, the UI
-shows the configured ceiling and current request in **Oe/s** (0.12 T/min = 20 Oe/s).
+For each APS100 run, enter **Rate (Oe/s)** directly, for example `20`. The short
+**Maximum** hint shows the configured ceiling in Oe/s. Saved T/min recipes are
+converted for display (0.12 T/min = 20 Oe/s).
 Range and voltage limits may further reduce the allowed rate. The application reads and
 validates the existing **RANGE/RATE 0–4** table, rounds the requested maximum down to
 the instrument's 0.1 mA/s resolution, and uses the lower rate in each range. It verifies
@@ -298,6 +299,14 @@ setpoint or turn on the sample heater. Existing magnet and sample-heater
 interlocks remain in force. The APS100 persistent-switch heater is a separate device
 and may remain on in driven mode. Passive stabilization while driven is possible
 but depends on the actual thermal load and refrigerator; it is not guaranteed.
+
+New B-field recipes default to Stepped mode, a 10 Oe/s maximum approach rate,
+5 mT nominal steps and a 10 s temperature window. The default -0.5 to +0.5 T
+range has 201 points per pass. Saved recipes retain their explicit mode and
+settings; changing defaults does not update a running measurement. Point
+acceptance remains ±0.5 mT and the maximum actual gap remains Auto (twice the
+nominal step for a uniform grid). Passed interior targets can still be logged
+and skipped; the existing gap, history and thermal checks remain enforced.
 
 The default 4 K target, 0.05 K tolerance, 10 s window, 0.02 K span, 0.01 K/min
 drift and 600 s timeout are starting values requiring validation on the actual

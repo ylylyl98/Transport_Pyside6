@@ -34,11 +34,11 @@ class Bias2Tests(unittest.TestCase):
     def test_follow_targets_and_limits(self):
         p = DualGateParams(vds_source="NI DAQ", bias2_mode="Follow", bias2_offset=.1)
         m = Manager()
-        self.assertEqual(validate_bias2(p, [{"vds": .2}, {"vds": -.1}], m), [.30000000000000004, 0.0])
+        self.assertEqual(validate_bias2(p, [{"vds": .2}, {"vds": -.1}], m), [.3, 0.0])
         with self.assertRaises(ValueError): validate_bias2(p, [1], m)
         with self.assertRaises(ValueError): validate_bias2(p, [0], m, False)
 
-    def test_follow_rejects_bias1_unrepresentable_target(self):
+    def test_follow_uses_rounded_bias1_target(self):
         events = []
         g3 = FakeSource("g3", events)
         g3.cached_source_voltage_range_v = 20.0
@@ -46,13 +46,13 @@ class Bias2Tests(unittest.TestCase):
         g4.cached_source_voltage_range_v = 2.0
         manager = FullManager({"g3": g3, "g4": g4})
         params = DualGateParams(bias2_mode="Follow", bias2_offset=0)
-        with self.assertRaisesRegex(ValueError, "Bias1 target"):
-            validate_bias2(params, [.00005], manager)
+        self.assertEqual(validate_bias2(params, [.00005], manager), [0.])
+        self.assertEqual(events, [])
 
     def test_resolution_and_protection_fail_closed(self):
         p = DualGateParams(bias2_mode="Fixed", bias2_voltage=.1001)
         m = Manager()
-        with self.assertRaisesRegex(ValueError, "representable"): validate_bias2(p, [0], m)
+        self.assertEqual(validate_bias2(p, [0], m), [.1])
         p.bias2_voltage = .1
         m.protection_is_applied = lambda name: False
         with self.assertRaisesRegex(ValueError, "protection"): validate_bias2(p, [0], m)

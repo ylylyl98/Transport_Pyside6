@@ -112,7 +112,9 @@ class LakeShore335Adapter:
     def __init__(self, resource_name: str = DEFAULT_RESOURCE, *, baud_rate: int = 57600,
                  data_bits: int = 7, parity: object = "odd", stop_bits: int = 1,
                  timeout_ms: int = 1500, resource_manager=None, visa_resource=None,
-                 clock: Callable[[], float] = time.monotonic):
+                 clock: Callable[[], float] = time.monotonic,
+                 io_clock: Callable[[], float] = time.monotonic,
+                 io_sleep: Callable[[float], None] = time.sleep):
         self.resource_name = str(resource_name or DEFAULT_RESOURCE)
         self.baud_rate, self.data_bits, self.parity, self.stop_bits = int(baud_rate), int(data_bits), parity, int(stop_bits)
         self.timeout_ms = int(timeout_ms)
@@ -122,7 +124,15 @@ class LakeShore335Adapter:
         self._identity: Optional[str] = None
         self._lock = threading.RLock()
         self._clock = clock
+        self._io_clock = io_clock
+        self._io_sleep = io_sleep
         self._previous = None
+        self._next_io_time = 0.0
+
+    def _wait_for_io(self):
+        delay = self._next_io_time - self._io_clock()
+        if delay > 0:
+            self._io_sleep(delay)
 
     @property
     def connected(self) -> bool:
@@ -223,14 +233,20 @@ class LakeShore335Adapter:
         resource = self._require_connected() if self._identity is not None else self._resource
         if resource is None:
             raise LakeShore335CommunicationError("Lake Shore 335 resource is not open")
-        try:
-            return str(resource.query(str(command))).strip()
-        except Exception:
+        with self._lock:
+            self._wait_for_io()
             try:
-                resource.write(str(command))
+                query = getattr(resource, "query", None)
+                if callable(query):
+                    return str(query(command)).strip()
+                resource.write(command)
                 return str(resource.read()).strip()
             except Exception as exc:
                 raise LakeShore335CommunicationError(f"Lake Shore query {command!r} failed: {exc}") from exc
+            finally:
+                # Model 335 USB manual section 6.3.5 (335_manual.pdf): wait 50 ms
+                # after the complete response before starting another message.
+                self._next_io_time = self._io_clock() + 0.05
 
     def _write(self, command: str) -> None:
         """Write one bounded control or resistive-input configuration command."""
@@ -239,10 +255,14 @@ class LakeShore335Adapter:
         if not re.fullmatch(rf"(?:SETP [12],{number}|RANGE [12],[0-3]|RAMP [12],[01],{number}|INTYPE [AB],(?:2,[01],[0-6]|3,[01],[0-8]),[01],[123])", command):
             raise LakeShore335TelemetryError(f"Lake Shore command is not allowed: {command!r}")
         resource = self._require_connected()
-        try:
-            resource.write(command)
-        except Exception as exc:
-            raise LakeShore335CommunicationError(f"Lake Shore write {command!r} failed: {exc}") from exc
+        with self._lock:
+            self._wait_for_io()
+            try:
+                resource.write(command)
+            except Exception as exc:
+                raise LakeShore335CommunicationError(f"Lake Shore write {command!r} failed: {exc}") from exc
+            finally:
+                self._next_io_time = self._io_clock() + 0.05
 
     @staticmethod
     def _first_field(value: str) -> str:
@@ -351,7 +371,10 @@ class LakeShore335Adapter:
             raise LakeShore335ConfigurationError("Current reversal must be a boolean")
         with self._lock:
             try:
-                before = self.read_input_configuration(channel)
+                try:
+                    before = self.read_input_configuration(channel)
+                except LakeShore335Error as exc:
+                    raise LakeShore335ConfigurationError(f"Before INTYPE write: {exc}") from exc
                 if not before["current_reversal_supported"]:
                     raise LakeShore335ConfigurationError("Current reversal requires a PTC or NTC RTD input")
                 if before["current_reversal"] != enabled:
@@ -360,7 +383,10 @@ class LakeShore335Adapter:
                     self._previous = None
                     self._write(f"INTYPE {before['channel']},{before['sensor_type']},{int(before['autorange'])},"
                                 f"{before['range']},{int(enabled)},{before['units']}")
-                after = self.read_input_configuration(before["channel"])
+                try:
+                    after = self.read_input_configuration(before["channel"])
+                except LakeShore335Error as exc:
+                    raise LakeShore335ConfigurationError(f"INTYPE verification readback: {exc}") from exc
                 fixed = ("sensor_type", "autorange", "units")
                 if (any(after[key] != before[key] for key in fixed)
                         or (not before["autorange"] and after["range"] != before["range"])

@@ -92,6 +92,21 @@ def _heatmap_snapshot(snapshot):
             "view": {**snapshot["view"], "normalization": "raw", "fixed_value": None}}
 
 
+def _draw_reversal_markers(ax, trace, factor):
+    """Overlay flagged samples without changing the underlying curve."""
+    x = np.asarray(trace["x"], dtype=float)
+    y = np.asarray(trace["y"], dtype=float)
+    flags = np.asarray(trace.get("reversal_warning", []), dtype=float)
+    if flags.size != x.size or y.size != x.size:
+        return None
+    mask = np.isfinite(flags) & (flags != 0) & np.isfinite(x) & np.isfinite(y)
+    if not np.any(mask):
+        return None
+    return ax.scatter(x[mask], y[mask] / factor, marker="D", s=42,
+                      facecolors="#e39a16", edgecolors="#6b4200", linewidths=.8,
+                      label="Readback reversal", zorder=5)
+
+
 def _draw_analysis_traces(fig, snapshot, rect, automatic, differences, pair):
     ax = fig.add_axes(rect)
     factor, y_unit = _current_scale(snapshot)
@@ -110,6 +125,7 @@ def _draw_analysis_traces(fig, snapshot, rect, automatic, differences, pair):
         ax.plot(trace["x"], np.asarray(trace["y"]) / factor, color=color, lw=1.45,
                 linestyle="--" if trace.get("direction") == "backward" else "-", label=label,
                 marker=".", markersize=4)
+        _draw_reversal_markers(ax, trace, factor)
     ax.set_xlabel(_label(snapshot["x_name"], snapshot.get("x_unit", "")), fontsize=22)
     ax.set_ylabel(comparison_y_label(snapshot["signal"], y_unit, snapshot["view"].get("normalization", "raw")), fontsize=22)
     _style(ax)
@@ -157,6 +173,7 @@ def build_overlay_figure(snapshot):
                 "traces": [trace for panel in panels for trace in panel["traces"]]}
     shared_factor, shared_unit = _current_scale(combined)
     handles = []
+    warning_handle = None
     for index, (name, panel, axis) in enumerate(zip(order, panels, axes)):
         factor, unit = _current_scale(panel) if dual else (shared_factor, shared_unit)
         labels = comparison_labels(panel["records"], panel["traces"], (snapshot["x_name"],))
@@ -166,6 +183,9 @@ def build_overlay_figure(snapshot):
                               linestyle="--" if trace.get("direction") == "backward" else "-",
                               label=f"{name} · {label}")
             handles.append(line)
+            marker = _draw_reversal_markers(axis, trace, factor)
+            if warning_handle is None and marker is not None:
+                warning_handle = marker
         panel_view = view.get("channel_views", {}).get(name, panel.get("view", {}))
         if panel_view.get("ylim") and (dual or index == 0):
             axis.set_ylim(np.asarray(panel_view["ylim"]) / factor)
@@ -187,6 +207,8 @@ def build_overlay_figure(snapshot):
     ax.set_xscale(view.get("xscale", "linear"))
     for axis in dict.fromkeys(axes):
         axis.set_yscale(view.get("yscale", "linear"))
+    if warning_handle is not None:
+        handles.append(warning_handle)
     if view.get("legend", True) and handles:
         ax.legend(handles, [line.get_label() for line in handles], loc="best", frameon=False, fontsize=10)
     return fig
@@ -399,10 +421,13 @@ def build_run_figure(snapshot, panels=None):
                         color="#dc8500" if backward else "#1967d2", linestyle="--" if backward else "-",
                         lw=1.45, marker=".", markersize=4,
                         label=textwrap.fill(trace_label(trace, record, {}, True), 36))
+                _draw_reversal_markers(ax, trace, factor)
             ax.set_ylabel(_label(label or data["signal"], unit), fontsize=22)
             # Long scans can contain hundreds of row/pass segments: keep the legend bounded.
             if len(ax.lines) <= 8:
-                ax.legend(loc="best", frameon=False, fontsize=12)
+                handles, labels = ax.get_legend_handles_labels()
+                unique = dict(zip(labels, handles))
+                ax.legend(unique.values(), unique.keys(), loc="best", frameon=False, fontsize=12)
     fig.canvas.draw()
     return fig
 

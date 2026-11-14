@@ -1,6 +1,7 @@
 """Shared dual-lock-in calibration and DAQ acquisition, independent of Qt."""
 from copy import deepcopy
 import math
+import time
 
 DUAL_SIGNALS = ('I_drag_X', 'I_drag_Y', 'I_drag_R', 'I_drive_X', 'I_drive_Y', 'I_drive_R')
 DUAL_COLUMNS = ('raw_drive_X', 'raw_drive_Y', *DUAL_SIGNALS)
@@ -100,7 +101,7 @@ def verify_dual_calibration(config, manager, settings):
     return verify_measurement_calibration(config, manager, settings)
 
 
-def acquire_current_sample(daq, averages, amp_rate, lockin_rate, chain=None, check=None):
+def acquire_current_sample(daq, averages, amp_rate, lockin_rate, chain=None, check=None, *, between_reads=None, read_timing=None):
     mode = measurement_mode(chain)
     config = (chain or {}).get('drag_drive') or {}
     if mode != 'ordinary' and config.get('verified') is not True:
@@ -120,10 +121,14 @@ def acquire_current_sample(daq, averages, amp_rate, lockin_rate, chain=None, che
         raise ValueError('Averages must be at least 1.')
     indexes = [0, 1] + ([2] if dc_enabled else []) + ([3, 4] if mode == 'dual' else [])
     raw = {i: 0. for i in indexes}
-    for _ in range(count):
+    for sample_index in range(count):
+        if sample_index and between_reads:
+            between_reads()
         if check:
             check()
+        started = time.monotonic() if read_timing else None
         values = daq.acquire()
+        finished = time.monotonic() if read_timing else None
         for index in indexes:
             try:
                 if hasattr(daq, 'get_ai_value'):
@@ -140,6 +145,8 @@ def acquire_current_sample(daq, averages, amp_rate, lockin_rate, chain=None, che
             except (KeyError, IndexError, TypeError, ValueError) as ex:
                 raise RuntimeError(f'DAQ ai{index} missing or invalid: {ex}') from ex
             raw[index] += value / count
+        if read_timing:
+            read_timing(started, finished)
     drag_x = raw[0] / (amp_rate * lockin_rate) if mode != 'single_drive' else math.nan
     drag_y = raw[1] / (amp_rate * lockin_rate) if mode != 'single_drive' else math.nan
     result = {'raw_X': raw[0], 'raw_Y': raw[1], 'raw_DC': raw.get(2, math.nan),

@@ -38,6 +38,12 @@ copies, backups and generated verification artifacts are excluded from Git.
 
 ## Included behavior
 
+- Voltage targets now round to the nearest active Keithley source increment
+  throughout manual control and measurement modes. Requested recipes are retained;
+  physical voltage data uses the rounded targets. This supersedes the earlier
+  off-grid rejection policy below. Unknown ranges and voltage protections still
+  block unsafe commands; see [measurement guide](measurement-guide.md).
+
 - CoSweep axis values support six decimal places. Cached MODEL 2400 and 2401
   source ranges determine programming resolution; the 2401 supports the
   0.2/2/20 V ranges only. Start checks connections, source mode and busy hardware

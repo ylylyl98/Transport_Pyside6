@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 import json
 import math
@@ -50,6 +50,9 @@ class GateScanBatchRequest:
     calibration: tuple | None = None
     condition_index: int = 0
     condition_name: str = ""
+    field_approach: str | None = None
+    field_rate_t_per_min: float | None = None
+    field_settle_s: float = 0.0
 
 
 @dataclass
@@ -140,6 +143,12 @@ class GateScanFieldBatch(QtCore.QObject):
         self._verification_timer = QtCore.QTimer(self)
         self._verification_timer.setInterval(1000)
         self._verification_timer.timeout.connect(self._poll_verification)
+        self._settle_timer = QtCore.QTimer(self)
+        self._settle_timer.setInterval(250)
+        self._settle_timer.timeout.connect(self._poll_field_settle)
+        self._settle_deadline = None
+        self._settle_invalid_since = None
+        self._settled_field_t = None
         self._measurement_monitor_timer = QtCore.QTimer(self)
         self._measurement_monitor_timer.setInterval(250)
         self._measurement_monitor_timer.timeout.connect(self._poll_measurement_thermal)
@@ -350,6 +359,12 @@ class GateScanFieldBatch(QtCore.QObject):
             requests = self._capture_requests(fields, series_id)
             if not requests:
                 raise ValueError("Add at least one enabled scan condition")
+            if resume_checkpoint:
+                with open(resume_checkpoint, encoding="utf-8") as handle:
+                    resume_settings = json.load(handle).get("field_control")
+                if resume_settings is None:
+                    # Legacy checkpoints used the configured Gate Scan rate.
+                    requests = tuple(replace(request, field_approach=None, field_rate_t_per_min=None, field_settle_s=0.0) for request in requests)
             self._validate_requests(requests)
             resume = self._validate_resume(resume_checkpoint, requests) if resume_checkpoint else None
             start_index = resume["next_job_index"] if resume else 0
@@ -481,6 +496,14 @@ class GateScanFieldBatch(QtCore.QObject):
         fields = list(requests[0].fields_t)
         if saved.get("fields_t") != fields:
             raise ValueError("Resume field list differs from the saved series")
+        saved_control = saved.get("field_control")
+        current_control = {"field_approach": requests[0].field_approach, "rate_t_per_min": requests[0].field_rate_t_per_min}
+        if saved_control is not None:
+            saved_control = dict(saved_control)
+            saved_control.setdefault("field_settle_s", 0.0)
+            current_control["field_settle_s"] = requests[0].field_settle_s
+            if saved_control != current_control:
+                raise ValueError("Resume field approach, rate or settle delay differs from the saved series")
         conditions = saved.get("conditions", [])
         if len(conditions) != len(requests):
             raise ValueError("Resume condition count differs from the saved series")
@@ -547,6 +570,9 @@ class GateScanFieldBatch(QtCore.QObject):
         if self._state.stop_requested:
             return
         self._state.stop_requested = True
+        if self._state.phase == "field_settle":
+            self._finish_stopped("Stopped during field settle delay")
+            return
         if self._state.phase == "verifying":
             self._finish_stopped("Stopped while waiting for valid APS100 readings")
             return
@@ -565,6 +591,21 @@ class GateScanFieldBatch(QtCore.QObject):
             self.tab.stop_run()
 
     def _capture_requests(self, fields, series_id=None):
+        provider = getattr(self.tab, "get_field_control_settings", None)
+        control = provider() if callable(provider) else {}
+        approach = control.get("field_approach")
+        if approach not in (None, "linear", "no_overshoot", "oscillate"):
+            raise ValueError("Invalid field approach")
+        rate = control.get("rate_t_per_min")
+        if rate is not None:
+            from app.engine.bfield_transport_sweep import rate_a_per_s_to_t_per_min, effective_rate_limit_t_per_min
+            rate = float(rate)
+            maximum = min(rate_a_per_s_to_t_per_min(cfg.magnet.gate_scan_rate_a_per_s), effective_rate_limit_t_per_min())
+            if not math.isfinite(rate) or rate <= 0 or rate > maximum + 1e-12:
+                raise ValueError(f"Field rate must be positive and at most {maximum:g} T/min")
+        settle = float(control.get("field_settle_s", 0.0))
+        if not math.isfinite(settle) or settle < 0:
+            raise ValueError("Field settle delay must be finite and non-negative")
         capture_many = getattr(self.tab, "capture_field_batch_requests", None)
         if callable(capture_many):
             captured = capture_many()
@@ -582,10 +623,10 @@ class GateScanFieldBatch(QtCore.QObject):
                     required_devices=tuple(required), batch_id=series_id or uuid.uuid4().hex,
                     captured_at=_system_local_iso(timespec="microseconds"),
                     calibration=calibration, condition_index=index,
-                    condition_name=name,
+                    condition_name=name, field_approach=approach, field_rate_t_per_min=rate, field_settle_s=settle,
                 ))
             return tuple(requests)
-        return (self._capture_request(fields, series_id),)
+        return (replace(self._capture_request(fields, series_id), field_approach=approach, field_rate_t_per_min=rate, field_settle_s=settle),)
 
     def _capture_request(self, fields, series_id=None):
         captured = self.tab.capture_field_batch_params()
@@ -604,6 +645,9 @@ class GateScanFieldBatch(QtCore.QObject):
         )
 
     def _validate_requests(self, requests):
+        for request in requests:
+            if not math.isfinite(float(request.field_settle_s)) or float(request.field_settle_s) < 0:
+                raise ValueError("Field settle delay must be finite and non-negative")
         validator = getattr(self.tab, "validate_field_batch_request", None)
         if not callable(validator):
             return
@@ -648,6 +692,15 @@ class GateScanFieldBatch(QtCore.QObject):
                 else:
                     raise ValueError(f"Lake Shore thermal preflight rejected the batch: {thermal.reason}")
         requests = tuple(requests or ((request,) if request is not None else ()))
+        if requests and requests[0].field_approach is not None:
+            from app.engine.field_approach import approach_targets
+            from app.engine.bfield_transport_sweep import aps100_transport_field_limit
+            start = float(snapshot.field_t)
+            limit = aps100_transport_field_limit()
+            for target in fields:
+                approach_targets(start, target, cfg.magnet.field_tolerance_t,
+                                 requests[0].field_approach, limit)
+                start = target
         if check_outputs and requests:
             for condition_index, request_item in enumerate(requests):
                 for index, field_t in enumerate(fields, start=1):
@@ -709,6 +762,7 @@ class GateScanFieldBatch(QtCore.QObject):
                 self._cooldown_timer.start()
                 self._request_temperature_refresh()
                 return
+        self._settled_field_t = None
         self._state.phase = "moving"
         self._reset_activity_throttles()
         self._move_started_from_persistent = bool(
@@ -847,12 +901,16 @@ class GateScanFieldBatch(QtCore.QObject):
             getattr(self.thermal_safety, "latest_snapshot", None),
             phase_override="precharge", target_override=target,
         )
+        request = self._state.request
+        control = ({"field_approach": request.field_approach, "rate_t_per_min": request.field_rate_t_per_min}
+                   if request.field_rate_t_per_min is not None or request.field_approach is not None else {})
         result = self.magnet.safe_move_to_field(
             target,
             final_mode="persistent",
             zero_leads=True,
             persistent_field_confirmed=bool(self._persistent_confirmation_granted),
             use_gate_scan_rate=True,
+            **control,
         )
         return result if isinstance(result, str) else None
 
@@ -917,7 +975,7 @@ class GateScanFieldBatch(QtCore.QObject):
     def _check_live_thermal(self, snapshot=None):
         if self.thermal_safety is not None:
             evaluate = (self.thermal_safety.evaluate_continuation
-                        if self._state.phase in {"moving", "measuring"} and hasattr(self.thermal_safety, "evaluate_continuation")
+                        if self._state.phase in {"moving", "measuring", "field_settle"} and hasattr(self.thermal_safety, "evaluate_continuation")
                         else self.thermal_safety.evaluate)
             try:
                 decision = evaluate(snapshot)
@@ -927,7 +985,7 @@ class GateScanFieldBatch(QtCore.QObject):
                 return
             state = str(getattr(getattr(decision, "state", None), "value", ""))
             if self.active and (state == "TRIPPED" or
-                                (self._state.phase in {"moving", "measuring"} and state in {"WARNING", "MONITOR_FAULT", "DISARMED"})):
+                                (self._state.phase in {"moving", "measuring", "field_settle"} and state in {"WARNING", "MONITOR_FAULT", "DISARMED"})):
                 self._abort_batch(f"Lake Shore thermal stop: {decision.reason}; manual restart required")
 
     def _on_diagnostic_readback(self, event):
@@ -1162,8 +1220,55 @@ class GateScanFieldBatch(QtCore.QObject):
                 self._cooldown_timer.start()
                 self._request_temperature_refresh()
                 return
-        self._emit_state("Thermal recovery verified; starting Gate Scan", self._state.index)
-        self._start_measurement_after_move(snapshot, target)
+        self._begin_field_settle(snapshot, target)
+
+    def _begin_field_settle(self, snapshot, target):
+        # One delay per field arrival; subsequent conditions at that field still
+        # undergo the existing persistent and thermal checks before starting.
+        delay = self._state.request.field_settle_s
+        if delay <= 0 or self._settled_field_t == float(target):
+            self._start_measurement_after_move(snapshot, target)
+            return
+        self._state.phase = "field_settle"
+        self._settle_deadline = time.monotonic() + delay
+        self._settle_invalid_since = None
+        self._emit_state(f"Waiting {delay:g} s for field settling", self._state.index)
+        self._settle_timer.start()
+
+    def _poll_field_settle(self):
+        if not self.active or self._state.phase != "field_settle":
+            self._settle_timer.stop()
+            return
+        now = time.monotonic()
+        request, target = self._state.jobs[self._state.index]
+        if self._thermal_armed():
+            decision = self._evaluate_thermal(measurement=True)
+            if decision is None or not decision.magnet_permission:
+                self._fail("Lake Shore thermal permission lost during field settling: " +
+                           (decision.reason if decision else "thermal evaluator unavailable"))
+                return
+        try:
+            self._verify_persistent_snapshot(self._snapshot, target)
+        except _SnapshotUnavailable as exc:
+            if self._settle_invalid_since is None:
+                self._settle_invalid_since = now
+            if now - self._settle_invalid_since >= 5.0:
+                self._fail(f"APS100 readings did not recover during field settling: {exc}")
+            return
+        except Exception as exc:
+            self._fail(f"Persistent field verification failed during settling: {exc}")
+            return
+        if self._settle_invalid_since is not None:
+            # No stability claim can be made for the interval with missing or
+            # stale telemetry. Begin a full delay once valid readings return.
+            self._settle_deadline = now + request.field_settle_s
+            self._settle_invalid_since = None
+            self._emit_activity("WAIT", "Field readings recovered; restarting settle delay")
+        if now >= self._settle_deadline:
+            self._settle_timer.stop()
+            self._settled_field_t = float(target)
+            self._emit_activity("COMPLETE", "Field settle delay complete")
+            self._start_measurement_after_move(self._snapshot, target)
 
     def _poll_verification(self):
         if not self.active or self._state.phase != "verifying":
@@ -1274,6 +1379,9 @@ class GateScanFieldBatch(QtCore.QObject):
                 "condition_count": len({job[0].condition_index for job in self._state.jobs}),
                 "condition_name": request.condition_name,
                 "requested_field_t": float(requested),
+                "field_approach": request.field_approach,
+                "field_rate_t_per_min": request.field_rate_t_per_min,
+                "field_settle_s": request.field_settle_s,
                 "verified_field_t": float(snapshot.field_t),
                 "output_field_t": float(snapshot.output_field_t),
                 "output_current_a": float(snapshot.output_current_a),
@@ -1360,6 +1468,9 @@ class GateScanFieldBatch(QtCore.QObject):
             "status": str(status),
             "updated_at": _system_local_iso(timespec="microseconds"),
             "fields_t": list(self._state.request.fields_t),
+            "field_control": {"field_approach": self._state.request.field_approach,
+                              "rate_t_per_min": self._state.request.field_rate_t_per_min,
+                              "field_settle_s": self._state.request.field_settle_s},
             # next_job_index is the authoritative resume cursor.  Keep the
             # field-local value for compatibility with v1 single-condition
             # checkpoints.
@@ -1382,6 +1493,9 @@ class GateScanFieldBatch(QtCore.QObject):
             "results": list(self._state.results),
             "frozen_gate_scan_params": to_jsonable(self._state.request.params),
         }
+        if (self._state.request.field_approach is None and self._state.request.field_rate_t_per_min is None
+                and self._state.request.field_settle_s == 0):
+            payload.pop("field_control", None)
         if self.thermal_safety is not None:
             try:
                 payload["lake_shore_335"] = self.thermal_safety.snapshot_dict()
@@ -1456,6 +1570,10 @@ class GateScanFieldBatch(QtCore.QObject):
     def _cleanup(self):
         terminal_phase = self._state.phase
         self._measurement_monitor_timer.stop()
+        self._settle_timer.stop()
+        self._settle_deadline = None
+        self._settle_invalid_since = None
+        self._settled_field_t = None
         self._early_move_results = []
         self._verification_timer.stop()
         self._verification_deadline = None

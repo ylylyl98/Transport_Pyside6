@@ -394,13 +394,13 @@ class CoSweepWorker(RunWorker):
                 if not self._active_derived and "Vtg" not in active_axes:
                     if self.g1 is not None:
                         self.log.emit(
-                            f"Ramping G1/Vtg to {self.p.vtg_start:.9g} V "
+                            f"Ramping G1/Vtg to {trajectory[0]['vtg']:.9g} V "
                             f"({GATE_BIAS_RAMP_STEP_V:g} V/step, {GATE_BIAS_RAMP_STEP_T:g} s/step)"
                         )
                         safe_ramp(
                             self.g1.set_voltage,
                             getattr(self.g1, "voltage", None) or 0.0,
-                            self.p.vtg_start,
+                            trajectory[0]["vtg"],
                             GATE_BIAS_RAMP_STEP_V,
                             GATE_BIAS_RAMP_STEP_T,
                             self.check_abort_pause,
@@ -408,26 +408,26 @@ class CoSweepWorker(RunWorker):
                 if not self._active_derived and "Vbg" not in active_axes:
                     if self.g2 is not None:
                         self.log.emit(
-                            f"Ramping G2/Vbg to {self.p.vbg_start:.9g} V "
+                            f"Ramping G2/Vbg to {trajectory[0]['vbg']:.9g} V "
                             f"({GATE_BIAS_RAMP_STEP_V:g} V/step, {GATE_BIAS_RAMP_STEP_T:g} s/step)"
                         )
                         safe_ramp(
                             self.g2.set_voltage,
                             getattr(self.g2, "voltage", None) or 0.0,
-                            self.p.vbg_start,
+                            trajectory[0]["vbg"],
                             GATE_BIAS_RAMP_STEP_V,
                             GATE_BIAS_RAMP_STEP_T,
                             self.check_abort_pause,
                         )
                 if "Vds" not in active_axes and self.p.vds_source != "None":
                     if self.p.bias2_mode == "Follow":
-                        self.move_pair(self.p.vds_start)
+                        self.move_pair(trajectory[0]["vds"])
                     elif self.p.vds_source.startswith("NI DAQ"):
                         self.daq.ramp_voltage(self.p.ao_channel, self.p.vds_start, self.p.vds_ramp)
                     else:
                         if self.g3 is None:
                             raise RuntimeError("Required session missing: G3 / Vds")
-                        self.g3.ramp_voltage(self.p.vds_start, self.p.vds_ramp)
+                        self.g3.ramp_voltage(trajectory[0]["vds"], self.p.vds_ramp)
 
                 cnt = 0
                 self.clear_plot.emit()
@@ -449,9 +449,9 @@ class CoSweepWorker(RunWorker):
                             self.set_volt(axis, value)
                     else:
                         if slow_axis != "None" and pass_idx != current_pass:
-                            self.set_volt(slow_axis, point["slow_value"])
+                            self.set_volt(slow_axis, point[slow_axis.lower()])
                             current_pass = pass_idx
-                        self.set_volt(fast_axis, point["fast_value"])
+                        self.set_volt(fast_axis, point[fast_axis.lower()])
                     if self.p.bias2_mode != "Follow":
                         self.apply_bias2(point["vds"])
                     time.sleep(self.p.delay)

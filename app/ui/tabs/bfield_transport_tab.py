@@ -35,7 +35,7 @@ from app.engine.bfield_transport_sweep import (
 )
 from app.gate_transform import derived_to_gates, gates_to_derived
 from app.gate_transform import RATIO_TARGET_VBG, RATIO_TARGET_VTG, ratio_formula_text, normalize_ratio_target
-from app.models import BFIELD_HYSTERESIS_LABELS, BFIELD_MT_FIELDS
+from app.models import BFIELD_HYSTERESIS_LABELS, BFIELD_MT_FIELDS, BFIELD_RATE_DISPLAY_SCALE
 from app.models import BFieldTransportCondition, BFieldTransportParams, Connections, SaveRoot
 from app.run_output import build_planned_output
 from app.result_channels import plot_channel_options, compare_channel_options
@@ -43,6 +43,7 @@ from app.signal_chain import signal_chain_metadata
 from app.settings import get_app_settings
 from app.ui.helpers import set_standard_input_height, style_form_layout
 from app.ui.tabs.base_tab import BaseMeasurementTab
+from app.ui.widgets.collapsible_section import CollapsibleSection
 from app.ui.widgets.bias2_editor import Bias2Editor
 from app.ui.widgets.safe_combo import SafeComboBox
 from app.ui.widgets.expandable_line_edit import ExpandableLineEdit
@@ -135,9 +136,30 @@ class BFieldTransportTab(BaseMeasurementTab):
         style_form_layout(form)
         self.sp_start = self._spin(-0.5, -aps100_transport_field_limit(), aps100_transport_field_limit())
         self.sp_stop = self._spin(0.5, -aps100_transport_field_limit(), aps100_transport_field_limit())
-        self.sp_rate = self._spin(0.1, 1e-6, MAX_RATE_T_PER_MIN, 6)
+        self.sp_rate = self._spin(self.params.rate_t_per_min * BFIELD_RATE_DISPLAY_SCALE, 1e-6 * BFIELD_RATE_DISPLAY_SCALE,
+                                  math.floor(MAX_RATE_T_PER_MIN * BFIELD_RATE_DISPLAY_SCALE * 1e9) / 1e9, 9)
         self.sp_rate_a = QtWidgets.QLabel()
         self.sp_rate_t_s = QtWidgets.QLabel()
+        self.cbo_field_approach = SafeComboBox()
+        self._field_approach_explicit = False
+        for value, name in (("linear", "Linear"), ("no_overshoot", "No Overshoot"), ("oscillate", "Oscillate"), ("linear_no_backward", "Linear — No Backward")):
+            self.cbo_field_approach.addItem(name, value)
+        self.cbo_field_approach.setToolTip("No Overshoot slows near target; Oscillate crosses the target before settling. Linear — No Backward sweeps directly without reverse corrections; preparation follows the existing conservative path.")
+        self.cbo_endpoint_approach = SafeComboBox()
+        self.cbo_endpoint_approach.addItem("Linear", "linear")
+        self.cbo_endpoint_approach.addItem("No Overshoot", "no_overshoot")
+        self.cbo_endpoint_approach.addItem("Oscillate (unsupported; select an approach)", "oscillate")
+        self.cbo_endpoint_approach.addItem("Linear — No Backward (unsupported; select an approach)", "linear_no_backward")
+        self.cbo_endpoint_approach.model().item(2).setEnabled(False)
+        self.cbo_endpoint_approach.model().item(3).setEnabled(False)
+        endpoint_content = QtWidgets.QWidget()
+        endpoint_form = QtWidgets.QFormLayout(endpoint_content)
+        endpoint_form.addRow("Endpoint approach:", self.cbo_endpoint_approach)
+        endpoint_hint = QtWidgets.QLabel("No Overshoot slows near the endpoint.")
+        endpoint_hint.setWordWrap(True)
+        endpoint_hint.setProperty("role", "hint")
+        endpoint_form.addRow("", endpoint_hint)
+        self.endpoint_advanced = CollapsibleSection("Advanced", endpoint_content)
         self.chk_round_trip = QtWidgets.QCheckBox("Round trip: start → stop → start")
         self.chk_round_trip.setChecked(True)
         form.addRow("Start (T):", self.sp_start)
@@ -146,25 +168,47 @@ class BFieldTransportTab(BaseMeasurementTab):
         self.lbl_rate_limit.setWordWrap(True)
         self.lbl_rate_limit.setProperty("role", "hint")
         form.addRow("", self.lbl_rate_limit)
-        form.addRow("Maximum sweep rate (T/min):", self.sp_rate)
+        form.addRow("Rate (Oe/s):", self.sp_rate)
+        form.addRow("Approach:", self.cbo_field_approach)
+        self.cbo_polling_profile = SafeComboBox()
+        self.cbo_polling_profile.addItem("Standard (A)", "standard")
+        self.cbo_polling_profile.addItem("Fewer mode queries (B)", "reduced_mode_queries")
+        self.cbo_polling_profile.setToolTip(
+            "APS100 stepped No Overshoot / Linear — No Backward comparison only. "
+            "B checks operating mode once per second during motion: mode changes can take 1 s plus communication time to detect. "
+            "Fault, thermal and field checks remain on every loop. Preparation and instrument settings are unchanged.")
+        form.addRow("Polling comparison:", self.cbo_polling_profile)
+        self.cbo_no_overshoot_profile = SafeComboBox()
+        self.cbo_no_overshoot_profile.addItem("Standard", "standard")
+        self.cbo_no_overshoot_profile.addItem("Shorter slow approach (experimental)", "short_tail")
+        self.cbo_no_overshoot_profile.setToolTip(
+            "Shorter reduced-rate segment, with the same rate ceiling and readback reversal warning threshold. "
+            "Needs short hardware validation. Initial preparation, zero/cross-zero moves and rate-band transitions use Standard.")
+        form.addRow("No Overshoot approach:", self.cbo_no_overshoot_profile)
+        form.addRow(self.endpoint_advanced)
         form.addRow("APS100 rate:", self.sp_rate_a)
         form.addRow("Field rate:", self.sp_rate_t_s)
-        for widget in (self.sp_rate, self.sp_rate_a, self.sp_rate_t_s):
+        for widget in (self.sp_rate, self.cbo_field_approach, self.sp_rate_a, self.sp_rate_t_s):
             form.setRowVisible(widget, True)
         form.addRow("", self.chk_round_trip)
         self.cbo_measurement_mode = SafeComboBox()
         self.cbo_measurement_mode.addItem("Continuous", "continuous")
         self.cbo_measurement_mode.addItem("Stepped", "stepped")
+        self.cbo_field_approach.activated.connect(lambda _index: setattr(self, "_field_approach_explicit", True))
+        self.cbo_field_approach.currentIndexChanged.connect(self._sync_default_approach)
+        self.cbo_no_overshoot_profile.currentIndexChanged.connect(self._sync_default_approach)
+        self.cbo_endpoint_approach.activated.connect(lambda _index: setattr(self, "_field_approach_explicit", True))
+        self.cbo_measurement_mode.currentIndexChanged.connect(self._sync_default_approach)
         self.cbo_field_spacing = SafeComboBox()
         self.cbo_field_spacing.addItem("Point count", "points")
         self.cbo_field_spacing.addItem("Step size", "step")
         self.cbo_field_spacing.setCurrentIndex(1)
         self.sp_field_points = SafeSpinBox()
         self.sp_field_points.setRange(2, 10000)
-        self.sp_field_points.setValue(11)
+        self.sp_field_points.setValue(self.params.field_points)
         self.sp_field_points.setReadOnly(True)
         self.sp_field_points.setButtonSymbols(QtWidgets.QAbstractSpinBox.ButtonSymbols.NoButtons)
-        self.sp_field_step = self._spin(100, 0.001, 12000, 6)
+        self.sp_field_step = self._spin(self.params.field_step_t * 1000, 0.001, 12000, 6)
         self.sp_field_tolerance = self._spin(self.params.field_tolerance_t * 1000, 0.1, 1000, 4)
         self.sp_field_stability = self._spin(self.params.field_stability_s, 0.1, 86400, 2)
         self.sp_field_settle = self._spin(self.params.field_settle_s, 0, 86400, 2)
@@ -176,9 +220,12 @@ class BFieldTransportTab(BaseMeasurementTab):
             self._hysteresis_extra[key] = self._spin(getattr(self.params, key) * scale,
                 0 if key == "field_max_gap_t" else 0.0001, 86400, 4)
         self._hysteresis_inputs = (self.sp_field_tolerance, self.sp_field_stability, self.sp_field_settle, *self._hysteresis_extra.values())
-        self.sp_field_tolerance.setToolTip("Fine approach stopping threshold. Stationary points use separate point and endpoint acceptance limits; no backwards correction.")
+        self.sp_field_tolerance.setToolTip("Approach stopping threshold. Stationary points use separate point and endpoint acceptance limits.")
         self.sp_field_stability.setToolTip("Require fresh stationary readings satisfying the independent span and drift limits throughout this window.")
         self.sp_field_settle.setToolTip("Additional delay after field and temperature qualify. Any loss of stability restarts the delay.")
+        self._hysteresis_extra["field_reversal_t"].setToolTip(
+            "A larger current-derived readback reversal flags the affected point and continues. "
+            "It is not an independent sample-field measurement; preparation retains its separate safety bound.")
         self.cbo_sample_reversal = SafeComboBox()
         for label, value in (("Unchanged", "unchanged"), ("Per point", "per_point"), ("Whole sweep", "whole_sweep")):
             self.cbo_sample_reversal.addItem(label, value)
@@ -190,11 +237,11 @@ class BFieldTransportTab(BaseMeasurementTab):
             widget.setToolTip(explanation)
         self.sp_temperature_target = self._spin(4.0, 0.001, 300, 4)
         self.sp_temperature_tolerance = self._spin(0.05, 0.000001, 300, 6)
-        self.sp_temperature_window = self._spin(10, 0.01, 86400, 2)
+        self.sp_temperature_window = self._spin(self.params.temperature_window_s, 0.01, 86400, 2)
         self.sp_temperature_span = self._spin(0.02, 0.000001, 300, 6)
         self.sp_temperature_drift = self._spin(0.01, 0.000001, 300, 6)
         self.sp_temperature_timeout = self._spin(600, 0.01, 86400, 2)
-        self._step_inputs = (self.cbo_measurement_mode, self.cbo_field_spacing, self.sp_field_points,
+        self._step_inputs = (self.cbo_measurement_mode, self.cbo_polling_profile, self.cbo_field_spacing, self.sp_field_points,
             self.sp_field_step, *self._hysteresis_inputs, self.cbo_sample_reversal, self.sp_sample_reversal_settle, self.sp_temperature_target, self.sp_temperature_tolerance,
             self.sp_temperature_window, self.sp_temperature_span, self.sp_temperature_drift, self.sp_temperature_timeout)
         for label, widget in (("Measurement mode:", self.cbo_measurement_mode), ("Spacing:", self.cbo_field_spacing),
@@ -389,7 +436,7 @@ class BFieldTransportTab(BaseMeasurementTab):
         self.sp_averages.setRange(1, 10000)
         self.sp_averages.setValue(1)
         self.ed_base = ExpandableLineEdit(self.params.base_name, title="Edit filename stem")
-        acq_form.addRow("Delay (s):", self.sp_delay)
+        acq_form.addRow("Read delay (s):", self.sp_delay)
         acq_form.addRow("Averages:", self.sp_averages)
         ctl_layout.addWidget(acq)
         ctl_layout.addWidget(SectionHeader("4. Output files"))
@@ -438,6 +485,18 @@ class BFieldTransportTab(BaseMeasurementTab):
         settings.beginGroup(self.SETTINGS_PREFIX)
         for key, widget in (("measurement_mode", self.cbo_measurement_mode), ("sample_reversal_mode", self.cbo_sample_reversal)):
             widget.setCurrentIndex(max(0, widget.findData(str(settings.value(key, getattr(self.params, key))))))
+        approach = str(settings.value("field_approach", "auto"))
+        self._field_approach_explicit = approach != "auto"
+        if approach == "auto":
+            approach = "no_overshoot" if self.cbo_measurement_mode.currentData() == "stepped" else "linear"
+        self.cbo_field_approach.setCurrentIndex(max(0, self.cbo_field_approach.findData(approach)))
+        polling = str(settings.value("aps100_polling_profile", "standard"))
+        self.cbo_polling_profile.setCurrentIndex(max(0, self.cbo_polling_profile.findData(polling)))
+        profile = str(settings.value("aps100_no_overshoot_profile", "standard"))
+        self.cbo_no_overshoot_profile.setCurrentIndex(max(0, self.cbo_no_overshoot_profile.findData(profile)))
+        self.cbo_endpoint_approach.setCurrentIndex(max(0, self.cbo_endpoint_approach.findData(approach)))
+        if approach in ("oscillate", "linear_no_backward") and self.cbo_measurement_mode.currentData() == "continuous":
+            self.endpoint_advanced.set_expanded(True)
         for key, widget in self._step_numeric_inputs():
             value = settings.value(key, getattr(self.params, key))
             widget.setValue(int(value) if key == "field_points" else float(value) * (1000 if key in BFIELD_MT_FIELDS else 1))
@@ -447,7 +506,7 @@ class BFieldTransportTab(BaseMeasurementTab):
             count = int(settings.value("field_points", self.params.field_points))
             if count >= 2:
                 self.sp_field_step.setValue(abs(self.sp_stop.value() - self.sp_start.value()) * 1000 / (count - 1))
-        self.sp_rate.setValue(float(settings.value("rate_t_per_min", self.params.rate_t_per_min)))
+        self.sp_rate.setValue(float(settings.value("rate_t_per_min", self.params.rate_t_per_min)) * BFIELD_RATE_DISPLAY_SCALE)
         has_global_ratio = settings.contains("ratio")
         if has_global_ratio:
             self.sp_ratio.setValue(float(settings.value("ratio", self.params.ratio)))
@@ -491,6 +550,7 @@ class BFieldTransportTab(BaseMeasurementTab):
             except (TypeError, ValueError, json.JSONDecodeError):
                 pass
         settings.endGroup()
+        self._sync_default_approach()
 
     def _step_numeric_inputs(self):
         return (("sample_reversal_settle_s", self.sp_sample_reversal_settle), ("field_points", self.sp_field_points), ("field_step_t", self.sp_field_step),
@@ -502,19 +562,53 @@ class BFieldTransportTab(BaseMeasurementTab):
 
     def _step_values(self):
         return {"measurement_mode": self.cbo_measurement_mode.currentData(),
+                "aps100_polling_profile": self.cbo_polling_profile.currentData(),
+                "aps100_no_overshoot_profile": self.cbo_no_overshoot_profile.currentData(),
+                "field_approach": self._active_field_approach().currentData() if self._field_approach_explicit and self._magnet_backend == "1000" else "auto",
                 "sample_reversal_mode": self.cbo_sample_reversal.currentData(),
                 "field_spacing": "step",
                 **{key: widget.value() / 1000 if key in BFIELD_MT_FIELDS else widget.value()
                    for key, widget in self._step_numeric_inputs()}}
+
+    def _active_field_approach(self):
+        return self.cbo_field_approach if self.cbo_measurement_mode.currentData() == "stepped" else self.cbo_endpoint_approach
+
+    def _sync_default_approach(self, *_args):
+        stepped = self.cbo_measurement_mode.currentData() == "stepped"
+        # Show unsupported saved choices explicitly; the engine rejects them.
+        source = self.cbo_endpoint_approach if stepped else self.cbo_field_approach
+        target = self._active_field_approach()
+        previous_mode = getattr(self, "_approach_mode", None)
+        mode = self.cbo_measurement_mode.currentData()
+        if previous_mode is None or previous_mode == mode:
+            choice = target.currentData()
+        else:
+            choice = source.currentData() if self._field_approach_explicit else ("no_overshoot" if stepped else "linear")
+        self._approach_mode = mode
+        index = target.findData(choice)
+        if index < 0:
+            self._field_approach_explicit = False
+            index = target.findData("linear")
+        target.setCurrentIndex(index)
+        if not stepped and choice in ("oscillate", "linear_no_backward"):
+            self.endpoint_advanced.set_expanded(True)
+        aps = self._magnet_backend == "1000"
+        self._sweep_form.setRowVisible(self.cbo_field_approach, aps and stepped)
+        self._sweep_form.setRowVisible(self.cbo_polling_profile,
+            (aps and stepped) or self.cbo_polling_profile.currentData() != "standard")
+        self._sweep_form.setRowVisible(self.cbo_no_overshoot_profile,
+            (aps and stepped and self.cbo_field_approach.currentData() == "no_overshoot") or self.cbo_no_overshoot_profile.currentData() != "standard")
+        self._sweep_form.setRowVisible(self.endpoint_advanced, aps and not stepped)
 
     def _save_settings(self):
         settings = get_app_settings()
         settings.beginGroup(self.SETTINGS_PREFIX)
         for key, value in self._step_values().items():
             settings.setValue(key, value)
+        settings.setValue("field_approach", self._active_field_approach().currentData() if self._field_approach_explicit else "auto")
         settings.setValue("start_field_t", self.sp_start.value())
         settings.setValue("stop_field_t", self.sp_stop.value())
-        settings.setValue("rate_t_per_min", self.sp_rate.value())
+        settings.setValue("rate_t_per_min", self.sp_rate.value() / BFIELD_RATE_DISPLAY_SCALE)
         settings.setValue("ratio", self.sp_ratio.value())
         settings.setValue("ratio_target", self.cbo_ratio_target.currentData() or RATIO_TARGET_VBG)
         settings.setValue("round_trip", self.chk_round_trip.isChecked())
@@ -842,20 +936,17 @@ class BFieldTransportTab(BaseMeasurementTab):
         from app.engine.bfield_transport_sweep import effective_rate_limit_t_per_min
         try:
             limit = effective_rate_limit_t_per_min()
-            limit_text = f"{limit * 10000 / 60:g} Oe/s ({limit:g} T/min)"
+            limit_text = f"{limit * BFIELD_RATE_DISPLAY_SCALE:g} Oe/s"
         except (ValueError, TypeError):
             limit_text = "unavailable; check magnet configuration"
-        self.lbl_rate_limit.setText(
-            f"Configured maximum: {limit_text}. "
-            f"Current request: {self.sp_rate.value() * 10000 / 60:g} Oe/s. "
-            "Stored range/voltage limits and final approach may be slower.")
+        self.lbl_rate_limit.setText(f"Maximum: {limit_text}")
         hysteresis = self._magnet_backend == "1000" and self.cbo_measurement_mode.currentData() == "stepped"
         for widget in self._hysteresis_inputs:
             self._sweep_form.setRowVisible(widget, hysteresis)
         self._sweep_form.labelForField(self.sp_temperature_timeout).setText(
             "Temperature qualification timeout (s):" if hysteresis else "Wait timeout (s):")
         self._step_hint.setText(
-            "Stepped: directional approach → stable field and temperature → extra delay → measure. "
+            "Stepped: approach target → stable field and temperature → extra delay → measure. "
             "Stable offsets use readback fields; history, endpoint or gap violations end the run. Gap 0 = twice the largest planned interval. Sample heater stays OFF."
             if self._magnet_backend == "1000" else
             "Stepped: SDK sets and enables the sample temperature target; SDK manages the field ramp.")
@@ -907,7 +998,7 @@ class BFieldTransportTab(BaseMeasurementTab):
         self.params = BFieldTransportParams(
             base_name=self.ed_base.text().strip() or "bfield_transport",
             start_field_t=self.sp_start.value(), stop_field_t=self.sp_stop.value(),
-            rate_t_per_min=self.sp_rate.value(), round_trip=self.chk_round_trip.isChecked(),
+            rate_t_per_min=self.sp_rate.value() / BFIELD_RATE_DISPLAY_SCALE, round_trip=self.chk_round_trip.isChecked(),
             ratio=float(self.sp_ratio.value()),
             ratio_target=normalize_ratio_target(self.cbo_ratio_target.currentData() or RATIO_TARGET_VBG),
             cooldown_policy=normalize_cooldown_policy(self.cbo_cooldown_policy.currentData() or "adaptive"),
@@ -940,7 +1031,7 @@ class BFieldTransportTab(BaseMeasurementTab):
             base_name=self.ed_base.text().strip() or "bfield_transport",
             start_field_t=self.sp_start.value(),
             stop_field_t=self.sp_stop.value(),
-            rate_t_per_min=self.sp_rate.value(),
+            rate_t_per_min=self.sp_rate.value() / BFIELD_RATE_DISPLAY_SCALE,
             round_trip=self.chk_round_trip.isChecked(),
             conditions=conditions,
             **self._step_values(),
@@ -1033,7 +1124,7 @@ class BFieldTransportTab(BaseMeasurementTab):
 
     def set_sweep_locked(self, locked: bool):
         self._locked = bool(locked)
-        for widget in (*self._step_inputs, self.sp_start, self.sp_stop, self.sp_rate, self.chk_round_trip, self.condition_table, self.condition_bias2_editor,
+        for widget in (*self._step_inputs, self.sp_start, self.sp_stop, self.sp_rate, self.cbo_field_approach, self.cbo_polling_profile, self.cbo_no_overshoot_profile, self.cbo_endpoint_approach, self.chk_round_trip, self.condition_table, self.condition_bias2_editor,
                        self.cbo_condition_add_mode, self.ed_condition_add_first,
                        self.ed_condition_add_second, self.ed_condition_add_vds, self.btn_condition_add_preview,
                        self.btn_condition_update, self.btn_condition_duplicate,
@@ -1194,6 +1285,7 @@ class BFieldTransportTab(BaseMeasurementTab):
             spin.setRange(-limit, limit)
         for widget in (self.sp_rate, self.sp_rate_a, self.sp_rate_t_s):
             self._sweep_form.setRowVisible(widget, aps)
+        self._sync_default_approach()
         for widget in (self.lbl_rate_limit, self.cbo_cooldown_policy, self.cbo_final_mode):
             self._sweep_form.setRowVisible(widget, aps)
         self._step_hint.setText("Stepped: one fixed sample target; passive waiting only." if aps else

@@ -207,7 +207,10 @@ class _LakeShoreWorker(QObject):
             self.heating_interlock.begin_input_configuration()
             reserved = True
             state = self.adapter.set_current_reversal(request["channel"], request["enabled"])
-            inputs = self.adapter.read_input_configurations()["inputs"]
+            try:
+                inputs = self.adapter.read_input_configurations()["inputs"]
+            except Exception as exc:
+                raise RuntimeError(f"Post-operation A/B readback: {exc}") from exc
             self.control_result.emit({"operation": "set_current_reversal", "ok": True,
                                       "channel": state["channel"], "inputs": inputs,
                                       "monotonic_s": time.monotonic()})

@@ -45,6 +45,15 @@ class TransportResponsivenessTests(unittest.TestCase):
         self.assertEqual(len(messages), 3)
         self.assertIn("60 s", messages[-1])
 
+    def test_preparation_field_progress_uses_tesla_and_remains_throttled(self):
+        messages = []
+        self.controller._log = messages.append
+        with patch("app.engine.bfield_transport_controller.time.monotonic", side_effect=[10, 11, 20]):
+            self.controller._on_transition_progress("preparation field", -.2)
+            self.controller._on_transition_progress("preparation field", -.1999)
+            self.controller._on_transition_progress("preparation field", -.2)
+        self.assertEqual(messages, ["[PROGRESS] preparation field: -0.2 T"] * 2)
+
     def test_diagnostic_tail_is_bounded_and_dumped(self):
         import json
         import tempfile
@@ -71,7 +80,8 @@ class TransportResponsivenessTests(unittest.TestCase):
         self.thermal = NS(is_armed=True, latest_snapshot=None, evaluate=lambda _: self.decision)
         self.controller = BFieldTransportController(self.magnet, NS(), NS(), self.thermal)
         self.controller.lakeshore_controller = NS(telemetry_cache=self.lake)
-        self.controller.plan = TransportSweepPlan.from_params(BFieldTransportParams(start_field_t=-0.1, stop_field_t=0.1))
+        self.controller.plan = TransportSweepPlan.from_params(BFieldTransportParams(
+            measurement_mode="continuous", start_field_t=-0.1, stop_field_t=0.1))
         self.controller._active = True
         self.controller._measurement_phase = "sweeping"
         self.controller._target = -0.1
@@ -96,7 +106,8 @@ class TransportResponsivenessTests(unittest.TestCase):
 
     def publish(self, stamp=None, **status):
         stamp = time.monotonic() if stamp is None else stamp
-        self.magnet.telemetry_cache.publish(NS(monotonic_s=stamp, field_t=0.02,
+        status.setdefault("sweep_active", False)
+        self.magnet.telemetry_cache.publish(NS(monotonic_s=stamp, field_t=0.02, heater_on=True,
             magnet_voltage_v=0.0, voltage_limit_v=3.0,
             status=NS(quench=False, power_module_failure=False, faulted=False, **status)))
         self.lake.publish(NS(monotonic_s=stamp, connected=True, communication_valid=True))
@@ -115,6 +126,9 @@ class TransportResponsivenessTests(unittest.TestCase):
             c._check_monitor_recovery()
         self.assertEqual(self.magnet.events, ["pause"])
         c.continue_after_temperature_check()
+        self.assertEqual(self.magnet.events, ["pause"])
+        self.publish()
+        c._on_telemetry_watchdog()
         self.assertEqual(self.magnet.events[-1], ("sweep", -0.1))
         self.assertEqual(c._leg_index, 1)
         self.assertIsNone(c._monitor_hold)
@@ -159,6 +173,9 @@ class TransportResponsivenessTests(unittest.TestCase):
         c._resume_after_thermal_recovery()
         self.assertEqual(self.magnet.events, ["pause"])
         c.continue_after_temperature_check()
+        self.assertEqual(self.magnet.events, ["pause"])
+        self.publish()
+        c._on_telemetry_watchdog()
         self.assertEqual(self.magnet.events[-1], ("sweep", -0.1))
 
     def test_stop_clears_hold_and_late_reads_cannot_resume(self):
@@ -201,8 +218,15 @@ class TransportResponsivenessTests(unittest.TestCase):
         self.assertIs(self.thermal.latest_snapshot, self.lake.get())
         self.assertEqual(c._results, [])
         release.set()
-        self.pump(lambda: len(c._results) == 1)
+        def sample_finished():
+            # Production polling continues through acquisition, including the
+            # trailing measured-field bracket required by continuous mode.
+            self.publish()
+            return len(c._results) == 1
+        self.pump(sample_finished)
         self.assertEqual(c._results[0]["raw_DC"], 3.0)
+        self.assertEqual(c._results[0]["B_DAQ_read_count"], 1)
+        self.assertAlmostEqual(c._results[0]["B_measured_T"], .02)
 
     def test_fault_during_hold_is_fatal_even_without_lake(self):
         c = self.controller

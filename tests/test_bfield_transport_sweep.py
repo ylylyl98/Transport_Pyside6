@@ -142,7 +142,7 @@ class BFieldTransportSweepTests(unittest.TestCase):
         controller = BFieldTransportController(
             magnet, SimpleNamespace(), SimpleNamespace(), thermal_safety=None
         )
-        controller.plan = TransportSweepPlan.from_params(BFieldTransportParams())
+        controller.plan = TransportSweepPlan.from_params(BFieldTransportParams(measurement_mode="continuous", ))
         add_test_rate_table(controller.plan)
         controller._active = True
         controller._condition_index = 0
@@ -180,7 +180,7 @@ class BFieldTransportSweepTests(unittest.TestCase):
             Magnet(), SimpleNamespace(), SimpleNamespace(), thermal_safety=thermal
         )
         controller.plan = TransportSweepPlan.from_params(
-            BFieldTransportParams(start_field_t=-0.1, stop_field_t=0.1)
+            BFieldTransportParams(measurement_mode="continuous", start_field_t=-0.1, stop_field_t=0.1)
         )
         controller._active = True
         controller._measurement_phase = "sweeping"
@@ -233,7 +233,7 @@ class BFieldTransportSweepTests(unittest.TestCase):
             magnet, SimpleNamespace(), SimpleNamespace(), thermal_safety=thermal
         )
         controller.plan = TransportSweepPlan.from_params(
-            BFieldTransportParams(start_field_t=-0.01, stop_field_t=0.01)
+            BFieldTransportParams(measurement_mode="continuous", start_field_t=-0.01, stop_field_t=0.01)
         )
         controller._active = True
         controller._measurement_phase = "sweeping"
@@ -285,7 +285,7 @@ class BFieldTransportSweepTests(unittest.TestCase):
             magnet, SimpleNamespace(), SimpleNamespace(), thermal_safety=thermal
         )
         controller.plan = TransportSweepPlan.from_params(
-            BFieldTransportParams(start_field_t=-0.01, stop_field_t=0.01)
+            BFieldTransportParams(measurement_mode="continuous", start_field_t=-0.01, stop_field_t=0.01)
         )
         controller._active = True
         controller._measurement_phase = "sweeping"
@@ -347,7 +347,7 @@ class BFieldTransportSweepTests(unittest.TestCase):
             magnet, SimpleNamespace(), SimpleNamespace(), thermal_safety=thermal
         )
         controller.plan = TransportSweepPlan.from_params(
-            BFieldTransportParams(start_field_t=-0.01, stop_field_t=0.01)
+            BFieldTransportParams(measurement_mode="continuous", start_field_t=-0.01, stop_field_t=0.01)
         )
         controller._active = True
         controller._measurement_phase = "sweeping"
@@ -393,7 +393,7 @@ class BFieldTransportSweepTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as directory:
             controller.plan = TransportSweepPlan.from_params(
-                BFieldTransportParams(
+                BFieldTransportParams(measurement_mode="continuous",
                     start_field_t=-0.1, stop_field_t=0.1, round_trip=False,
                 )
             )
@@ -546,7 +546,7 @@ class BFieldTransportSweepTests(unittest.TestCase):
         controller = BFieldTransportController(
             Magnet(), SimpleNamespace(), SimpleNamespace(), thermal_safety=None
         )
-        controller.plan = TransportSweepPlan.from_params(BFieldTransportParams(
+        controller.plan = TransportSweepPlan.from_params(BFieldTransportParams(measurement_mode="continuous",
             start_field_t=-6.0, stop_field_t=6.0, rate_t_per_min=1e-6,
         ))
         add_test_rate_table(controller.plan, 1e-6)
@@ -872,7 +872,7 @@ class BFieldTransportSweepTests(unittest.TestCase):
             def enter_persistent_mode(self, **_kwargs):
                 self.events.append("persistent")
         rows = [BFieldTransportCondition(name="a", doping=1), BFieldTransportCondition(name="b", efield=1)]
-        params = BFieldTransportParams(start_field_t=-1, stop_field_t=1, round_trip=True, conditions=rows, final_mode="persistent")
+        params = BFieldTransportParams(measurement_mode="continuous", start_field_t=-1, stop_field_t=1, round_trip=True, conditions=rows, final_mode="persistent")
         plan = TransportSweepPlan.from_params(params)
         applied, acquired = [], []
         runner = BFieldTransportSweep(Adapter(), plan, apply_condition=lambda c: applied.append(c.name), acquire=lambda c, d, s: acquired.append((c.name, d, s.field_t)))
@@ -905,7 +905,7 @@ class BFieldTransportSweepTests(unittest.TestCase):
                 return self.field
             def pause(self, **_kwargs): pass
             def enter_persistent_mode(self, **_kwargs): pass
-        params = BFieldTransportParams(start_field_t=0, stop_field_t=1, round_trip=False, rate_t_per_min=0.1)
+        params = BFieldTransportParams(measurement_mode="continuous", start_field_t=0, stop_field_t=1, round_trip=False, rate_t_per_min=0.1)
         plan = TransportSweepPlan.from_params(params)
         samples = []
         adapter = Adapter()
@@ -944,7 +944,7 @@ class BFieldTransportSweepTests(unittest.TestCase):
             def enter_persistent_mode(self, **_kwargs):
                 self.events.append("persistent")
 
-        params = BFieldTransportParams(
+        params = BFieldTransportParams(measurement_mode="continuous",
             start_field_t=0.0,
             stop_field_t=0.01,
             round_trip=True,
@@ -1132,7 +1132,7 @@ class BFieldTransportSweepTests(unittest.TestCase):
             def enter_persistent_mode(self, **_kwargs):
                 self.events.append("persistent")
 
-        params = BFieldTransportParams(
+        params = BFieldTransportParams(measurement_mode="continuous",
             start_field_t=0.0,
             stop_field_t=0.01,
             round_trip=False,
@@ -1187,7 +1187,7 @@ class BFieldTransportSweepTests(unittest.TestCase):
                 self.save = SaveRoot(user="u", device_id="d", base=self.temporary.name)
                 self.locked = []
                 self.frozen_paths = None
-            def collect_params(self): return BFieldTransportParams(start_field_t=0, stop_field_t=1, conditions=[BFieldTransportCondition()])
+            def collect_params(self): return BFieldTransportParams(measurement_mode="continuous", rate_t_per_min=0.1, start_field_t=0, stop_field_t=1, conditions=[BFieldTransportCondition()])
             def freeze_output_plan(self, params):
                 planned = build_planned_output(
                     self.save, "bfield_transport", params.base_name,

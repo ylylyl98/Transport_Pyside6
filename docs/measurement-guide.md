@@ -83,18 +83,28 @@ These are **source programming** resolutions, not voltage measurement resolution
 or output accuracy. See the [Keithley 2400/2401 specifications](https://download.tek.com/document/SPEC-2400LV_C_L_May2013.pdf).
 The application's existing voltage limits still apply; this table does not extend them.
 
-All measurement modes check the physical Keithley targets, including fixed gates,
-derived-coordinate conversions and Bias 2 offset targets. The scan start and each
-generated point must lie on the source's programming grid; choosing a step larger
-than the minimum is insufficient if it is not a compatible multiple. For example,
-on the 20 V source range a `0.0001 V` scan step is too small, and `0.0007 V` is not
-a multiple of the `0.0005 V` increment. Requested sample targets are never silently
-rounded and the app does not automatically switch source range to fit a recipe.
+All measurement modes and manual voltage controls round physical Keithley targets
+to the nearest programming increment, including fixed gates, derived-coordinate
+conversions, Vds and Bias 2. Exact half-increments round away from zero. For example,
+on the 20 V range, `2.39130435 V` programs `2.3915 V`, and `0.0007 V` programs
+`0.0005 V`. Both the requested and rounded values must pass voltage-range and
+protection checks. The app does not change source range to fit a recipe.
+
+Recipes retain requested values; acquired voltage columns contain programmed
+targets, not measured gate voltages. Sweep previews show the requested trajectory.
+Doping/E-field trajectory coordinates remain the requested coordinates; the
+rounded gate voltages can differ slightly from their ideal conversion. B-field
+Sweep manifests also record requested and programmed voltages under
+`validation.voltage_rounding`. Sampling points that round to the same voltage
+are retained, so the requested point count and order do not change. Very small
+manual relative steps can round to zero. Ramp-step limits still apply: they must
+allow at least one source increment, and intermediate ramp steps never exceed
+the selected maximum.
 
 Quick previews use cached model/range information. Missing range information may
 require refreshing readback and pressing Start again. Execution checks refresh the
 source range after reserving the device and before applying outputs. Unknown
-models, unavailable ranges and incompatible targets stop the run with an explanation.
+models, unavailable ranges and out-of-range targets stop the run with an explanation.
 Ramp steps are maximum increments: intermediate ramp points are aligned to the
 source grid without exceeding that increment; a ramp smaller than one programming
 increment is rejected. The final target remains exact. DAQ outputs retain their
@@ -118,7 +128,7 @@ Click the **axis title on the graph itself** (for example **Vds (V)** or **Ids_D
 to open its choices beside the title. Click a choice to apply it immediately. X titles
 select the shared coordinate and X range policy. Each Y title selects that plot's
 signal, keeping the other plots and their ranges. In one plot, the Y-title menu also
-provides **Second Y signal**: choosing a signal adds an overlaid curve; **None** returns
+provides **Second Y signal** (also available via the **Second Y** toolbar button): choosing a signal adds an overlaid curve; **None** returns
 to a single signal. The same menu chooses **Shared Y axis / Independent left / right
 Y axes**. With independent axes, clicking the right title changes the right signal.
 Titles show a small arrow, support Tab and Space/Enter, and retain a separate keyboard
@@ -137,6 +147,12 @@ returning to one plot restores its single-signal or overlay arrangement. Each me
 page remembers its layout and signal pair; existing single/four-plot defaults remain
 compatible. An enabled channel with no finite samples is shown as waiting or empty,
 without zeros or a substituted signal.
+
+For B-field Sweep, the signal choices also include raw lock-in/DAQ voltages,
+measured Vds, and sample and reservoir temperatures. Dual lock-in mode includes
+raw drive X/Y voltages. Curves appear only when a finite reading was
+recorded; for example, Vds readback requires a supported DAQ source and temperatures
+require an available monitor. Their axes use volts or kelvin as appropriate.
 
 Live **Export** preserves both selected signals, axis settings and full-resolution data.
 The PNG shows the selected one/two/four-plot arrangement; its accompanying view can be restored in Analysis.
@@ -265,24 +281,152 @@ The sweep page displays LS335 A/B sensor current-reversal readbacks. Change thes
 under **Instruments → Sample temperature** while idle; OFF keeps DC temperature
 readout but removes thermal EMF compensation. See [LS335 sensor current reversal](guides/SAMPLE_TEMPERATURE_1000.md#sensor-current-reversal-ac-excitation).
 
-For hysteresis sampling, choose **B-field Sweep → Measurement mode → Stepped**.
+The B-field Sweep tab follows **1 · Sweep → 2 · Wait → 3 · Measure**, followed by
+fixed bias conditions. Choose the acquisition workflow under **Mode**:
+
+- **Continuous · measure while moving**: position at Start, prepare, then acquire
+  during one ramp per branch. **Sweep rate (Oe/s)** is the requested moving rate.
+  **Wait for temperature** optionally qualifies the sample before each branch;
+  it does not set the APS100/attoDRY1000 sample temperature. **Extra wait before
+  ramp** starts after fresh stationary-field and optional temperature checks.
+  **Turnaround wait** adds a pause before the return branch. No point-by-point
+  settling is inserted during acquisition. **Min sample interval** is a lower
+  bound; polling, readout and averaging also determine sample spacing.
+  **Advanced → Endpoint approach** offers **Linear** (default direct ramp) or
+  **No Overshoot** (slows near endpoints). This shared approach also applies
+  when positioning at Start. Oscillate is unavailable for continuous acquisition;
+  saved continuous recipes using it must be corrected before starting.
+- **Stepped · settle, then measure**: approach each field, qualify field and
+  sample temperature, wait the extra delay, then acquire. **Max approach rate
+  (Oe/s)** is a ceiling; No Overshoot slows near each target. It is not a constant
+  sweep-rate hysteresis measurement.
+  **Approach** offers Linear, No Overshoot (default), Linear — No Backward, or Oscillate.
+
+Temperature variation, drift and timeout settings stay under **Temperature
+limits**; APS100 point acceptance and motion checks stay under **Field limits**.
+**Averages** and **Read delay (s)** sit side by side in **3 · Measure** in both
+modes. They use `read → delay → read → … → average`: N DAQ readings and N−1
+delays, with no delay before the first or after the last reading. For example,
+5 averages at 0.2 s adds 0.8 s plus actual DAQ read time. Averages = 1 adds no
+read delay. The first reading follows the selected field/temperature settling
+workflow. This delay is separate from Continuous **Min sample interval** and
+from **Extra wait after stable**. Stop interrupts a pending read delay.
+Older recipes default the new read delay to zero to preserve acquisition timing.
+
+The DAQ reads the lock-in's continuously filtered output. Choose settling time
+for the lock-in time constant and filter slope; spacing reads does not replace
+initial settling. Closely spaced readings can be correlated. During a continuous
+field ramp, longer averaging covers more field and can blur narrow features.
+See the [SRS SR850 manual](https://www.thinksrs.com/downloads/pdfs/manuals/SR850m.pdf)
+for lock-in filtering and response.
+
+Stability is a measured condition, extra wait is an additional delay, and a
+timeout is the maximum allowed wait. Excursions restart qualification and delay.
+Existing continuous recipes keep their previous behavior until waits are enabled.
+Safety pauses still require the existing recovery procedure. A resumed continuous
+branch requalifies at its paused field and is identified as an interrupted ramp;
+it does not return to Start. The Instruments / Magnet controls are unchanged.
+
+New **B-field Sweep** recipes default to **Stepped**, with a maximum approach
+rate of **10 Oe/s**, a nominal step of **5 mT**, and a **10 s** temperature
+stability window. Saved recipes retain their explicit settings, including mode.
+For stationary hysteresis sampling, choose **B-field Sweep → Mode → Stepped**.
 Set Start/Stop in T, nominal Step size in mT, and one sample-temperature target.
 APS100 approaches in the branch direction, confirms pause, qualifies field and
 temperature independently, waits the extra delay, measures, then verifies fresh
 post-readings. Stable offsets within the separate point/endpoint acceptance limits
 are sampled at their field readback, without manual Continue. Passed interior
-nominal targets are logged and skipped without reversing. History reversals, endpoint
-violations, excessive actual sample gaps and quality timeouts end the run and preserve
-its data and diagnostic records. Thermal protection retains its existing recovery
+nominal targets are logged and skipped without reversing. Readback reversals and excessive actual sample gaps flag the affected point and continue. Duplicate points are skipped without fabricating data; an overshot endpoint is recorded at its stable readback with an offset warning. Missing diagnostic history is flagged and a fresh baseline is qualified. Hardware and motion failures end the run and preserve its data and diagnostic records. Thermal protection retains its existing recovery
 rules in Unchanged mode; automatic sample reversal ends the run on a monitoring or
 thermal interruption. These software limits require commissioning; current-derived field readback
 is not calibrated sample-field accuracy. See the [full settings and defaults](guides/SAMPLE_TEMPERATURE_1000.md#stepped-b-field-sweep).
 
-For APS100 continuous and stepped sweeps, set **Maximum sweep rate (T/min)** per run. The configured maximum and current request are displayed in **Oe/s** above the input; 0.12 T/min equals 20 Oe/s. Start reads the instrument's **RANGE/RATE 0–4** table, and uses the lower of the requested maximum and each stored range rate; actual rates can therefore be slower. The requested maximum is rounded down to the instrument's 0.1 mA/s resolution. The program verifies the written rates, records requested and effective tables in metadata, and uses the effective rates for motion timeouts. On completion, cancellation or error it attempts to restore and verify the original rate table; a restoration failure is reported. Fast mode RATE 5 is not changed. The attoDRY2100 ramp remains SDK-managed. Filenames omit sweep-rate, stepped-point-count and condition-count tags, and use **D** for Doping and **E** for E-field; the complete recipe remains in metadata. Previously saved files are not renamed.
+For APS100 continuous and stepped sweeps, enter the rate in **Oe/s**, for example `20`. The sweep hint shows the configured ceiling. Existing saved rates are converted for display; 0.12 T/min becomes 20 Oe/s. Start reads the instrument's **RANGE/RATE 0–4** table, and uses the lower of the requested maximum and each stored range rate. The requested maximum is rounded down to the instrument's 0.1 mA/s resolution. In Continuous mode, the Qt controller checks every crossed range against that requested rate within instrument resolution; a lower range cap rejects the run before positioning, with a supported-rate message. Stepped mode permits slower range rates and slows further near targets. The program verifies the written rates, records requested and effective tables in metadata, and uses the effective rates for motion timeouts. On completion, cancellation or error it attempts to restore and verify the original rate table; a restoration failure is reported. Fast mode RATE 5 is not changed. The attoDRY2100 ramp remains SDK-managed. Filenames omit sweep-rate, stepped-point-count and condition-count tags, and use **D** for Doping and **E** for E-field; the complete recipe remains in metadata. Previously saved files are not renamed.
 
-APS100 stepped moves use intermediate targets and reduced rates within the verified per-run limits. A fresh worker readback guards each commanded direction. An undershot stationary point can receive a same-direction correction within the original deadline; an overshot point is paused without reversing. Continue rechecks the point without authorizing a backwards move. Only planned round-trip turns and preparation between separate conditions change direction; preparation is not acquired as measurement data. Temporary approach rates are restored and verified before measurement. Field/temperature qualification and the extra delay restart after excursions or stale readings; post-acquisition checks discard invalid samples. Requested and measured fields remain separate in CSVs. Continuous sweeps retain their existing acquisition-during-motion behavior, and attoDRY2100 retains its SDK-managed path.
+Continuous CSVs add `B_readback_monotonic_s`, `Observed_sweep_rate_Oe_per_s` and
+`Continuous_segment`. The observed rate is signed ΔB/Δt between acquired field
+readbacks, not an instantaneous or calibrated sample-field rate. The first rate
+in each branch or resumed segment is blank. The existing `Sweep_rate_T_per_min`
+column remains the programmed range rate. Metadata records thermal/monitoring
+interruptions so interrupted data can be identified during analysis.
+
+In Continuous mode, `B_measured_T` is the mean of measured-field estimates at
+the midpoint of each successful DAQ read, with the same equal weighting as the
+averaged signal. Existing background telemetry brackets each read; linear
+interpolation uses those measured readbacks, never the requested ramp rate.
+There are no additional magnet queries. The APS100 adapter timestamps its field
+query separately from the rest of the status snapshot. This is software timing,
+not hardware synchronization, and does not correct the lock-in's filter lag.
+This follows the PPMS VSM principle of reporting an average field alongside the
+averaged signal; it does not claim to reproduce Quantum Design's internal algorithm.
+See the [PPMS VSM manual, section 6.5.3.2](https://web.njit.edu/~tyson/PPMS_Documents/PPMS_Manual/1096-100%20Rev.%20A3%20VSM.pdf).
+
+`B_trigger_T` retains the field that scheduled the point. The
+`B_acquisition_start_T`, `B_acquisition_end_T`, `B_acquisition_min_T`,
+`B_acquisition_max_T` and `B_acquisition_span_T` columns describe the DAQ
+acquisition window, including intervening telemetry extrema. The corresponding
+start/end monotonic timestamps, `B_DAQ_read_count` and `B_assignment` record how
+the value was obtained. With no DAQ, that window follows the primary Keithley
+read. Sequential Keithley and Bias2 currents have separate `B_Keithley_T` and
+`B_Bias2_T` coordinates and read timestamps; live plots and saved-history curves
+use those coordinates when plotting these currents against field.
+
+The worker waits up to 3 s for the trailing field readback. Missing coverage,
+invalid telemetry, a gap longer than 3 s or a cleared telemetry cache rejects
+the acquisition rather than saving a guessed field. Stop interrupts that wait.
+Active captures retain their history (up to 100,000 snapshots); exceeding that
+limit rejects the point. Holds invalidate acquisitions spanning the interruption,
+and branch reversal waits for pending reads. Temperature columns remain the
+latest pre-acquisition readings, not temperature averages. Stepped mode and
+previously saved CSVs keep their existing field convention.
+
+APS100 stepped No Overshoot moves use intermediate targets and reduced rates within the verified per-run limits. A fresh worker readback guards each commanded direction. An undershot stationary point can receive a same-direction correction within the original deadline; an overshot point is paused without reversing. Continue rechecks the point without authorizing a backwards move. Only planned round-trip turns and preparation between separate conditions change direction under this approach; preparation is not acquired as measurement data. Temporary approach rates are restored and verified before measurement. Field/temperature qualification and the extra delay restart after excursions or stale readings; post-acquisition checks discard invalid samples. Requested and measured fields remain separate in CSVs. Continuous sweeps retain acquisition during motion, and attoDRY2100 retains its SDK-managed path.
+
+**Linear — No Backward** (`linear_no_backward`) is available only for APS100 stepped hysteresis sweeps. Between measurement points it commands one direct sweep to the target at the verified per-run rate, without an intermediate target, approach-rate reduction, or near-zero slow stage. It retains the strict field-history checks, configured reversal warning threshold and acceptance tolerances, scan envelope, no-progress and total deadlines, thermal protections, and field/temperature qualification. An undershoot can receive a same-direction correction; a confirmed overshoot skips passed interior targets or records a stable endpoint offset without a reverse correction. Small offsets and readback fluctuations remain subject to the existing tolerances: the mode prevents commanded reverse corrections, not all physical overshoot or reversal. Planned round-trip turns remain allowed. Initial preparation and preparation between conditions still use the existing progressive reduced-rate approach described below. Ordinary Linear does not provide this strict history policy. The new mode may reduce stage/command overhead, but its speed and overshoot must be checked on hardware; the temperature stability window is unchanged. Finish measurement cleanup, exit the app, and relaunch the root `Transport_App.bat` to load updated code before selecting the new mode.
+
+Initial APS100 preparation for stepped No Overshoot advances in one commanded direction through progressively shorter moves, each targeting about 70% of the remaining distance. Rates decrease within the requested ceiling, down to 20% of each effective band rate where representable. Preparation permits bounded readback reversals; its operational bound is the active band rate multiplied by the no-progress time budget, plus the approach tolerance (with a resolution-based minimum budget). The commissioned field limits, no-progress and total deadlines, hardware and thermal checks still apply. The series log records the observed preparation history and applied bound. After rate restoration, the paused driven starting field must satisfy the configured endpoint tolerance, field stability duration, span and drift limits; acquisition then establishes a new strict history from that baseline and still requires the normal field and temperature qualification. This separation does not erase the sample's physical magnetic history or establish that a preparation reversal is harmless for a particular material.
+
+For a stepped No Overshoot acquisition move starting within the approach tolerance of zero field, both directional stages use the existing reduced rate (20% of the effective band rate, quantized to the instrument's rate resolution). The requested rate remains a ceiling; the acquisition reversal warning threshold still applies. The movement history records `zero_start_slow` and the effective rate table. This is a mitigation for an observed near-zero reversal, not a manufacturer-guaranteed cure; if the warning threshold is exceeded the point is flagged and acquisition continues.
+
+Stepped No Overshoot and Linear — No Backward move histories include `approach` and diagnostic-only `start_rates_t_per_min` (the starting rate table), `stages` (stage endpoints, active rates, sweep timestamps and exit reasons), `trace` (elapsed seconds and field in tesla, sampled at most once per second with first/last observations retained and a 240-point cap), and `overhead_s` (total move time outside stage polling, including pauses, rate restoration and final qualification). The final trace point may be less than one second after the preceding point. These records reuse existing readings and add no instrument traffic or changes to motion or safety checks; preparation records them too. The mock retains its single simulated stage. Compare the starting table with the first-stage trace slope to distinguish an already reduced table from a slow supply response; hardware verification remains necessary.
+
+Real APS100 hysteresis move histories also include `io_diagnostics`: raw replies from existing `IMAG?`, `IOUT?`, voltage, heater, sweep-state and units queries, and target/rate/sweep/pause writes. Each transaction has host monotonic and UTC timestamps; `issued_monotonic_s` marks the serial write call, and query response receipt is recorded separately. These are sequential transactions, not simultaneous samples. The preceding 64 events retain context from earlier polling and settling; at most 512 events from the move are retained, with `dropped_events` reporting omitted older events. A separate `control_writes` buffer retains up to 64 control writes so frequent replies cannot evict the initial target/sweep commands; `dropped_control_writes` reports its overflow. Replies and write echoes are capped at 512 characters and marked if truncated. The rolling buffers are reset on reconnect/close. No additional instrument queries or polling-rate changes are made. `IMAG?`/`IOUT?` describe APS current feedback or equivalent field, not an independent magnetic-field sensor; the conversion constant is recorded. These diagnostics help locate apparent feedback reversals relative to commands, but cannot by themselves prove a change in the actual field at the sample. Safety thresholds and acceptance remain unchanged.
+
+**Experimental shorter No Overshoot approach.** In B-field Sweep, select APS100 Stepped / No Overshoot, then Additional settings → No Overshoot approach → **Shorter slow approach (experimental)**. The default remains **Standard**; older recipes without `aps100_no_overshoot_profile` retain Standard. This is independent of the A/B polling selection. The experimental option shifts the intermediate endpoint from 80% toward 90% of the move, keeping the final reduced rate at the existing quantized 20% and keeping the same requested rate ceiling. The slow segment is at least four approach tolerances and four 0.1 mT readback increments; endpoint rounding is away from the target. At a 10 mT interval and 0.2 mT approach tolerance this changes the planned slow segment from about 2 mT to 1 mT. It does not learn or predict magnet dynamics.
+
+Preparation, moves near or across zero, moves spanning rate-table bands, and short moves that cannot retain the minimum slow segment use the standard policy. Near-zero initial reduced-rate protection stays in place. `no_overshoot_diagnostics` records the requested/effective profile, fallback reason and planned intermediate endpoint/slow distance for ordinary moves; preparation records the fallback without claiming those endpoints. The mock reports `effective_profile=mock` because its existing single simulated stage does not model either two-stage profile. This option is rejected for Linear, Linear — No Backward, continuous acquisition and the 2100 backend. A saved incompatible choice stays visible so it can be reset to Standard.
+
+Field envelope, fault, thermal, cancellation, endpoint qualification and rate-restoration checks remain; acquisition readback reversals are flagged rather than stopped, while preparation retains its separate bound. A shorter slow segment may increase overshoot or settling even with those checks; it is an experimental software approach, not a guaranteed no-overshoot or speed result. After cleanup and an idle restart, validate a few steps under otherwise identical settings before a full run, comparing `stages`, `overhead_s`, reversal records and point-to-point time (including stabilization). Keep all tolerances and protection limits unchanged. Do not infer real speed improvements from simulated tests; no hardware parameters or ongoing run are changed by this source update.
+
+**Communication comparison (optional A/B diagnostic).** In B-field Sweep → Additional settings → Communication comparison, **Standard (A)** preserves the existing polling. **Fewer mode queries (B)** (`aps100_polling_profile=reduced_mode_queries`) is supported only for APS100 Stepped **No Overshoot** and **Linear — No Backward**. During each active sweep stage B queries `MODE?` on the first iteration and then once at least one second has elapsed since the previous complete mode check. A mode change can consequently take one second plus loop/communication time to detect. Every iteration still reads `*STB?`, runs the thermal guard, observes `IMAG?`, checks cancellation, envelope and progress, and records acquisition reversal warnings. Full mode checks remain before stage starts and are performed after confirmed pauses. Preparation always uses Standard, even when B is requested. B does not change field feedback polling sleeps, temperature polling, rate tables, approach stages, tolerances, or hardware configuration; shorter serial transactions can change the achieved sampling cadence. It reduces one query category, not all instrument traffic, and is not a demonstrated speed fix.
+
+Run A and B as separate short measurements with the same approach, preparation, field interval, direction, step, rate and temperature settings. The app does not launch either test automatically. In particular, compare No Overshoot A against No Overshoot B before comparing different approach strategies. Preserve the configured reversal warning threshold and other stop/error handling. A small number of successful points is not proof that reversals cannot occur. The selected profile is saved in the recipe/manifest. `polling_diagnostics` records the requested/effective profile and active-loop check counts; `communication_diagnostics` records actual query attempts by command family, total attempts, elapsed move time and queries per second, including setup/cleanup reads and failed attempts. These counters reuse existing transactions. Compare stage sweep durations separately from preparation, temperature qualification and communication overhead. Trace offsets now use the explicit `trace_started_monotonic_s`; an inherited `started_monotonic_s` can predate the local trace and must not be used as its origin. Finish cleanup and relaunch the root app when idle to load the feature; no running process or instrument is changed by editing the source.
+
+**Shared fresh field observation.** With the app's thermal monitoring connected, each active APS100 hysteresis polling iteration now uses the same freshly acquired `IMAG?` observation for thermal evaluation and field-history/approach checks, instead of reading it twice. Its acquisition timestamp is retained; no observation is cached across iterations. Invalid or stale shared observations fail the move and enter the existing pause/cleanup path. Standalone adapters and a worker without a thermal source retain their separate field read. This applies to both A and B, including active preparation stages; other setup, pause and final checks remain. `polling_diagnostics.shared_field_reads` counts successful reuse, while `communication_diagnostics` measures actual query attempts. Rates, tolerances, thermal checks, reversal warning threshold and polling sleeps are unchanged by the shared observation. Removing one query can change the achieved sampling cadence and endpoint timing, so hardware validation is still required; it does not imply that total communication or move time is halved. Load this change by relaunching the root app when idle.
+
+APS100 stepped motion has a separate, finite move deadline that includes the reduced-rate approach and at least 180 seconds for instrument-command overhead. The field-stability timeout applies after positioning; increasing it does not extend an ordinary move. No-progress, endpoint and thermal protections remain active during motion; acquisition readback reversal is flagged. A missing completion reports the elapsed time, target and move budget; automatic failure cleanup is identified as `failure`, rather than `user`.
 
 For **attoDRY2100**, configure the 2100 setup and restart, review its commissioned connection and limits under Instruments, and use **Stepped** mode. The workflow actively sets and verifies the sample-temperature target through the SDK; sample temperature control stays enabled while the field is on. The 1000 heater-OFF restriction does not apply to this backend. Field ramping uses the cryostat's SDK control, without APS100 ramp tables, persistent-switch commands or lead-zeroing rules. Start requires Driven mode and no ongoing field motion.
+
+**Verified rate-table writes.** APS100 rate-table application/restoration now reads each range boundary and current rate before deciding whether a write is needed. An unchanged rate is verified by that fresh read and is not rewritten. Changed rates retain the existing write/error checks and post-write readback; invalid or unavailable readings report failure, and other entries are still attempted under the existing restoration policy. No cached table is trusted. Progress callbacks still run for each entry, including unchanged ones. This shared helper is used by No Overshoot transitions, preparation, configuration and restoration. For a table whose ranges 0–2 change and 3–4 stay at their minimum, slowing and restoring requires six RATE writes instead of ten; changed entries need an extra pre-read, so actual time savings require hardware measurement. Approach endpoints, rate values, tolerances, Fast Mode and reversal warning threshold are unchanged. This optimization applies in both polling profiles after an idle app restart and does not require selecting B.
+
+On APS100, Linear approaches the target directly; No Overshoot slows near the
+target; Oscillate crosses the target with decreasing excursions. These are
+software-controlled APS100 approaches, not native PPMS controls or a guarantee
+of zero physical overshoot. Oscillate changes the sample's magnetic history and
+is available only for stepped B-field Sweep and B-field Gate Scan.
+
+B-field Gate Scan keeps **Ramp rate**, **Approach** (Linear by default), and
+**Extra settle delay** together. The workflow is: set field → verify persistent
+field and thermal readiness → extra settle delay → gate scans. The field delay
+defaults to zero and runs once per arrival; subsequent conditions at the same
+field recheck readiness without repeating that delay. Stop or faults cancel
+the wait. **Gate settle delay** remains a separate wait after each gate move,
+before the averaged acquisition; it is not a delay between individual readings.
+The field settings are shared by all conditions and recorded in metadata and
+checkpoints. Resume requires matching settings; older checkpoints without a
+field-delay value use zero, and checkpoints predating field controls retain
+the previously configured Gate Scan rate behavior.
 
 At each 2100 point, the field setpoint must match, SDK field control must report IDLE, and three fresh field readings must be within ±10 mT. Then fresh sample-temperature readings must qualify over the selected window: by default 10 s, within ±0.05 K of the same target, with peak-to-peak variation ≤0.02 K and absolute fitted drift ≤0.01 K/min. These limits are editable. The 10 s is a temperature observation window, not a fixed field delay or a guarantee of thermal equilibrium. Both field and temperature are checked again after acquisition; a failed check discards that sample and requalifies the point.
 
@@ -300,15 +444,16 @@ Monitoring-loss recovery, endpoint windows and optional settling have specific a
 
 ### Sample B current reversal during APS100 stepped sweeps
 
-The default **Unchanged** leaves the LS335 sample B current reversal as set.
-**Per point** first qualifies a full temperature window with B ON. It confirms B
+Under **Sample temperature · Input B**, the default **Keep current setting**
+leaves LS335 sample B current reversal as set. **OFF during each reading** first
+qualifies a full temperature window with B ON. It confirms B
 OFF, waits the configured settling time, acquires, then confirms B ON and waits
 again. A fresh ON temperature window must qualify, and the pre- and post-acquisition
 ON temperatures must differ by no more than the configured maximum temperature
 span, before the point is committed. OFF readings remain in use for thermal safety,
 but are not mixed into either ON stability window.
 
-**Whole sweep** keeps B OFF during the sweep and retains the existing sample target,
+**OFF for whole sweep** keeps B OFF during the sweep and retains the existing sample target,
 span and drift stability requirements; no tolerance is automatically widened.
 The settling time is a configured wait, not proof that a transient has disappeared.
 Temperature readout continues with DC excitation, but thermal EMF compensation is
@@ -320,3 +465,5 @@ does not automatically continue the interrupted point. Stop first completes APS
 cleanup and drains pending DAQ and LS operations, then restores the original B
 setting. If restoration fails, the instrument reservation is retained and **Stop**
 retries restoration. All magnet and thermal safety checks remain active.
+
+For APS100 stepped No Overshoot and Linear — No Backward, **Readback reversal warning (mT)** flags current-derived readback reversal and continues. The CSV records `Field_reversal_warning`, `Field_quality` (`readback_reversal` or `readback_reversal_offset`), and `B_max_reverse_T`; the series log and move history retain diagnostic events. Readback is not an independent sample-field measurement. **Point gap warning** marks a large forward gap with `Field_quality_warning=coverage_gap` and records the actual point; features within the gap may have been missed. A field or temperature qualification timeout at a verified paused point restarts the stability wait automatically; **Stop** ends the run. Thermal and monitoring protections retain their separate recovery rules. Preparation retains its separate bounded reversal protection; commissioned field limits, fault, motion deadline, thermal and cancellation protections remain active. Requested scan-envelope and endpoint offsets are quality warnings; output/field disagreement and no-progress remain motion errors.

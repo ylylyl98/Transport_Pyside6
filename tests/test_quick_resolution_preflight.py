@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 import time
+from unittest.mock import patch
 from PySide6.QtCore import QCoreApplication
 from app.models import SaveRoot
 from app.quick.measurements import MeasurementService
@@ -15,7 +16,7 @@ class QuickResolutionPreflightTests(unittest.TestCase):
         self.service = MeasurementService(self.manager, SaveRoot(base=self.folder.name))
         self.addCleanup(self.service.deleteLater)
 
-    def test_nonrepresentable_gate_target_is_rejected_in_each_mode(self):
+    def test_nonrepresentable_gate_target_is_rounded_in_each_mode(self):
         for mode in range(5):
             with self.subTest(mode=mode):
                 self.service.mode = mode
@@ -30,8 +31,8 @@ class QuickResolutionPreflightTests(unittest.TestCase):
                     params.vtg_stop = .0001
                 else:
                     params.bias_conditions[0].vtg = .0001
-                with self.assertRaisesRegex(ValueError, 'not representable'):
-                    self.service._validate(params, mode)
+                _, points = self.service._validate(params, mode)
+                self.assertEqual(points[0]['vtg'], 0.)
                 self.assertFalse(self.manager.claimed)
 
     def test_ramp_and_cached_source_range_are_enforced(self):
@@ -74,3 +75,29 @@ class QuickResolutionPreflightTests(unittest.TestCase):
         self.assertIn('G1: 20 V range / 0.0005 V step', self.service.resolutionSummary)
         self.manager.sessions['g1'].cached_source_voltage_range_v = None
         self.assertIn('G1: resolution unconfirmed', self.service.resolutionSummary)
+
+    def test_refreshed_resolution_updates_execution_snapshot(self):
+        app = QCoreApplication.instance() or QCoreApplication([])
+        self.service.mode = 0
+        params = self.service.collect_params()
+        params.vtg_set = .00074
+        gate = self.manager.sessions['g1']
+        gate.cached_source_voltage_range_v = 2.
+        required, points = self.service._validate(params, 0)
+        self.assertEqual(points[0]['vtg'], .00075)
+        def change_range():
+            gate.cached_source_voltage_range_v = 20.
+            return 20.
+        gate.refresh_source_voltage_range = change_range
+        with patch.object(self.service, '_rates', return_value=(1., 1., {})), \
+             patch.object(self.service, '_launch') as launch:
+            self.service._begin_preflight(params, 0, required, points)
+            deadline = time.monotonic() + 3
+            while self.service._preflight_thread is not None and time.monotonic() < deadline:
+                app.processEvents()
+                time.sleep(.005)
+            self.assertIsNone(self.service._preflight_thread)
+            self.assertEqual(points[0]['vtg'], .0005)
+            self.assertEqual(params.vtg_set, .00074)
+            launch.assert_called_once()
+        self.service._release()

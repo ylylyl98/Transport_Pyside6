@@ -38,6 +38,64 @@ class BFieldTransportUiTests(unittest.TestCase):
             get_signal_chain_callable=lambda: SignalChainSnapshot(1000.0, 0.02, 100e-9),
         )
 
+    def test_field_approach_modes_and_legacy_oscillate(self):
+        tab = self.tab
+        self.assertEqual(tab.cbo_measurement_mode.currentData(), "stepped")
+        self.assertAlmostEqual(tab.sp_rate.value(), 10.)
+        self.assertAlmostEqual(tab.sp_field_step.value(), 5.)
+        self.assertEqual(tab.sp_field_points.value(), 201)
+        self.assertEqual(tab.sp_temperature_window.value(), 10.)
+        tab.cbo_measurement_mode.setCurrentIndex(tab.cbo_measurement_mode.findData("continuous"))
+        self.assertTrue(tab._sweep_form.isRowVisible(tab.endpoint_advanced))
+        self.assertFalse(tab._sweep_form.isRowVisible(tab.cbo_field_approach))
+        self.assertEqual(tab.cbo_endpoint_approach.currentData(), "linear")
+        tab.cbo_measurement_mode.setCurrentIndex(tab.cbo_measurement_mode.findData("stepped"))
+        self.assertTrue(tab._sweep_form.isRowVisible(tab.cbo_field_approach))
+        self.assertEqual(tab.cbo_field_approach.currentData(), "no_overshoot")
+        tab.cbo_field_approach.setCurrentIndex(tab.cbo_field_approach.findData("oscillate"))
+        tab.cbo_field_approach.activated.emit(tab.cbo_field_approach.currentIndex())
+        tab.cbo_measurement_mode.setCurrentIndex(tab.cbo_measurement_mode.findData("continuous"))
+        self.assertTrue(tab.endpoint_advanced.is_expanded())
+        self.assertIn("unsupported", tab.cbo_endpoint_approach.currentText())
+        self.assertEqual(tab._step_values()["field_approach"], "oscillate")
+        tab._save_settings()
+        tab._load_settings()
+        self.assertIn("unsupported", tab.cbo_endpoint_approach.currentText())
+        self.assertEqual(tab._step_values()["field_approach"], "oscillate")
+        tab.cbo_endpoint_approach.setCurrentIndex(tab.cbo_endpoint_approach.findData("linear"))
+        tab.cbo_endpoint_approach.activated.emit(tab.cbo_endpoint_approach.currentIndex())
+        self.assertEqual(tab._step_values()["field_approach"], "linear")
+
+    def test_linear_no_backward_persists_and_is_visible_when_unsupported(self):
+        tab = self.tab
+        tab.cbo_field_approach.setCurrentIndex(tab.cbo_field_approach.findData("linear_no_backward"))
+        tab.cbo_field_approach.activated.emit(tab.cbo_field_approach.currentIndex())
+        tab._save_settings()
+        tab._load_settings()
+        self.assertEqual(tab._step_values()["field_approach"], "linear_no_backward")
+        tab.cbo_measurement_mode.setCurrentIndex(tab.cbo_measurement_mode.findData("continuous"))
+        self.assertIn("unsupported", tab.cbo_endpoint_approach.currentText())
+        self.assertFalse(tab.cbo_endpoint_approach.model().item(tab.cbo_endpoint_approach.currentIndex()).isEnabled())
+        self.assertEqual(tab._step_values()["field_approach"], "linear_no_backward")
+        tab._save_settings()
+        tab._load_settings()
+        self.assertEqual(tab._step_values()["field_approach"], "linear_no_backward")
+        self.assertIn("unsupported", tab.cbo_endpoint_approach.currentText())
+
+    def test_approach_selection_survives_backend_refresh_and_restore(self):
+        tab = self.tab
+        tab.cbo_endpoint_approach.setCurrentIndex(tab.cbo_endpoint_approach.findData("no_overshoot"))
+        tab.cbo_endpoint_approach.activated.emit(tab.cbo_endpoint_approach.currentIndex())
+        tab.set_magnet_backend("1000")
+        self.assertEqual(tab._step_values()["field_approach"], "no_overshoot")
+        tab._save_settings()
+        tab.cbo_endpoint_approach.setCurrentIndex(0)
+        tab._load_settings()
+        self.assertEqual(tab._step_values()["field_approach"], "no_overshoot")
+        tab.set_magnet_backend("2100")
+        tab.set_magnet_backend("1000")
+        self.assertEqual(tab._step_values()["field_approach"], "no_overshoot")
+
     def test_sample_reversal_settings_round_trip(self):
         self.tab.cbo_measurement_mode.setCurrentIndex(self.tab.cbo_measurement_mode.findData("stepped"))
         self.tab.cbo_sample_reversal.setCurrentIndex(self.tab.cbo_sample_reversal.findData("per_point"))
@@ -82,11 +140,13 @@ class BFieldTransportUiTests(unittest.TestCase):
 
     def test_hysteresis_controls_roundtrip_settings_and_scope(self):
         tab = self.tab
+        tab.cbo_measurement_mode.setCurrentIndex(tab.cbo_measurement_mode.findData("continuous"))
         self.assertFalse(tab._sweep_form.isRowVisible(tab.sp_field_tolerance))
         tab.cbo_measurement_mode.setCurrentIndex(tab.cbo_measurement_mode.findData("stepped"))
         self.assertTrue(tab._sweep_form.isRowVisible(tab.sp_field_tolerance))
-        tab.sp_rate.setValue(.12)
-        self.assertIn('20 Oe/s', tab.lbl_rate_limit.text())
+        tab.sp_rate.setValue(20.)
+        self.assertTrue(tab.lbl_rate_limit.text().startswith('Maximum: '))
+        self.assertNotIn('Current request', tab.lbl_rate_limit.text())
         self.assertLess(tab._sweep_form.getWidgetPosition(tab.lbl_rate_limit)[0],
                         tab._sweep_form.getWidgetPosition(tab.sp_rate)[0])
         tab._hysteresis_extra['field_acceptance_t'].setValue(.6)
@@ -94,13 +154,17 @@ class BFieldTransportUiTests(unittest.TestCase):
         tab.sp_field_tolerance.setValue(.3)
         tab.sp_field_stability.setValue(3.)
         tab.sp_field_settle.setValue(2.5)
+
         params = tab.collect_params()
+        self.assertAlmostEqual(params.rate_t_per_min, .12)
+        self.assertAlmostEqual(tab._preview_params().rate_t_per_min, .12)
         self.assertAlmostEqual(params.field_tolerance_t, .0003)
         self.assertAlmostEqual(params.field_acceptance_t, .0006)
         self.assertAlmostEqual(params.field_drift_t_per_s, .0002)
         self.assertEqual((params.field_stability_s, params.field_settle_s), (3., 2.5))
         tab.sp_field_tolerance.setValue(.4)
         tab._load_settings()
+        self.assertAlmostEqual(tab.sp_rate.value(), 20.)
         self.assertEqual(tab.sp_field_tolerance.value(), .3)
         self.assertIn("extra delay 2.5 s", tab.lbl_preview.text())
         tab.set_sweep_locked(True)
@@ -120,6 +184,19 @@ class BFieldTransportUiTests(unittest.TestCase):
         self.tab._restoration_dialog.close()
         self.tab._show_restoration_warning("")
         self.assertTrue(self.tab.restoration_banner.isHidden())
+
+    def test_legacy_rate_settings_load_as_oe_per_second(self):
+        settings = get_app_settings()
+        settings.beginGroup(self.tab.SETTINGS_PREFIX)
+        settings.setValue('rate_t_per_min', .12)
+        settings.endGroup()
+        self.tab._load_settings()
+        self.assertAlmostEqual(self.tab.sp_rate.value(), 20.)
+        self.assertIn('Oe/s', self.tab._sweep_form.labelForField(self.tab.sp_rate).text())
+        self.tab.sp_rate.setValue(30.)
+        self.assertAlmostEqual(self.tab.collect_params().rate_t_per_min, .18)
+        self.tab._load_settings()
+        self.assertAlmostEqual(self.tab.sp_rate.value(), 30.)
 
     def test_device_status_panel_tracks_existing_and_future_manager_state(self):
         for name in ("g1", "g2", "g3", "daq"):

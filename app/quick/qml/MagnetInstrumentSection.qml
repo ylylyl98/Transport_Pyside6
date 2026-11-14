@@ -8,6 +8,9 @@ ColumnLayout {
     required property var magnet
     Layout.fillWidth: true
     spacing: 14
+    function connectionText(state) {
+        return state.charAt(0).toUpperCase() + state.slice(1)
+    }
     function value(value, unit) {
         if (value === null || value === undefined) return "unknown"
         if (typeof value === "boolean") return value ? "ON" : "OFF"
@@ -28,9 +31,22 @@ ColumnLayout {
         Label { Accessible.name: "Configured magnet and temperature system"; text: section.magnet.systemName; color: Theme.text; Layout.fillWidth: true }
         Flow {
             Layout.fillWidth: true; spacing: 6
-            ActionButton { tone: "primary"; text: "Connect"; enabled: !section.magnet.busy; onClicked: section.magnet.command("connect") }
-            ActionButton { text: "Disconnect"; enabled: !section.magnet.busy; onClicked: section.magnet.command("disconnect") }
+            ActionButton {
+                objectName: "magnetConnect"
+                text: section.magnet.connectionActions.magnet.state === "connecting" ? "Connecting…" : section.magnet.connections[section.magnet.backend] ? "Connected" : "Connect"
+                enabled: section.magnet.connectionActions.magnet.connectEnabled
+                palette.disabled.buttonText: text === "Connected" ? Theme.connectionColor("connected") : Theme.disabledText
+                onClicked: section.magnet.command("connect")
+            }
+            ActionButton { objectName: "magnetDisconnect"; text: section.magnet.connectionActions.magnet.state === "disconnecting" ? "Disconnecting…" : "Disconnect"; enabled: section.magnet.connectionActions.magnet.disconnectEnabled; onClicked: section.magnet.command("disconnect") }
             ActionButton { text: "Read status"; enabled: !section.magnet.busy; onClicked: section.magnet.command("refresh") }
+        }
+        Label {
+            objectName: "magnetConnectionStatus"
+            visible: section.magnet.backend !== "none"
+            text: "Magnet: " + section.connectionText(section.magnet.connectionActions.magnet.state)
+            color: Theme.connectionColor(section.magnet.connectionActions.magnet.state)
+            wrapMode: Text.Wrap; Layout.fillWidth: true
         }
         Label { text: section.magnet.summary; color: Theme.text; font.bold: true; wrapMode: Text.Wrap; Layout.fillWidth: true }
         Label { text: section.magnet.temperatureStatus; color: Theme.muted; wrapMode: Text.Wrap; Layout.fillWidth: true }
@@ -51,34 +67,49 @@ ColumnLayout {
     ColumnLayout {
         Layout.fillWidth: true; spacing: 6
         Rectangle { Layout.fillWidth: true; implicitHeight: 1; color: Theme.border }
-        Label { text: "Magnetic field"; font.bold: true; color: Theme.text }
-        FieldForm { fields: section.magnet.fields.filter(item => item.group === "Magnetic field").map(item => Object.assign({}, item, {group: ""})); target: section.magnet; locked: section.magnet.busy; Layout.fillWidth: true }
+        ActionButton { id: fieldSettings; objectName: "magnetFieldSettings"; text: (checked ? "- " : "+ ") + "Magnetic field settings"; checkable: true; checked: true; Layout.fillWidth: true }
+        FieldForm { visible: fieldSettings.checked; fields: section.magnet.fields.filter(item => item.group === "Magnetic field").map(item => Object.assign({}, item, {group: ""})); target: section.magnet; locked: section.magnet.busy; Layout.fillWidth: true }
         Flow {
             Layout.fillWidth: true; spacing: 6
-            ActionButton { tone: "primary"; text: "Move to target field"; enabled: !section.magnet.busy; onClicked: section.magnet.command("move") }
-            ActionButton { tone: "danger"; text: "Stop / pause field"; onClicked: section.magnet.command("stop") }
+            ActionButton { visible: fieldSettings.checked; tone: "primary"; text: "Move to target field"; enabled: !section.magnet.busy; onClicked: section.magnet.command("move") }
+            ActionButton { objectName: "magnetStopField"; tone: "danger"; text: "Stop / pause field"; onClicked: section.magnet.command("stop") }
         }
     }
     ColumnLayout {
         Layout.fillWidth: true; spacing: 6
         Rectangle { Layout.fillWidth: true; implicitHeight: 1; color: Theme.border }
-        Label { text: "Sample temperature"; font.bold: true; color: Theme.text }
+        ActionButton { id: temperatureSettings; objectName: "magnetTemperatureSettings"; text: (checked ? "- " : "+ ") + "Sample temperature settings"; checkable: true; Layout.fillWidth: true }
         Flow {
             Layout.fillWidth: true; spacing: 6
             visible: section.magnet.backend === "1000"
-            ActionButton { text: "Connect LS335"; enabled: !section.magnet.busy; onClicked: section.magnet.command("connect_temperature") }
-            ActionButton { text: "Disconnect LS335"; enabled: !section.magnet.busy; onClicked: section.magnet.command("disconnect_temperature") }
+            ActionButton {
+                objectName: "temperatureConnect"
+                text: section.magnet.connectionActions.temperature.state === "connecting" ? "Connecting LS335…" : section.magnet.connections.temperature ? "LS335 Connected" : "Connect LS335"
+                enabled: section.magnet.connectionActions.temperature.connectEnabled
+                palette.disabled.buttonText: text === "LS335 Connected" ? Theme.connectionColor("connected") : Theme.disabledText
+                onClicked: section.magnet.command("connect_temperature")
+            }
+            ActionButton { objectName: "temperatureDisconnect"; text: section.magnet.connectionActions.temperature.state === "disconnecting" ? "Disconnecting LS335…" : "Disconnect LS335"; enabled: section.magnet.connectionActions.temperature.disconnectEnabled; onClicked: section.magnet.command("disconnect_temperature") }
         }
-        FieldForm { fields: section.magnet.fields.filter(item => item.group === "Sample temperature").map(item => Object.assign({}, item, {group: ""})); target: section.magnet; locked: section.magnet.busy; Layout.fillWidth: true }
-        Label { text: section.magnet.heaterAutoPreview; visible: text.length > 0; wrapMode: Text.Wrap; Layout.fillWidth: true; color: Theme.muted }
+        Label {
+            objectName: "temperatureConnectionStatus"
+            visible: section.magnet.backend !== "none"
+            readonly property string connectionState: section.magnet.backend === "1000" ? section.magnet.connectionActions.temperature.state : section.magnet.connectionActions.magnet.state
+            text: (section.magnet.backend === "1000" ? "LS335: " : "Temperature (2100 SDK): ") + section.connectionText(connectionState)
+            color: Theme.connectionColor(connectionState)
+            wrapMode: Text.Wrap; Layout.fillWidth: true
+        }
+        FieldForm { visible: temperatureSettings.checked; fields: section.magnet.fields.filter(item => item.group === "Sample temperature").map(item => Object.assign({}, item, {group: ""})); target: section.magnet; locked: section.magnet.busy; Layout.fillWidth: true }
+        Label { text: section.magnet.heaterAutoPreview; visible: temperatureSettings.checked && text.length > 0; wrapMode: Text.Wrap; Layout.fillWidth: true; color: Theme.muted }
         Label { text: section.magnet.heatingBlockReason; visible: text.length > 0; wrapMode: Text.Wrap; Layout.fillWidth: true; color: Theme.muted }
         Flow {
             Layout.fillWidth: true; spacing: 6
-            ActionButton { tone: "primary"; text: "Apply temperature"; enabled: !section.magnet.busy && section.magnet.temperatureAvailable && !section.magnet.heatingBlockReason; onClicked: section.magnet.command("temperature") }
-            ActionButton { tone: "danger"; text: section.magnet.backend === "1000" ? "Heater OFF" : "Stop temperature"; onClicked: section.magnet.command("temperature_stop") }
+            ActionButton { visible: temperatureSettings.checked; tone: "primary"; text: "Apply temperature"; enabled: !section.magnet.busy && section.magnet.temperatureAvailable && !section.magnet.heatingBlockReason; onClicked: section.magnet.command("temperature") }
+            ActionButton { objectName: "magnetStopTemperature"; tone: "danger"; text: section.magnet.backend === "1000" ? "Heater OFF" : "Stop temperature"; onClicked: section.magnet.command("temperature_stop") }
         }
+        ActionButton { id: sensorOptions; objectName: "magnetSensorOptions"; visible: section.magnet.backend === "1000"; text: (checked ? "- " : "+ ") + "LS335 sensor and heater options"; checkable: true; Layout.fillWidth: true }
         ColumnLayout {
-            visible: section.magnet.backend === "1000"; Layout.fillWidth: true; spacing: 6
+            visible: section.magnet.backend === "1000" && sensorOptions.checked; Layout.fillWidth: true; spacing: 6
             Label { text: "LS335 sensor current reversal"; font.bold: true; color: Theme.text }
             Label { text: section.magnet.currentReversalStatus; wrapMode: Text.Wrap; Layout.fillWidth: true; color: Theme.muted }
             Label { text: "OFF uses DC excitation and keeps temperature readout active, but removes thermal EMF compensation. Change only while measurements and field motion are idle."; wrapMode: Text.Wrap; Layout.fillWidth: true; color: Theme.muted }
@@ -130,12 +161,64 @@ ColumnLayout {
         }
     }
     Rectangle { Layout.fillWidth: true; implicitHeight: 1; color: Theme.border }
-    ActionButton { id: diagnostics; text: checked ? "Hide diagnostics && log" : "Diagnostics && log…"; checkable: true }
+    ActionButton { id: diagnostics; objectName: "magnetDiagnostics"; text: checked ? "Hide diagnostics && log" : "Diagnostics && log…"; checkable: true }
     ColumnLayout {
         visible: diagnostics.checked; Layout.fillWidth: true
-        Label { text: "Connections: " + Object.keys(section.magnet.connections).map(k => k + " " + (section.magnet.connections[k] ? "connected" : "disconnected")).join(" · "); color: Theme.muted; wrapMode: Text.Wrap; Layout.fillWidth: true }
+        Flow {
+            Layout.fillWidth: true; spacing: 10
+            Repeater {
+                model: Object.keys(section.magnet.connections)
+                delegate: Label {
+                    required property string modelData
+                    readonly property string connectionState: section.magnet.connections[modelData] ? "connected" : "disconnected"
+                    text: (modelData === "temperature" ? "LS335" : modelData) + ": " + section.connectionText(connectionState)
+                    color: Theme.connectionColor(connectionState)
+                    width: Math.min(implicitWidth, parent.width)
+                    wrapMode: Text.Wrap
+                }
+            }
+        }
         Label { text: "APS100 thermal diagnostics: " + section.magnet.thermalStatus; visible: section.magnet.backend !== "1000"; color: Theme.muted; wrapMode: Text.Wrap; Layout.fillWidth: true }
-        ScrollView { Layout.fillWidth: true; Layout.preferredHeight: 180; TextArea { text: section.magnet.logText; readOnly: true; selectByMouse: true; wrapMode: TextEdit.Wrap } }
-        ActionButton { text: "Clear magnet log"; onClicked: section.magnet.clearLog() }
+        Flickable {
+            id: magnetLog
+            objectName: "magnetLogView"
+            Layout.fillWidth: true; Layout.preferredHeight: 180
+            clip: true
+            contentWidth: width
+            contentHeight: magnetLogText.contentHeight
+            boundsBehavior: Flickable.StopAtBounds
+            property bool followLatest: true
+            function jumpToLatest() { contentY = Math.max(0, contentHeight - height) }
+            onFollowLatestChanged: if (followLatest) Qt.callLater(jumpToLatest)
+            onContentHeightChanged: if (followLatest) Qt.callLater(jumpToLatest)
+            onHeightChanged: if (followLatest) Qt.callLater(jumpToLatest)
+            onMovementStarted: followLatest = false
+            ScrollBar.vertical: ScrollBar { onPressedChanged: if (pressed) magnetLog.followLatest = false }
+            WheelHandler {
+                onWheel: function(event) {
+                    magnetLog.followLatest = false
+                    const delta = event.pixelDelta.y !== 0 ? event.pixelDelta.y : event.angleDelta.y / 120 * 40
+                    magnetLog.contentY = Math.max(0, Math.min(magnetLog.contentHeight - magnetLog.height, magnetLog.contentY - delta))
+                    event.accepted = true
+                }
+            }
+            TextEdit {
+                id: magnetLogText
+                width: magnetLog.width
+                text: section.magnet.logText
+                readOnly: true; selectByMouse: true; wrapMode: TextEdit.Wrap
+                color: Theme.text
+                Accessible.name: "Magnet log"
+            }
+        }
+        RowLayout {
+            ActionButton { text: "Clear magnet log"; onClicked: section.magnet.clearLog() }
+            ActionButton {
+                objectName: "latestMagnetLog"
+                text: "Latest"
+                Accessible.name: "Jump to latest magnet log"
+                onClicked: { magnetLog.followLatest = true; magnetLog.jumpToLatest() }
+            }
+        }
     }
 }

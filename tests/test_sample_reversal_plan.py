@@ -25,6 +25,9 @@ class SampleReversalPlanTests(unittest.TestCase):
         params = build_params(values, 5)
         self.assertEqual((params.sample_reversal_mode, params.sample_reversal_settle_s), ('whole_sweep', 4.5))
         self.assertEqual(TransportSweepPlan.from_params(params).params.sample_reversal_mode, 'whole_sweep')
-        self.assertTrue(any(s.get('title') == 'Sample B current reversal' for s in measurement_sections(values, 5)))
+        fields = {field['key']: field for section in measurement_sections(values, 5)
+                  for field in section.get('fields', [])}
+        self.assertEqual(fields['sample_reversal_mode']['value'], 'whole_sweep')
+        self.assertEqual(fields['sample_reversal_settle_s']['value'], 4.5)
 
 if __name__ == '__main__': unittest.main()

@@ -2,6 +2,15 @@
 import math
 
 
+def reduced_rate_table(rates, coil_constant, factor):
+    """Quantize a reduced per-band rate without exceeding the captured rate."""
+    unit = float(coil_constant) * 60.0 * .0001
+    if not math.isfinite(unit) or unit <= 0 or not math.isfinite(factor) or not 0 < factor <= 1:
+        raise ValueError("Invalid APS100 reduced rate parameters")
+    return {i: (boundary, min(rate, max(unit, math.floor(rate * factor / unit + 1e-10) * unit)))
+            for i, (boundary, rate) in rates.items()}
+
+
 def validate_rate_table(rates, coil_constant, max_current_a, max_rate_a_per_s, extent_t):
     coil, current_cap, rate_cap, extent = map(float, (coil_constant, max_current_a, max_rate_a_per_s, extent_t))
     if not all(math.isfinite(x) and x > 0 for x in (coil, current_cap, rate_cap, extent)) or extent / coil > current_cap + 1e-9:

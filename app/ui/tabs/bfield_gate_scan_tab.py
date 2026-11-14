@@ -11,6 +11,9 @@ from utils.config import cfg
 from app.engine.gate_scan_field_batch import GateScanFieldBatch
 from app.gate_scan_summary import format_gate_scan_condition
 from app.models import GateScanCondition
+from app.models import BFIELD_RATE_DISPLAY_SCALE
+from app.settings import get_app_settings
+from app.engine.bfield_transport_sweep import rate_a_per_s_to_t_per_min
 from app.ui.tabs.gate_scan_tab import GateScanTab
 from app.ui.widgets.collapsible_section import CollapsibleSection
 from app.ui.widgets.expandable_line_edit import ExpandableLineEdit
@@ -58,6 +61,23 @@ class BFieldGateScanTab(GateScanTab):
         self.log.setMaximumBlockCount(5000)
         self.run_panel.lbl_status.setWordWrap(True)
         self.run_panel.lbl_status.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+
+    def get_field_control_settings(self):
+        rate = self.bfield_rate.value() / BFIELD_RATE_DISPLAY_SCALE
+        approach = self.bfield_approach.currentData()
+        settings = get_app_settings()
+        settings.beginGroup(self.SETTINGS_PREFIX)
+        settings.setValue("field_rate_t_per_min", rate)
+        settings.setValue("field_approach", approach)
+        settings.setValue("field_settle_s", self.bfield_extra_settle.value())
+        settings.endGroup()
+        return {"field_approach": approach, "rate_t_per_min": rate, "field_settle_s": self.bfield_extra_settle.value()}
+
+    def set_batch_locked(self, locked):
+        super().set_batch_locked(locked)
+        self.bfield_rate.setEnabled(not locked)
+        self.bfield_approach.setEnabled(not locked)
+        self.bfield_extra_settle.setEnabled(not locked)
 
     def _build_condition_header(self):
         """Pin selection and save feedback above the scrolling editor."""
@@ -142,7 +162,7 @@ class BFieldGateScanTab(GateScanTab):
 
         intro = QtWidgets.QLabel(
             "Save one or more Gate Scan conditions, then run each condition "
-            "at the B fields below in the listed order."
+            "at the B fields below in the listed order. For each field: move → stability → extra settle → gate scan."
         )
         intro.setWordWrap(True)
         intro.setProperty("role", "hint")
@@ -168,6 +188,37 @@ class BFieldGateScanTab(GateScanTab):
         field_row.addWidget(self.btn_series_more)
         layout.addLayout(field_row)
         layout.addWidget(self.bfield_fields.field_widget())
+
+        self.bfield_control_row = QtWidgets.QWidget()
+        self.bfield_control_row.setVisible(cfg.setup.magnet_backend == "1000")
+        control_row = QtWidgets.QHBoxLayout(self.bfield_control_row)
+        control_row.setContentsMargins(0, 0, 0, 0)
+        control_row.addWidget(QtWidgets.QLabel("Rate (Oe/s):"))
+        self.bfield_rate = QtWidgets.QDoubleSpinBox()
+        self.bfield_rate.setDecimals(6)
+        self.bfield_rate.setRange(0.000001, rate_a_per_s_to_t_per_min(cfg.magnet.gate_scan_rate_a_per_s) * BFIELD_RATE_DISPLAY_SCALE)
+        control_row.addWidget(self.bfield_rate)
+        control_row.addWidget(QtWidgets.QLabel("Approach:"))
+        self.bfield_approach = QtWidgets.QComboBox()
+        for value, title in (("linear", "Linear"), ("no_overshoot", "No Overshoot"), ("oscillate", "Oscillate")):
+            self.bfield_approach.addItem(title, value)
+        self.bfield_approach.setToolTip("No Overshoot slows near target; Oscillate crosses the target before settling.")
+        control_row.addWidget(self.bfield_approach)
+        layout.addWidget(self.bfield_control_row)
+        settle_row = QtWidgets.QHBoxLayout()
+        settle_row.addWidget(QtWidgets.QLabel("Extra settle delay (s):"))
+        self.bfield_extra_settle = QtWidgets.QDoubleSpinBox()
+        self.bfield_extra_settle.setRange(0, 86400)
+        self.bfield_extra_settle.setDecimals(2)
+        self.bfield_extra_settle.setToolTip("Additional wait after field stability and thermal qualification, before the gate scan.")
+        settle_row.addWidget(self.bfield_extra_settle)
+        layout.addLayout(settle_row)
+        settings = get_app_settings()
+        settings.beginGroup(self.SETTINGS_PREFIX)
+        self.bfield_rate.setValue(float(settings.value("field_rate_t_per_min", rate_a_per_s_to_t_per_min(cfg.magnet.gate_scan_rate_a_per_s))) * BFIELD_RATE_DISPLAY_SCALE)
+        self.bfield_approach.setCurrentIndex(max(0, self.bfield_approach.findData(str(settings.value("field_approach", "linear")))))
+        self.bfield_extra_settle.setValue(float(settings.value("field_settle_s", 0)))
+        settings.endGroup()
 
         self.bfield_help = QtWidgets.QLabel(
             "Points: (-2, 2, 9). Step: -2:2:0.5. Both endpoints are included; "
@@ -779,6 +830,7 @@ class BFieldGateScanTab(GateScanTab):
 
     def set_batch_magnet_context(self, backend_name):
         self._bfield_backend = str(backend_name or "1000")
+        self.bfield_control_row.setVisible(self._bfield_backend == "1000")
         self._update_connection_hint()
 
     def start_series(self):

@@ -7,15 +7,18 @@ from app.quick.parameters import defaults, measurement_sections
 class MeasurementPresentationTests(unittest.TestCase):
     def test_six_pages_keep_trajectory_and_bias_visible_without_mutating_recipe(self):
         for mode, title in enumerate(("Vds trajectory", "Gate trajectory", "Map trajectory",
-                                      "Wavelength trajectory", "Magnetic field targets", "Magnetic field trajectory")):
+                                      "Wavelength trajectory", "Magnetic field targets", "1 · Sweep")):
             with self.subTest(mode=mode):
                 values = defaults(mode)
                 original = copy.deepcopy(values)
                 sections = measurement_sections(values, mode)
                 by_title = {section['title']: section for section in sections}
                 self.assertFalse(by_title[title].get('collapsedByDefault', False))
-                self.assertTrue(by_title['Acquisition']['collapsedByDefault'])
-                self.assertTrue(by_title['Acquisition']['summary'])
+                if mode == 5:
+                    self.assertFalse(by_title['3 · Measure'].get('collapsedByDefault', False))
+                else:
+                    self.assertTrue(by_title['Acquisition']['collapsedByDefault'])
+                    self.assertTrue(by_title['Acquisition']['summary'])
                 self.assertEqual(values, original)
                 if mode < 4:
                     bias = by_title['Bias 2']
@@ -26,11 +29,11 @@ class MeasurementPresentationTests(unittest.TestCase):
         values = defaults(5)
         values['measurement_mode'] = 'stepped'
         sections = {s['title']: s for s in measurement_sections(values, 5)}
-        primary = sections['Stepped field and temperature']
+        primary = sections['2 · Wait at each point']
         self.assertFalse(primary.get('collapsedByDefault', False))
         self.assertIn('temperature_target_k', [f['key'] for f in primary['fields']])
-        stability = sections['Temperature stability and timeout']
-        self.assertTrue(stability['collapsedByDefault'])
+        stability = sections['Temperature limits']
+        self.assertTrue(stability['advanced'])
         self.assertIn('temperature_timeout_s', [f['key'] for f in stability['fields']])
         self.assertTrue(stability['summary'])
         other = {s['title']: s for s in measurement_sections(defaults(0), 0)}

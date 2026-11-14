@@ -2,6 +2,7 @@
 import math
 import re
 from dataclasses import dataclass
+from decimal import Decimal, ROUND_HALF_UP
 
 # Tektronix Models 2400/2401 specifications, source resolution (not accuracy).
 # https://www.tek.com/en/documents/specification/models-2400-2401-2400-lv-and-2400-c-sourcemeter-specifications
@@ -51,25 +52,41 @@ def source_resolution_status(session):
 def source_resolution(session):
     return source_resolution_status(session).quantum
 
+
+def round_voltage(value, quantum):
+    """Nearest source tick, with exact decimal half-ticks away from zero."""
+    value, quantum = float(value), float(quantum)
+    if not math.isfinite(value) or not math.isfinite(quantum) or quantum <= 0:
+        raise ValueError("Voltage and source resolution must be finite; resolution must be positive.")
+    tick = (Decimal(str(value)) / Decimal(str(quantum))).to_integral_value(rounding=ROUND_HALF_UP)
+    result = float(tick * Decimal(str(quantum)))
+    return result if result else 0.0
+
+
+def rounded_source_target(session, target, label="Keithley", *, limit=None):
+    """Validate both the requested and rounded voltage before any output."""
+    quantum = validate_source_targets(session, (target,), label)
+    rounded = round_voltage(target, quantum)
+    if limit is not None:
+        limit = float(limit)
+        if not math.isfinite(limit) or limit <= 0 or max(abs(float(target)), abs(rounded)) > limit + 1e-12:
+            raise ValueError(f"{label} requested or rounded target exceeds verified {limit:g} V protection.")
+    return rounded
+
+
 def validate_voltage_points(points, resolutions):
-    """Check physical outputs, including fixed values and derived coordinates."""
-    labels = {"vtg":"Vtg", "vbg":"Vbg", "vds":"Vds"}
+    """Resolve physical outputs in place; preserve requested trajectory coordinates."""
     for point in points:
         for axis, quantum in resolutions.items():
-            value = point[axis]
-            ticks = value / quantum
-            if not math.isfinite(ticks) or abs(ticks - round(ticks)) > 1e-7:
-                nearest = round(ticks) * quantum if math.isfinite(ticks) else 0
-                raise ValueError(f"{labels[axis]} target {value:.9g} V is not representable on the cached source range: "
-                                 f"resolution {quantum:.9g} V. Nearest target {nearest:.9g} V. "
-                                 "Adjust Start/Stop/Step (or derived ratio); no rounding was applied.")
+            point[axis] = round_voltage(point[axis], quantum)
 
 
 def validate_source_targets(session, targets, label, ramp_step=None, refresh=False):
     """Validate the physical setpoints of one Keithley against its active range.
 
     When requested, perform one read-only range query before validating the
-    complete trajectory. No target is silently rounded.
+    complete trajectory. Off-grid targets use the nearest programming increment.
+    This check does not mutate the caller's requested values.
     """
     if session is None:
         raise ValueError(f"{label}: source is not connected.")
@@ -97,7 +114,10 @@ def validate_source_targets(session, targets, label, ramp_step=None, refresh=Fal
             raise ValueError(f"{label} target must be finite.")
         if abs(value) > source_range + quantum * 1e-7:
             raise ValueError(f"{label} target {value:.9g} V exceeds the {source_range:g} V source range.")
-        if abs(ticks - round(ticks)) > 1e-7:
-            nearest = round(ticks) * quantum
-            raise ValueError(f"{label} target {value:.9g} V is not representable at {quantum:g} V source resolution. Nearest target {nearest:.9g} V; no rounding was applied.")
+        rounded = round_voltage(value, quantum)
+        if abs(rounded) > source_range + quantum * 1e-7:
+            raise ValueError(f"{label} rounded target {rounded:.9g} V exceeds the {source_range:g} V source range.")
+        limit = getattr(session, "_max_source_voltage", None)
+        if limit is not None and max(abs(value), abs(rounded)) > float(limit) + 1e-12:
+            raise ValueError(f"{label} requested or rounded target exceeds configured {float(limit):g} V protection.")
     return quantum

@@ -5,7 +5,7 @@ from unittest.mock import Mock, patch
 
 from PySide6 import QtCore
 from app.models import BFieldTransportParams
-from app.engine.bfield_transport_sweep import TransportSweepPlan
+from app.engine.bfield_transport_sweep import TransportSweepPlan, aps100_transport_field_limit
 from app.engine.bfield_transport_controller import BFieldTransportController
 from app.engine.transport_stability import TemperatureWindow
 
@@ -84,6 +84,8 @@ class SteppedTransportTests(unittest.TestCase):
         history = dict(min_t=target, max_t=target, start_t=target, end_t=target,
                        max_reverse_t=0., started_monotonic_s=self.now - .1,
                        finished_monotonic_s=self.now, read_count=2, direction=direction, complete=True)
+        if initial:
+            history['preparation_stable'] = True
         return {"success": True, "monotonic_direction": direction, "field_history": history}
 
     def pause_at_point(self):
@@ -221,7 +223,7 @@ class SteppedTransportTests(unittest.TestCase):
         c._io_lane = NS(submit=lambda work, callback: queued.append((work, callback)))
         self.pause_at_point()
         self.settle()
-        self.reading(108, field=-.0122)
+        self.reading(108, field=-aps100_transport_field_limit()-.001)
         self.assertTrue(c._cleanup_in_progress)
         self.assertEqual(len(self.magnet.moves), 1)
         self.assertEqual(c._sample_pending, 1)
@@ -245,7 +247,8 @@ class SteppedTransportTests(unittest.TestCase):
         for when in range(101, 108):
             self.reading(when, temperature=4.2)
         self.reading(108)
-        self.assertTrue(self.controller._cleanup_in_progress)
+        self.assertFalse(self.controller._thermal_hold)
+        self.assertFalse(self.controller._cleanup_in_progress)
         self.assertEqual(self.acquisitions, [])
 
     def test_out_of_range_during_acquisition_records_quality_failure(self):
@@ -255,33 +258,43 @@ class SteppedTransportTests(unittest.TestCase):
         self.pause_at_point()
         self.settle()
         c._log = Mock()
-        self.reading(108, field=-.0122)
+        self.reading(108, field=-aps100_transport_field_limit()-.001)
         self.assertTrue(c._cleanup_in_progress)
         self.assertTrue(any("quality_failed" in args[0] for args, _ in c._log.call_args_list))
         self.assertEqual(c._results, [])
 
-    def test_wrong_temperature_times_out_and_aborts(self):
+    def test_wrong_temperature_times_out_then_automatically_qualifies(self):
         c = self.controller
         self.pause_at_point()
         for when in range(101, 115):
             self.reading(when, temperature=4.2)
-        self.assertTrue(c._cleanup_in_progress)
+        self.assertFalse(c._thermal_hold)
+        self.assertFalse(c._cleanup_in_progress)
         self.assertEqual(self.acquisitions, [])
         self.assertEqual(len(self.magnet.moves), 1)
+        for when in range(115, 121):
+            self.reading(when, temperature=4.)
+        self.assertEqual(len(c._results), 1)
 
-    def test_missing_motion_history_fails_closed(self):
+    def test_missing_motion_history_requires_fresh_qualification(self):
         c = self.controller
         c._move_step()
         c._on_safe_move({"success": True})
-        self.assertTrue(c._cleanup_in_progress)
+        self.assertFalse(c._cleanup_in_progress)
+        self.assertEqual(c._measurement_phase, 'step_pausing')
         self.assertEqual(self.acquisitions, [])
+        c._on_magnet_operation('pause')
+        self.settle()
+        self.reading(106)
+        self.assertEqual(len(c._results), 1)
+        self.assertIn('history_uncertain', c._results[0]['Field_quality_warning'])
 
     def test_moving_or_out_of_band_field_cannot_qualify(self):
         self.pause_at_point()
         for when in range(101, 108):
             self.reading(when, active=True)
         self.assertEqual(self.acquisitions, [])
-        self.reading(108, field=.011)
+        self.reading(108, field=aps100_transport_field_limit()+.001)
         self.assertTrue(self.controller._cleanup_in_progress)
         self.assertEqual(self.acquisitions, [])
 

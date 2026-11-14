@@ -7,13 +7,16 @@ from app.drag_drive import DUAL_SIGNALS, measurement_mode
 BASE_PLOT_CHANNELS = ["Ids_DC", "Ids_X", "Ids_Y"]
 KEITHLEY_CHANNEL = "Ids_Keithley"
 COMPARE_CHANNELS = ["Ids_DC", KEITHLEY_CHANNEL, "Ids_Y", "Ids_X"]
+B_FIELD_DIAGNOSTIC_CHANNELS = ["raw_X", "raw_Y", "raw_DC", "Vds_measured",
+                               "Sample_temperature_K", "Reservoir_temperature_K"]
 
 
 def has_keithley_channel(vds_source: str) -> bool:
     return vds_source == "Keithley 2400"
 
 
-def plot_channel_options(vds_source: str, dual: bool | dict = False, *, bias2: bool = False) -> list[str]:
+def plot_channel_options(vds_source: str, dual: bool | dict = False, *, bias2: bool = False,
+                         b_field_diagnostics: bool = False) -> list[str]:
     chain = dual if isinstance(dual, dict) else {'drag_drive': {'enabled': dual}}
     mode = measurement_mode(chain)
     config = chain.get('drag_drive') or {}
@@ -30,6 +33,10 @@ def plot_channel_options(vds_source: str, dual: bool | dict = False, *, bias2: b
         options.extend(DUAL_SIGNALS)
     elif mode in ('single_drag', 'single_drive'):
         options.extend(f"I_{mode[7:]}_{axis}" for axis in ('X', 'Y', 'R'))
+    if b_field_diagnostics:
+        options.extend(B_FIELD_DIAGNOSTIC_CHANNELS)
+        if mode == 'dual':
+            options.extend(('raw_drive_X', 'raw_drive_Y'))
     return options
 
 

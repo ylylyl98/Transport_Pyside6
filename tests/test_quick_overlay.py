@@ -358,6 +358,31 @@ class OverlayQmlTests(unittest.TestCase):
         self.assertEqual(self.model.channel, 'Ids_X')
         QtTest.QTest.keyClick(self.window, QtCore.Qt.Key_Escape)
 
+    def test_second_y_button_adds_temperature_on_right_without_replacing_current(self):
+        self.model.beginRun({'x_axis': 'B-field', 'channels': ['Ids_DC', 'Ids_X', 'Sample_temperature_K']})
+        self.model.setYAxes('Ids_DC', '')
+        self.model.appendRecord({'x': -.1, 'Ids_DC': 1e-9, 'Ids_X': 2e-9, 'Sample_temperature_K': 3.72})
+        self.model.appendRecord({'x': -.08, 'Ids_DC': 2e-9, 'Ids_X': 3e-9, 'Sample_temperature_K': 3.73})
+        original = self.model._traces.copy()
+        QtTest.QTest.qWait(40)
+        self.click(self.item('plotSecondYButton'))
+        self.click(self.item('axisChoice_Sample_temperature_K'))
+        self.assertEqual(self.model.channel, 'Ids_DC')
+        self.assertEqual(self.model.channels(), ['Ids_DC', 'Sample_temperature_K'])
+        self.assertEqual(self.model.layout, 'overlay')
+        self.assertEqual(self.model.overlayAxis, 'dual')
+        self.assertTrue(self.item('axisTitle_y2_0').isVisible())
+        self.assertIn('(K)', self.item('axisTitle_y2_0').property('text'))
+        self.assertEqual(self.model._traces, original)
+        self.click(self.item('plotSecondYButton'))
+        self.click(self.item('axisChoice_Ids_X'))
+        self.assertEqual(self.model.channels(), ['Ids_DC', 'Ids_X'])
+        self.click(self.item('plotSecondYButton'))
+        self.click(self.item('axisChoice_None'))
+        self.assertEqual(self.model.channels(), ['Ids_DC'])
+        self.assertEqual(self.model.layout, 'single')
+        self.assertEqual(self.model._traces, original)
+
     def test_native_two_curves_dual_axes_zoom_pan_and_bounded_cache(self):
         self.model.layout = 'overlay'
         self.model.overlayAxis = 'dual'

@@ -113,6 +113,21 @@ Pane {
             objectName: "plotExtraControls"
             spacing: 2
             ActionToolButton {
+                id: secondYButton
+                objectName: "plotSecondYButton"
+                visible: root.directAxes && root.plotModel && root.plotModel.plotCount === 1 && root.plotModel.channelOptions.length >= 2
+                text: "Second Y"
+                Accessible.name: "Choose the right Y signal"
+                ToolTip.visible: hovered
+                ToolTip.text: "Add or change the right-axis signal; keep the left signal"
+                onClicked: {
+                    axisSettings.axisRole = "secondY"
+                    axisSettings.panelChannel = root.plotModel.layout === "overlay" ? root.plotModel.overlayChannels[1] : ""
+                    axisSettings.anchorPoint = secondYButton.mapToItem(Overlay.overlay, secondYButton.width / 2, secondYButton.height / 2)
+                    axisSettings.open()
+                }
+            }
+            ActionToolButton {
                 text: root.compact ? "Options" : "Plot options"
                 Accessible.name: "Plot axes, range, layout and legend"
                 ToolTip.visible: hovered
@@ -244,17 +259,19 @@ Pane {
         property string panelChannel: ""
         property point anchorPoint: Qt.point(0, 0)
         readonly property bool isX: axisRole === "x"
+        readonly property bool isSecondY: axisRole === "secondY"
         property var choices: []
         readonly property var availableChoices: {
             if (!root.plotModel) return []
             if (isX) return ["Follow Sweep", "Step Index", "Vtg", "Vbg", "Vds", "Doping", "E-field"]
+            if (isSecondY) return ["None"].concat(root.plotModel.channelOptions.filter(function(name) { return name !== root.plotModel.channel }))
             const occupied = root.plotModel.plotCount > 1 || root.plotModel.layout === "overlay" ? root.plotModel.channelsForDisplay : []
             return root.plotModel.channelOptions.filter(function(name) { return name === panelChannel || occupied.indexOf(name) < 0 })
         }
         onAvailableChoicesChanged: {
             if (JSON.stringify(choices) !== JSON.stringify(availableChoices)) choices = availableChoices
         }
-        readonly property string currentChoice: isX && root.plotModel ? root.plotModel.xAxis : panelChannel
+        readonly property string currentChoice: isSecondY && root.plotModel ? (root.plotModel.layout === "overlay" ? root.plotModel.overlayChannels[1] : "None") : isX && root.plotModel ? root.plotModel.xAxis : panelChannel
         width: Math.min(320, parent.width - 24)
         height: Math.min(parent.height - 24, axisColumn.implicitHeight + 24)
         padding: 12
@@ -280,6 +297,10 @@ Pane {
         function choose(value) {
             if (!root.plotModel) return
             if (isX) root.plotModel.xAxis = value
+            else if (isSecondY) {
+                if (value !== "None") root.plotModel.overlayAxis = "dual"
+                root.plotModel.setYAxes(root.plotModel.channel, value === "None" ? "" : value)
+            }
             else root.plotModel.setPanelChannel(panelChannel, value)
             close()
         }
@@ -292,7 +313,7 @@ Pane {
                 spacing: 4
                 RowLayout {
                     Layout.fillWidth: true
-                    Label { text: axisSettings.isX ? "X axis" : axisSettings.axisRole === "y2" ? "Right Y axis" : "Y axis"; font.bold: true; color: Theme.text; Layout.fillWidth: true }
+                    Label { text: axisSettings.isX ? "X axis" : axisSettings.isSecondY || axisSettings.axisRole === "y2" ? "Right Y axis" : "Y axis"; font.bold: true; color: Theme.text; Layout.fillWidth: true }
                     ActionToolButton { text: "Close"; onClicked: axisSettings.close() }
                 }
                 Repeater {
@@ -320,10 +341,10 @@ Pane {
                     currentIndex: root.plotModel && root.plotModel.xRangeMode === "Acquired data" ? 1 : 0
                     onActivated: function(index) { if (root.plotModel) root.plotModel.xRangeMode = model[index] }
                 }
-                Label { visible: !axisSettings.isX && root.plotModel && root.plotModel.plotCount === 1; text: "Second Y signal"; color: Theme.muted }
+                Label { visible: !axisSettings.isX && !axisSettings.isSecondY && root.plotModel && root.plotModel.plotCount === 1; text: "Second Y signal"; color: Theme.muted }
                 SelectBox {
                     objectName: "axisTitleSecondY"
-                    visible: !axisSettings.isX && root.plotModel && root.plotModel.plotCount === 1
+                    visible: !axisSettings.isX && !axisSettings.isSecondY && root.plotModel && root.plotModel.plotCount === 1
                     Layout.fillWidth: true
                     model: root.plotModel ? ["None"].concat(root.plotModel.channelOptions.filter(function(name) { return name !== root.plotModel.channel })) : ["None"]
                     currentIndex: root.plotModel && root.plotModel.layout === "overlay" ? model.indexOf(root.plotModel.overlayChannels[1]) : 0
@@ -385,7 +406,7 @@ Pane {
                     wheelEnabled: false
                     onActivated: if (root.plotModel) root.plotModel.xAxis = currentText
                 }
-                Label { visible: !root.directAxes && root.showChannelSelector && root.plotModel && !root.plotModel.isHeatmap && root.plotModel.layout === "single"; text: "Current channel"; color: Theme.muted }
+                Label { visible: !root.directAxes && root.showChannelSelector && root.plotModel && !root.plotModel.isHeatmap && root.plotModel.layout === "single"; text: "Y signal"; color: Theme.muted }
                 SelectBox {
                     visible: !root.directAxes && root.showChannelSelector && root.plotModel && !root.plotModel.isHeatmap && root.plotModel.layout === "single"
                     Layout.fillWidth: true

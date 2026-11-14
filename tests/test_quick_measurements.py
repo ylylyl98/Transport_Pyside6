@@ -637,14 +637,33 @@ class QuickMeasurementTests(unittest.TestCase):
         self.app.processEvents()
         self.assertEqual(records, [])
 
-    def test_map_resolution_blocks_unrepresentable_physical_target(self):
+    def test_map_resolution_rounds_physical_target_without_changing_recipe(self):
         self.service.mode = 2
         self.service.setValue("vtg_start", .0001)
         self.service.setValue("vtg_stop", .0001)
-        self.service.start()
-        self.assertIsNone(self.service.worker)
-        self.assertIn("representable", self.service.message)
+        params = self.service.collect_params()
+        _, points = self.service._validate(params, 2)
+        self.assertTrue(all(point['vtg'] == 0. for point in points))
+        self.assertEqual(params.vtg_start, .0001)
         self.assertFalse(self.manager.claimed)
+
+    def test_bfield_rate_editor_uses_oe_per_second_and_keeps_internal_units(self):
+        self.service.mode = 5
+        self.service.setValue("measurement_mode", "continuous")
+        self.service._values[5]['rate_t_per_min'] = .12
+        field = self.ui_fields()['rate_t_per_min']
+        self.assertEqual(field['label'], 'Sweep rate (Oe/s)')
+        section = next(s for s in self.service.uiSections if any(f['key'] == 'rate_t_per_min' for f in s.get('fields', [])))
+        self.assertIn('Rate limit: ', section['samplingText'])
+        self.assertNotIn('T/min', section['samplingText'])
+        self.assertNotIn('Current request', section['samplingText'])
+        self.assertAlmostEqual(field['value'], 20.)
+        self.service.setValue('rate_t_per_min', '30')
+        self.assertAlmostEqual(self.service.collect_params().rate_t_per_min, .18)
+        self.assertIn('30 Oe/s', self.service.summary)
+        self.service.mode = 0
+        self.service.mode = 5
+        self.assertAlmostEqual(self.ui_fields()['rate_t_per_min']['value'], 30.)
 
     def test_fixed_zero_gates_are_validated_and_reserved_when_connected(self):
         for mode in (0, 2, 3):
@@ -1076,7 +1095,8 @@ class QuickMeasurementTests(unittest.TestCase):
         self.assertTrue(magnet.owner)
         self.assertTrue(self.manager.claimed)
         self.assertEqual(prepared[0]["planned_ranges"]["B-field"], (-.5, .5))
-        self.assertEqual(set(prepared[0]["channels"]), {"Ids_DC", "Ids_X", "Ids_Y", "Ids_Keithley"})
+        self.assertEqual(set(prepared[0]["channels"]), {"Ids_DC", "Ids_X", "Ids_Y", "Ids_Keithley",
+            "raw_X", "raw_Y", "raw_DC", "Vds_measured", "Sample_temperature_K", "Reservoir_temperature_K"})
         service.accept_transport_record(dict(B_measured_T=.1, Direction="backward", Condition_index=2,
             Index=3, Vtg=0., Vbg=0., Vds=0., Doping=0., **{"E-field": 0.}))
         self.assertEqual(records[0]["x"], .1)

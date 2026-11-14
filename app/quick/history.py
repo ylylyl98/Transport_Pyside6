@@ -56,6 +56,14 @@ def _read_display(records, view, kind, cache, *, resolve_options=True):
     choices = resolve_choices(records, view, kind, cache) if resolve_options else None
     if choices is not None:
         view = choices["view"]
+        if kind == "bfield_transport" and view.get("layout") in ("overlay", "two"):
+            available = choices["signals"]
+            pair = [c for c in view.get("overlay_channels", []) if c in available]
+            pair = list(dict.fromkeys(pair + available))[:2]
+            if len(pair) == 2:
+                view = {**view, "overlay_channels": pair, "signal": pair[0]}
+            else:
+                view = {**view, "layout": "single", "four_channels": False}
     overlay = view.get("layout") in ("overlay", "two")
     if (overlay or view.get("four_channels")) and (kind != "map_2d" or view["map_y"] == "None (1D)"):
         panels, panel_traces = {}, {}
@@ -124,7 +132,7 @@ def _read_display(records, view, kind, cache, *, resolve_options=True):
                 "x_name": x_name, "x_unit": traces[0].x_unit if traces else "",
                 "y_unit": traces[0].y_unit if traces else primary.signal_unit if primary else "",
                 "records": exported, "traces": [{"path": str(t.path), "x": t.x.copy(), "y": t.y.copy(),
-                "direction": t.direction, "condition": t.condition} for t in traces],
+                "direction": t.direction, "condition": t.condition, "reversal_warning": t.reversal_warning.copy()} for t in traces],
                 "warnings": list(warnings), "view": actual,
                 "_coverage_paths": sorted({str(t.path) for t in traces if np.any(np.isfinite(t.x) & np.isfinite(t.y))})}
     if primary:
@@ -521,7 +529,9 @@ class HistoryBackend(QtCore.QObject):
         if not channels:
             return ''
         saved = self._views[self._kind].get('range_channel', '')
-        return saved if saved in channels else channels[0]
+        if saved in channels:
+            return saved
+        return self._plot.channel if self._plot.channel in channels else channels[0]
 
     @QtCore.Slot(str)
     def setRangeChannel(self, channel):
@@ -611,7 +621,19 @@ class HistoryBackend(QtCore.QObject):
 
     def _remember_plot_view(self):
         if self._snapshot and not self._publishing:
-            self._views[self._kind].update(self.capture_view())
+            previous = self._views[self._kind]
+            updated = self.capture_view()
+            if self._kind == "bfield_transport":
+                updated["layout"] = self._plot.layout
+                updated["signal"] = self._plot.channel
+                updated["four_channels"] = self._plot.fourChannels
+                if updated["signal"] != previous.get("signal"):
+                    updated["signal_explicit"] = True
+            semantic_keys = ("layout", "signal", "overlay_channels", "channel_order")
+            changed = any(previous.get(k) != updated.get(k) for k in semantic_keys)
+            previous.update(updated)
+            if changed and self._kind == "bfield_transport":
+                self._schedule_plot()
             # Mouse moves update only range controls. Rebuilding every history
             # property and serializing all settings per move delays dragging.
             self._view_save_timer.start()
@@ -788,10 +810,14 @@ class HistoryBackend(QtCore.QObject):
                 # requested single channel; the saved overview is explicit.
                 self._views[self._kind]["four_channels"] = False
                 self._views[self._kind]["layout"] = "single"
-                self._plot.layout = "single"
-                self._plot.fourChannels = False
                 self._views[self._kind]["clim_auto"] = True
-                self._plot.autoColorLimits()
+                # These programmatic resets emit viewChanged while the plot
+                # still contains the previous signal. Do not capture that
+                # stale view over the requested worker state.
+                with QtCore.QSignalBlocker(self._plot):
+                    self._plot.layout = "single"
+                    self._plot.fourChannels = False
+                    self._plot.autoColorLimits()
             if key in ("x", "map_y"):
                 self._views[self._kind]["auto_axes"] = False
             self._schedule_plot()
@@ -971,7 +997,10 @@ class HistoryBackend(QtCore.QObject):
         choices = snapshot.get("choices")
         if choices is not None:
             self._available = choices
-            for key in ("signal", "x", "map_y", "primary_path", "fixed_axis", "fixed_value"):
+            resolved_keys = ("signal", "x", "map_y", "primary_path", "fixed_axis", "fixed_value")
+            if self._kind == "bfield_transport":
+                resolved_keys += ("layout", "four_channels", "overlay_channels")
+            for key in resolved_keys:
                 if key in snapshot["view"]:
                     self._views[self._kind][key] = snapshot["view"][key]
         # A pan can arrive while the worker is reading. Keep the latest GUI
@@ -981,7 +1010,7 @@ class HistoryBackend(QtCore.QObject):
                                            ("x", "map_y", "primary_path", "fixed_axis", "fixed_value")})
         # Use the same semantic legends as analysis PNGs.
         labels = comparison_labels(snapshot["records"], snapshot["traces"])
-        rows = [{"x": t.x, "y": t.y, "label": " · ".join(dict.fromkeys(label.split(" · "))), "direction": t.direction} for t, label in zip(traces, labels)]
+        rows = [{"x": t.x, "y": t.y, "label": " · ".join(dict.fromkeys(label.split(" · "))), "direction": t.direction, "reversal_warning": t.reversal_warning} for t, label in zip(traces, labels)]
         if snapshot.get("panels"):
             rows = []
             for channel, panel in snapshot["panels"].items():
@@ -999,6 +1028,9 @@ class HistoryBackend(QtCore.QObject):
         else:
             panel_labels = {c: comparison_y_label(c, p["y_unit"], snapshot["view"]["normalization"])
                             for c, p in snapshot.get("panels", {}).items()}
+            if self._kind == "bfield_transport":
+                self._plot.setTraces([])
+                self._plot.setChannelOptions(self._available["signals"])
             self._plot.setTraces(rows, x_label, y_label, panel_labels)
             self._cut.setTraces([])
             self._passes = []

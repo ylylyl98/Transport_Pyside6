@@ -32,13 +32,16 @@ from app.engine.bfield_transport_sweep import (
 )
 from app.run_output import build_planned_output
 from app.drag_drive import acquisition_columns, measurement_mode, dual_enabled, acquire_current_sample
+from app.engine.field_sampling import FieldAssociation
 from app.bias_control import validate_bias2, bias2_target, ramp_bias2, zero_bias2, read_bias2, ramp_pair
 from app.signal_chain import signal_chain_metadata
 from app.utils import safe_ramp
+from app.models import BFIELD_RATE_DISPLAY_SCALE
 from utils.config import cfg
 from app.engine.aps100_rate_table import field_move_seconds
 from app.engine.transport_tasks import TaskLane
 from app.engine.stepped_transport import SteppedTransportMixin, STEP_COLUMNS
+from app.engine.continuous_transport import CONTINUOUS_COLUMNS, ContinuousTransportMixin
 
 
 def __getattr__(name):
@@ -48,7 +51,7 @@ def __getattr__(name):
     raise AttributeError(name)
 
 
-class BFieldTransportController(SteppedTransportMixin, QtCore.QObject):
+class BFieldTransportController(ContinuousTransportMixin, SteppedTransportMixin, QtCore.QObject):
     continuation_changed = QtCore.Signal(bool, bool, str)
     state_changed = QtCore.Signal(str, str)
     progress_changed = QtCore.Signal(int, int, str)
@@ -183,6 +186,11 @@ class BFieldTransportController(SteppedTransportMixin, QtCore.QObject):
         return self._active
 
     def _enable_background_work(self):
+        self._continuous_wait = None
+        self._continuous_wait_bypass = False
+        self._continuous_resume_pending = False
+        self._continuous_previous_readback = None
+        self._continuous_segment = 0
         self._thermal_manual_required = False
         self._thermal_hold = False
         self._thermal_pause_pending = False
@@ -216,6 +224,10 @@ class BFieldTransportController(SteppedTransportMixin, QtCore.QObject):
     def _check_io_cancel(self):
         if self._io_cancel.is_set():
             raise RuntimeError("Transport operation cancelled")
+
+    def _acquisition_timeout_s(self):
+        p = self.plan.params
+        return max(180., float(cfg.magnet.operation_timeout_s)) + max(0, p.averages - 1) * p.read_delay_s
 
     def _biases_ready(self, _value, error):
         self._bias_inflight = False
@@ -265,6 +277,7 @@ class BFieldTransportController(SteppedTransportMixin, QtCore.QObject):
         self.continuation_changed.emit(True, False, str(reason))
         if not self._active or self._cleanup_in_progress or self._monitor_hold is not None:
             return
+        self._note_continuous_interruption(reason)
         if (self._is_stepped() and self.plan.params.magnet_backend == "1000"
                 and "APS100" in str(reason) and getattr(self, "_point_history", {})):
             self._hysteresis_history_gap = True
@@ -375,10 +388,11 @@ class BFieldTransportController(SteppedTransportMixin, QtCore.QObject):
             params = self.tab.collect_params()
             self.plan = TransportSweepPlan.from_params(params)
             self._reversal_preflight()
-            if self._is_stepped():
+            if self._is_stepped() or params.wait_for_temperature:
                 warning = getattr(getattr(self.thermal_safety, "config", cfg.lakeshore335), "sample_warning_temperature_k", None)
                 if warning is not None and params.temperature_target_k + params.temperature_tolerance_k >= float(warning):
-                    raise BFieldTransportSafetyError("Stepped temperature target/tolerance overlaps the sample warning limit")
+                    raise BFieldTransportSafetyError("Temperature target/tolerance overlaps the sample warning limit")
+            if self._is_stepped():
                 if not hasattr(self.magnet, "operation_finished"):
                     raise BFieldTransportSafetyError("Stepped transport requires acknowledged APS100 pause operations")
             if hasattr(self.tab, "freeze_output_plan"):
@@ -515,7 +529,7 @@ class BFieldTransportController(SteppedTransportMixin, QtCore.QObject):
             ):
                 self._writers[index] = TransportCsvWriter(
                     csv_path, condition, extra_columns=(*acquisition_columns(self._signal_chain), "Bias2", "Ibias2_Keithley")
-                    + (STEP_COLUMNS if self._is_stepped() else ()))
+                    + (STEP_COLUMNS if self._is_stepped() else CONTINUOUS_COLUMNS))
             self._active = True
             self._enable_background_work()
             self._stop_requested = False
@@ -1019,7 +1033,9 @@ class BFieldTransportController(SteppedTransportMixin, QtCore.QObject):
                 failures = result.get("failures") or [result.get("error", "APS100 restore failed")]
                 self._cleanup_failures.extend(failures)
                 actual = result.get("actual_rates_t_per_min")
-                detail = "; ".join(failures) + f". Actual RATE readback (range A, T/min): {actual if actual is not None else 'unavailable'}"
+                displayed = ({i: (boundary, rate * BFIELD_RATE_DISPLAY_SCALE) for i, (boundary, rate) in actual.items()}
+                             if actual is not None else 'unavailable')
+                detail = "; ".join(failures) + f". Actual RATE readback (range A, Oe/s): {displayed}"
                 self._log("APS100 SETTINGS NOT RESTORED: " + detail)
                 self.restoration_warning.emit(detail)
             else:
@@ -1142,9 +1158,9 @@ class BFieldTransportController(SteppedTransportMixin, QtCore.QObject):
                 },
             }
             rate_detail = (
-                "APS100 rates captured: normal ranges A/s and T/min; "
+                "APS100 rates captured: normal ranges A/s and Oe/s; "
                 f"Fast Mode RATE? 5={float(fast_rate_a):.7g} A/s "
-                f"({float(fast_rate_t):.7g} T/min), read-only"
+                f"({float(fast_rate_t) * BFIELD_RATE_DISPLAY_SCALE:.7g} Oe/s), read-only"
             )
             self._log(rate_detail + "; RATE 5 unchanged")
             self.state_changed.emit("configuring", rate_detail)
@@ -1157,9 +1173,10 @@ class BFieldTransportController(SteppedTransportMixin, QtCore.QObject):
                     voltage_limit_v=result.get("voltage_limit_v"),
                     coil_constant=result["coil_constant_t_per_a"],
                 )
+            self._verify_continuous_rates(effective_rates, result["coil_constant_t_per_a"])
         except Exception as exc:
             self._fail(str(exc)); return
-        self._log("APS100 requested maximum " + f"{self.plan.params.rate_t_per_min:g} T/min; actual range rates " + ", ".join(f"{i}: ≤{boundary:g} A at {rate:g} T/min" for i, (boundary, rate) in effective_rates.items()))
+        self._log("APS100 requested maximum " + f"{self.plan.params.rate_t_per_min * BFIELD_RATE_DISPLAY_SCALE:g} Oe/s; actual range rates " + ", ".join(f"{i}: ≤{boundary:g} A at {rate * BFIELD_RATE_DISPLAY_SCALE:g} Oe/s" for i, (boundary, rate) in effective_rates.items()))
         if self._monitor_hold is not None:
             self._monitor_hold["phase"] = "positioning"
             return
@@ -1188,14 +1205,16 @@ class BFieldTransportController(SteppedTransportMixin, QtCore.QObject):
         latest = self._latest_magnet()
         current = float(getattr(latest, "field_t", self.plan.params.start_field_t))
         expected = self._field_move_seconds(current, self.plan.params.start_field_t)
-        directed = self._is_stepped() and self.plan.params.magnet_backend == "1000"
+        directed = self._strict_field_history()
+        approach_options = ({"field_approach": self._field_approach()}
+                            if not directed and self.plan.params.magnet_backend == "1000" else {})
         self.magnet.safe_move_to_field(
             self.plan.params.start_field_t, final_mode="driven", zero_leads=False,
             persistent_field_confirmed=self._persistent_confirmation_granted,
             tolerance_t=(min(self.plan.params.field_tolerance_t, self.plan.params.field_endpoint_tolerance_t) if directed else self._position_tolerance_t()),
             timeout_s=(self._hysteresis_move_timeout(current, self.plan.params.start_field_t, initial=True) if directed else max(3600.0, expected * 2.0 + 180.0)),
             **({"monotonic_direction": (self._initial_step_direction if getattr(self, "_initial_direction_locked", False) else 0),
-                "hysteresis_options": self._hysteresis_move_options(initial=True)} if directed else {}),
+                "hysteresis_options": self._hysteresis_move_options(initial=True)} if directed else approach_options),
         )
 
     def _confirm_initial_persistent_field(self, snapshot):
@@ -1222,7 +1241,9 @@ class BFieldTransportController(SteppedTransportMixin, QtCore.QObject):
 
     def _start_condition(self):
         if self._is_stepped():
+            initial_uncertain = getattr(self, "_initial_history_uncertain", False)
             self._reset_step_condition()
+            self._initial_history_uncertain = initial_uncertain
         condition = self.plan.conditions[self._condition_index]
         self._log(f"Applying condition {self._condition_index + 1}; bias settle {condition.settle_s:g} s")
         self._measurement_phase = "biasing"
@@ -1255,6 +1276,10 @@ class BFieldTransportController(SteppedTransportMixin, QtCore.QObject):
         step_move = self._is_stepped() and getattr(self, "_step_move_inflight", False)
         if step_move:
             self._step_move_inflight = False
+            direction = result.get("monotonic_direction")
+            if direction in (-1, 1) and direction != self._step_direction:
+                self._fail("APS100 move result reports an unexpected commanded direction")
+                return
         elif self._active and self._is_stepped() and self.plan.params.magnet_backend == "1000":
             direction = result.get("monotonic_direction")
             if direction in (-1, 1):
@@ -1277,6 +1302,10 @@ class BFieldTransportController(SteppedTransportMixin, QtCore.QObject):
             if not self._accept_move_history(result, initial=not step_move):
                 return
         if self._active and result.get("overshoot") and self._is_stepped() and self.plan.params.magnet_backend == "1000":
+            if step_move and result.get("quality_overshoot") and self._strict_field_history():
+                self._step_overshoot_pending = True
+                self._step_move_ready()
+                return
             if not step_move:
                 self._initial_step_direction = result.get("monotonic_direction")
                 self._initial_overshoot_hold = True
@@ -1293,7 +1322,7 @@ class BFieldTransportController(SteppedTransportMixin, QtCore.QObject):
             return
         self._note_heater_activation(result)
         if not step_move and self._is_stepped() and self.plan.params.magnet_backend == "1000":
-            self._initial_step_direction = result.get("monotonic_direction")
+            self._initial_step_direction = result.get("monotonic_direction") or (1 if self.plan.params.stop_field_t > self.plan.params.start_field_t else -1)
             self._initial_overshoot_hold = False
         if step_move:
             if self._thermal_hold:
@@ -1320,6 +1349,8 @@ class BFieldTransportController(SteppedTransportMixin, QtCore.QObject):
             return
         if self._monitor_hold is not None:
             return
+        if self._continuous_before_leg(leg_index, target):
+            return
         self._leg_index = int(leg_index)
         self._target = float(target)
         self._pending_target = float(target)
@@ -1339,7 +1370,13 @@ class BFieldTransportController(SteppedTransportMixin, QtCore.QObject):
         )
         self._checkpoint_runtime("starting_sweep", f"{direction} leg target {self._target:+.6f} T")
         try:
-            self.magnet.start_transport_sweep(self._target)
+            if self._field_approach() == "linear":
+                self.magnet.start_transport_sweep(self._target)
+            else:
+                self.magnet.start_transport_sweep(self._target,
+                    field_approach=self._field_approach(), tolerance_t=self._endpoint_tolerance,
+                    timeout_s=self._approach_timeout_s(),
+                    no_progress_s=self.plan.params.field_no_progress_s)
         except Exception as exc:
             self._fail(f"APS100 sweep command failed: {exc}")
 
@@ -1359,6 +1396,8 @@ class BFieldTransportController(SteppedTransportMixin, QtCore.QObject):
         self._refresh_snapshot()
         now = time.monotonic()
         self._measurement_phase = "sweeping"
+        self._continuous_previous_readback = None
+        self._continuous_segment = getattr(self, "_continuous_segment", 0) + 1
         self._log(f"APS100 transport {('forward' if self._leg_index == 0 else 'backward')} leg accepted; entering sweeping phase")
         self._leg_started_monotonic = now
         self._last_telemetry_monotonic = now
@@ -1377,6 +1416,7 @@ class BFieldTransportController(SteppedTransportMixin, QtCore.QObject):
         self._leg_timeout_s = max(
             configured_timeout,
             self._progress_timeout_s + communication_timeout,
+            self._approach_timeout_s(),
         )
         direction = "forward" if self._leg_index == 0 else "backward"
         self.state_changed.emit(
@@ -1469,6 +1509,8 @@ class BFieldTransportController(SteppedTransportMixin, QtCore.QObject):
         if self._is_stepped():
             self._step_tick(snapshot)
             return
+        if self._continuous_wait_tick():
+            return
         target = self._target
         measured = float(getattr(snapshot, "field_t", 0.0))
         # Configuration and safe positioning also publish snapshots.  Those
@@ -1484,11 +1526,23 @@ class BFieldTransportController(SteppedTransportMixin, QtCore.QObject):
         sweep_active = bool(getattr(status, "sweep_active", False))
         tolerance = self._endpoint_tolerance or self._endpoint_tolerance_t()
         near_target = abs(measured - target) <= tolerance + 1e-9
+        nonlinear = self._field_approach() != "linear"
+        approach_complete = (getattr(snapshot, "approach_mode", "") == self._field_approach()
+                             and getattr(snapshot, "approach_complete", False) is True)
+        # Passing the target during an oscillation is an ordinary data point.
+        # Only the worker's verified terminal state may finish this branch.
+        near_target = near_target and (not nonlinear or approach_complete)
         settling = bool(getattr(cfg.mcd, "transport_endpoint_settling_enabled", False))
-        stable_endpoint = (
-            self._endpoint_stability_ready(measured, sweep_active, received_at)
-            if settling else near_target and self._endpoint_approach_ready(measured)
-        )
+        if settling:
+            if nonlinear and not approach_complete:
+                self._endpoint_stable_reads = 0
+                self._endpoint_hold_started = None
+                self._endpoint_last_field = None
+                stable_endpoint = False
+            else:
+                stable_endpoint = self._endpoint_stability_ready(measured, sweep_active, received_at)
+        else:
+            stable_endpoint = near_target and (approach_complete if nonlinear else self._endpoint_approach_ready(measured))
         duplicate_endpoint = near_target and self._endpoint_recorded
         candidate_started = self._endpoint_candidate_started
         if settling and candidate_started is not None:
@@ -1582,6 +1636,10 @@ class BFieldTransportController(SteppedTransportMixin, QtCore.QObject):
                "Sweep_rate_A_per_s": (self._current_range_rate(snapshot) / (self.plan.validation["aps100_rates"]["coil_constant_t_per_a"] * 60.0) if self.plan.params.magnet_backend == "1000" and self._current_range_rate(snapshot) is not None else None), "Doping": condition.doping, "E-field": condition.efield,
                "Vtg": condition.vtg, "Vbg": condition.vbg, "Vds": condition.vds if condition.vds_source != "None" else None}
         row["_monitor_generation"] = self._monitor_generation
+        if not self._is_stepped():
+            row.update(self._continuous_sample_metadata(snapshot))
+            row["B_trigger_T"] = row["B_measured_T"]
+            row["_match_field"] = True
         thermal = self._latest_lakeshore()
         if thermal is not None:
             row["Sample_temperature_K"] = getattr(thermal, "sample_temperature_k", None)
@@ -1600,14 +1658,28 @@ class BFieldTransportController(SteppedTransportMixin, QtCore.QObject):
                 self._fail(str(exc))
 
     def _read_sample(self, row, condition):
+        if row.pop("_match_field", False):
+            cache = getattr(self.magnet, "telemetry_cache", None)
+            if cache is None or not hasattr(cache, "capture_history"):
+                raise RuntimeError("Continuous acquisition requires timestamped field telemetry")
+            timing = FieldAssociation()
+            with cache.capture_history() as history:
+                row = BFieldTransportController._acquire_sample(self, row, condition, timing)
+                return timing.finish(row, history, self._io_cancel, self._check_io_cancel)
+        return BFieldTransportController._acquire_sample(self, row, condition)
+
+    def _acquire_sample(self, row, condition, timing=None):
         self._check_io_cancel()
         row["Acquisition_started"] = time.time()
         daq = self.device_manager.get_session("daq")
         if daq is not None and hasattr(daq, "acquire"):
             try:
+                read_delay = float(getattr(self.plan.params, "read_delay_s", 0.))
                 row.update(acquire_current_sample(
                     daq, max(1, int(self.plan.params.averages)), *self._calibration,
-                    self._signal_chain, self._check_io_cancel))
+                    self._signal_chain, self._check_io_cancel,
+                    between_reads=(lambda: self._io_cancel.wait(read_delay)) if read_delay else None,
+                    read_timing=timing.daq_read if timing is not None else None))
             except Exception as exc:
                 raise RuntimeError(f"DAQ acquisition failed during transport sweep: {exc}") from exc
             if condition.vds_source.startswith("NI DAQ") and hasattr(daq, "get_ao_vs_gnd_value"):
@@ -1616,6 +1688,7 @@ class BFieldTransportController(SteppedTransportMixin, QtCore.QObject):
             smu = self.device_manager.get_session("g3")
             if smu is not None:
                 try:
+                    read_started = time.monotonic()
                     values = smu.acquire() if hasattr(smu, "acquire") else None
                     if isinstance(values, dict) and "current" in values:
                         row["Ids_Keithley"] = float(values["current"])
@@ -1625,10 +1698,15 @@ class BFieldTransportController(SteppedTransportMixin, QtCore.QObject):
                         row["Ids_Keithley"] = float(smu.current)
                     # Keep the historical CSV name as an alias of the same read.
                     row["Keithley_current"] = row["Ids_Keithley"]
+                    if timing is not None:
+                        timing.keithley = (read_started, time.monotonic())
                 except Exception as exc:
                     row["Keithley_read_error"] = str(exc)
         row["Bias2"] = bias2_target(condition, condition.vds)
+        read_started = time.monotonic()
         row["Ibias2_Keithley"] = read_bias2(self.device_manager.get_session("g4"), condition)
+        if timing is not None and row["Ibias2_Keithley"] is not None:
+            timing.bias2 = (read_started, time.monotonic())
         row["Acquisition_finished"] = time.time()
         return row
 
@@ -1725,7 +1803,9 @@ class BFieldTransportController(SteppedTransportMixin, QtCore.QObject):
         with plot.redraw() if hasattr(plot, "redraw") else nullcontext():
             for axis, channel in zip(plot.get_axes(), channels):
                 axis.clear()
-                line, = axis.plot([row['B_measured_T'] for row in self._results],
+                field_key = {"Ids_Keithley": "B_Keithley_T", "Keithley_current": "B_Keithley_T",
+                             "Ibias2_Keithley": "B_Bias2_T"}.get(channel, "B_measured_T")
+                line, = axis.plot([row.get(field_key, row['B_measured_T']) for row in self._results],
                                  [row.get(channel, float('nan')) for row in self._results],
                                  linestyle='', marker='.', color='tab:blue')
                 if axis is plot.ax:
@@ -1791,6 +1871,7 @@ class BFieldTransportController(SteppedTransportMixin, QtCore.QObject):
             return
         if self._thermal_pause_pending or self._thermal_hold or not self._active:
             return
+        self._note_continuous_interruption("Temperature protection")
         self._thermal_pause_pending = True
         self._thermal_hold = True
         phase = self._measurement_phase
@@ -1832,7 +1913,8 @@ class BFieldTransportController(SteppedTransportMixin, QtCore.QObject):
             self.magnet.pause()
 
     def _apply_biases(self, condition):
-        condition.refresh_gates()
+        # Use the physical targets resolved during reserved preflight. Re-running
+        # the ideal coordinate transform here would undo source-grid rounding.
         previous = getattr(self, "_active_bias2_condition", None)
         if condition.bias2_mode == "Disabled" and previous is not None:
             if "g4" not in self._claimed:
@@ -1910,16 +1992,33 @@ class BFieldTransportController(SteppedTransportMixin, QtCore.QObject):
                         )
 
         if refresh:
-            from app.voltage_resolution import validate_source_targets
+            from app.voltage_resolution import validate_source_targets, rounded_source_target
+            rounding = []
             for name, attr, label in (("g1", "vtg", "G1 / Vtg"), ("g2", "vbg", "G2 / Vbg")):
-                validate_source_targets(self.device_manager.get_session(name),
+                session = self.device_manager.get_session(name)
+                validate_source_targets(session,
                                         [getattr(condition, attr) for condition in self.plan.conditions],
                                         label, ramp_step=0.1, refresh=True)
+                for index, condition in enumerate(self.plan.conditions, start=1):
+                    requested = getattr(condition, attr)
+                    programmed = rounded_source_target(session, requested, label,
+                        limit=self.device_manager.applied_gate_voltage_limit(name))
+                    setattr(condition, attr, programmed)
+                    rounding.append(dict(condition_index=index, source=name, requested_v=requested,
+                                         programmed_v=programmed))
             g3_targets = [condition.vds for condition in self.plan.conditions
                           if condition.vds_source == "Keithley 2400"]
             if g3_targets:
                 validate_source_targets(self.device_manager.get_session("g3"), g3_targets,
                                         "G3 / Vds", ramp_step=0.1, refresh=True)
+                for index, condition in enumerate(self.plan.conditions, start=1):
+                    if condition.vds_source == "Keithley 2400":
+                        requested = condition.vds
+                        condition.vds = rounded_source_target(self.device_manager.get_session("g3"), requested,
+                            "G3 / Vds", limit=self.device_manager.applied_gate_voltage_limit("g3"))
+                        rounding.append(dict(condition_index=index, source="g3", requested_v=requested,
+                                             programmed_v=condition.vds))
+            self.plan.validation["voltage_rounding"] = rounding
             bias2_conditions = [condition for condition in self.plan.conditions if condition.bias2_mode != "Disabled"]
             if bias2_conditions:
                 validate_source_targets(self.device_manager.get_session("g4"),
@@ -1967,6 +2066,8 @@ class BFieldTransportController(SteppedTransportMixin, QtCore.QObject):
                 self._request_thermal_pause()
             if self._is_stepped():
                 self._step_tick()
+            else:
+                self._continuous_wait_tick()
 
     def on_lakeshore_disconnected(self):
         if self.thermal_safety is not None:
@@ -2019,7 +2120,7 @@ class BFieldTransportController(SteppedTransportMixin, QtCore.QObject):
         self._cleanup_timer.start(self._cleanup_watchdog_ms())
         pause_completed = False
         try:
-            self.magnet.pause()
+            self._pause_for("failure" if status == "failed" else "user" if status == "stopped" else "cleanup")
             pause_completed = True
         except Exception as exc:
             self._handle_cleanup_pause_failure(f"pause cleanup failed: {exc}")
@@ -2096,10 +2197,15 @@ class BFieldTransportController(SteppedTransportMixin, QtCore.QObject):
             return
         now = time.monotonic()
         phase = self._measurement_phase
+        if self._continuous_wait_tick():
+            return
         if self._is_stepped() and self._step_watchdog():
             return
         if phase in {"configuring", "biasing", "starting_sweep", "endpoint_hold"} or self.__dict__.get("_thermal_pause_pending", False):
             timeout = max(180.0, float(getattr(cfg.magnet, "operation_timeout_s", 180.0)))
+            if phase == "endpoint_hold" and self._sample_pending:
+                # At most two samples can be queued, including the endpoint.
+                timeout = max(timeout, 2 * self._acquisition_timeout_s())
             started = getattr(self, "_io_progress_at" if phase == "biasing" else "_phase_started", now)
             if now - started > timeout:
                 self._fail(f"No progress while waiting in {phase} for {timeout:g} s")
@@ -2223,6 +2329,8 @@ class BFieldTransportController(SteppedTransportMixin, QtCore.QObject):
         return bool(stable)
 
     def _current_range_rate(self, snapshot):
+        if self._field_approach() != "linear" and not self._is_stepped():
+            return getattr(snapshot, "approach_rate_t_per_min", None)
         if self.plan.params.magnet_backend != "1000" or "aps100_rates" not in self.plan.validation:
             return None
         table = self.plan.validation["aps100_rates"]
@@ -2270,7 +2378,7 @@ class BFieldTransportController(SteppedTransportMixin, QtCore.QObject):
             self._checkpoint_pending = True
             self._last_checkpoint = now
             path = self._checkpoint
-            params, validation = deepcopy(self.plan.params), dict(self.plan.validation)
+            params, validation = deepcopy(self.plan.params), deepcopy(self.plan.validation)
             results = list(self._results)
             output_paths = getattr(self._transport_outputs, "condition_csv_paths", None)
             csv_paths = tuple(output_paths) if output_paths is not None else None

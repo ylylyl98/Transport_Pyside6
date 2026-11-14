@@ -42,6 +42,13 @@ QtObject {
     readonly property color progressFill: primary
     readonly property color progressText: primaryText
     readonly property color progressSuccess: dark ? "#75d5a4" : "#1c6b43"
+    function connectionColor(state) {
+        const normalized = state.toLowerCase()
+        if (normalized === "connected") return progressSuccess
+        if (normalized === "connection error") return danger
+        if (normalized === "reconnect required" || normalized === "connecting" || normalized === "disconnecting") return warning
+        return muted
+    }
     readonly property color progressWarning: warning
     readonly property color progressDanger: dark ? "#ff8c97" : "#b62129"
     // Coordinate identity is independent of acquisition status and errors.

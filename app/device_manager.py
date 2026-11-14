@@ -125,7 +125,7 @@ class ManualControlWorker(QtCore.QThread):
                     SAFE_RAMP_STEP_T,
                     SAFE_RAMP_STEP_V,
                 )
-                from app.voltage_resolution import validate_source_targets
+                from app.voltage_resolution import validate_source_targets, round_voltage
                 self._check_cancelled()
                 quantum = validate_source_targets(self.session, (), self.name.upper(),
                                                   min(GATE_BIAS_RAMP_STEP_V, SAFE_RAMP_STEP_V), refresh=True)
@@ -145,8 +145,9 @@ class ManualControlWorker(QtCore.QThread):
                 # voltage/current and compliance remain explicit Read actions.
                 while True:
                     self._check_cancelled()
-                    requested = self.target
-                    validate_source_targets(self.session, (requested,), self.name.upper())
+                    raw_requested = self.target
+                    validate_source_targets(self.session, (raw_requested,), self.name.upper())
+                    requested = round_voltage(raw_requested, quantum)
                     if not math.isclose(current, requested, abs_tol=1e-9):
                         zeroing = math.isclose(requested, 0.0, abs_tol=1e-9)
                         step_v, step_t = (
@@ -163,13 +164,13 @@ class ManualControlWorker(QtCore.QThread):
                     # Give rapid clicks one ramp interval to coalesce before the
                     # final lightweight setpoint confirmation query.
                     time.sleep(GATE_BIAS_RAMP_STEP_T)
-                    if not math.isclose(self.target, requested, abs_tol=1e-9):
+                    if not math.isclose(self.target, raw_requested, abs_tol=1e-9):
                         continue
                     confirmed = float(self.session.get_voltage_setpoint())
                     self._check_cancelled()
                     if not math.isfinite(confirmed):
                         raise ValueError("Source setpoint confirmation is not finite")
-                    if not math.isclose(self.target, requested, abs_tol=1e-9):
+                    if not math.isclose(self.target, raw_requested, abs_tol=1e-9):
                         current = confirmed
                         continue
                     if not math.isclose(requested, confirmed, abs_tol=1e-9):
@@ -187,9 +188,11 @@ class ManualControlWorker(QtCore.QThread):
                 action = (
                     "safely ramped to 0 V"
                     if abs(final_target) < 1e-9
-                    else f"ramped to {final_target:g} V"
+                    else f"ramped to {current:g} V"
                 )
                 self.message = f"{self.name.upper()} {action} from {start:g} V."
+                if abs(final_target - current) > 1e-12:
+                    self.message += f" Requested {final_target:g} V rounded to the {quantum:g} V source increment."
             elif self.name.startswith("daq_ao"):
                 from app.constants import SAFE_RAMP_STEP_T, SAFE_RAMP_STEP_V
 
@@ -413,20 +416,20 @@ class GateStepWorker(ManualControlWorker):
             raise ValueError(f"{self.name.upper()} target exceeds its applied voltage limit or is not finite")
 
     def _validate_relative_step(self, delta):
-        if delta == 0:
-            return
-        quantum = self._quantum
-        ticks = delta / quantum
-        if abs(delta) < quantum * (1 - 1e-9) or abs(ticks - round(ticks)) > 1e-7:
-            raise ValueError(f"{self.name.upper()} relative step {delta:g} V is not representable at {quantum:g} V resolution")
+        from app.voltage_resolution import round_voltage
+        return round_voltage(delta, self._quantum)
 
     def add_step(self, delta):
         delta = float(delta)
         if not math.isfinite(delta):
             raise ValueError("Step must be finite")
         with self._target_lock:
+            if self._resolved or self._absolute:
+                self._validate(self._target + delta)
             if self._quantum is not None:
-                self._validate_relative_step(delta)
+                delta = self._validate_relative_step(delta)
+                if delta == 0:
+                    return
             else:
                 self._relative_deltas.append(delta)
             if self._resolved or self._absolute:
@@ -455,7 +458,7 @@ class GateStepWorker(ManualControlWorker):
 
     def run(self):
         from app.constants import GATE_BIAS_RAMP_STEP_V, GATE_BIAS_RAMP_STEP_T, SAFE_RAMP_STEP_V, SAFE_RAMP_STEP_T
-        from app.voltage_resolution import validate_source_targets
+        from app.voltage_resolution import validate_source_targets, round_voltage
         current = None
         try:
             self._check_cancelled()
@@ -466,8 +469,9 @@ class GateStepWorker(ManualControlWorker):
                 raise ValueError("Instrument source setpoint is not finite")
             with self._target_lock:
                 self._quantum = quantum
-                for delta in self._relative_deltas:
-                    self._validate_relative_step(delta)
+                if not self._absolute:
+                    self._validate(current + self._delta)
+                self._delta = sum(self._validate_relative_step(delta) for delta in self._relative_deltas)
                 self._relative_deltas.clear()
                 if not self._absolute:
                     self._target = current + self._delta
@@ -481,6 +485,11 @@ class GateStepWorker(ManualControlWorker):
                     target, revision = self._target, self._revision
                 self._validate(target)
                 validate_source_targets(self.session, (target,), self.name.upper())
+                target = round_voltage(target, quantum)
+                self._validate(target)
+                with self._target_lock:
+                    if revision == self._revision:
+                        self._target = target
                 self.progress.emit(target, current)
                 if not math.isclose(current, target, abs_tol=1e-9):
                     zeroing = math.isclose(target, 0.0, abs_tol=1e-9)

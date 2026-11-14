@@ -7,7 +7,7 @@ import math
 import json
 import re
 
-from app.models import BFIELD_HYSTERESIS_LABELS, BFIELD_MT_FIELDS
+from app.models import BFIELD_HYSTERESIS_LABELS, BFIELD_DISPLAY_SCALES, BFIELD_RATE_DISPLAY_SCALE
 from app.models import (DualGateParams, LineSweepParams, CoParams, PhotocurrentParams,
                         PhotocurrentBiasCondition, BFieldTransportParams,
                         BFieldTransportCondition)
@@ -35,6 +35,9 @@ CHOICES = {
     "derived_slow_axis": ["Doping", "E-field", "Vds"],
     "sample_reversal_mode": ["unchanged", "per_point", "whole_sweep"],
     "measurement_mode": ["continuous", "stepped"], "field_spacing": ["points", "step"],
+    "field_approach": ["linear", "no_overshoot", "oscillate"],
+    "aps100_polling_profile": ["standard", "reduced_mode_queries"],
+    "aps100_no_overshoot_profile": ["standard", "short_tail"],
     "cooldown_policy": ["adaptive", "stay_driven", "persistent_each_row"], "final_mode": ["driven"],
 }
 HIDDEN = {"output_csv_path", "output_metadata_path", "output_log_path", "plot_x_resolved", "magnet_backend", "field_spacing"}
@@ -45,13 +48,20 @@ REGION_DEFAULT = {f"{axis}_{part}": value for axis in ("vtg", "vbg")
 def defaults(index):
     values = asdict(MODES[index][2]())
     if index == 4:
-        values.update(fields_t="0", resume_checkpoint="", conditions=[])
+        from utils.config import cfg
+        from app.engine.bfield_transport_sweep import rate_a_per_s_to_t_per_min
+        values.update(fields_t="0", resume_checkpoint="", conditions=[], field_approach="linear", field_settle_s=0.,
+                      field_rate_t_per_min=rate_a_per_s_to_t_per_min(cfg.magnet.gate_scan_rate_a_per_s))
     if index == 5:
         values["plot_choice"] = "Ids_DC"
     return values
 
 
 def label(key):
+    if key == "aps100_polling_profile":
+        return "APS100 polling comparison"
+    if key == "aps100_no_overshoot_profile":
+        return "No Overshoot approach"
     if key in BFIELD_HYSTERESIS_LABELS:
         return BFIELD_HYSTERESIS_LABELS[key]
     special = {"n_sample": "Averages", "n_points": "Number of points", "delay": "Acquisition delay (s)",
@@ -63,6 +73,9 @@ def label(key):
                "start_field_t": "Start (T)", "stop_field_t": "Stop (T)",
                "sample_reversal_mode": "Sample B current reversal", "sample_reversal_settle_s": "Reversal settling wait (s)",
                "measurement_mode": "Measurement mode", "field_spacing": "Field spacing",
+               "wait_for_temperature": "Wait for temperature",
+               "pre_sweep_settle_s": "Extra wait before ramp (s)",
+               "turnaround_delay_s": "Turnaround wait (s)",
                "field_points": "Points / pass (calculated)", "field_step_t": "Step size (mT)",
                "field_tolerance_t": "Field tolerance (±mT)",
                "field_stability_s": "Field stability window (s)",
@@ -70,8 +83,8 @@ def label(key):
                "temperature_target_k": "Sample target (K)", "temperature_tolerance_k": "Target tolerance (K)",
                "temperature_window_s": "Stability window (s)", "temperature_span_k": "Maximum window span (K)",
                "temperature_drift_k_per_min": "Maximum absolute drift (K/min)", "temperature_timeout_s": "Wait timeout (s)",
-               "rate_t_per_min": "Maximum sweep rate (T/min)", "settle_s": "Settle time (s)",
-               "acquisition_delay_s": "Acquisition delay (s)", "averages": "Averages",
+               "rate_t_per_min": "Rate (Oe/s)", "field_rate_t_per_min": "Rate (Oe/s)", "field_approach": "Approach", "settle_s": "Settle time (s)",
+               "acquisition_delay_s": "Acquisition delay (s)", "read_delay_s": "Read delay (s)", "averages": "Averages",
                "derived_ratio": "Coupling ratio r", "ratio": "Coupling ratio r",
                "ratio_target": "r multiplies", "derived_ratio_target": "r multiplies",
                "coordinate_mode": "Coordinates", "mode": "Trajectory", "axis_fast": "Fast axis",
@@ -125,13 +138,15 @@ def bias2_summary(values, bias1=None):
 
 def descriptor(key, value, mode):
     group = ("Output and plot" if key.startswith("plot_") or key == "base_name" else
-             "Acquisition and ramps" if key in {"delay", "n_sample", "averages", "acquisition_delay_s", "vds_ramp", "vg_ramp"} else
+             "Acquisition and ramps" if key in {"delay", "n_sample", "averages", "acquisition_delay_s", "read_delay_s", "vds_ramp", "vg_ramp"} else
              "Recipes" if key in {"conditions", "bias_conditions", "regions"} else
              "Magnet" if key in {"fields_t", "resume_checkpoint", "start_field_t", "stop_field_t", "rate_t_per_min", "round_trip", "cooldown_policy", "final_mode"} else
              "Trajectory and biases")
     result = {"key": key, "label": label(key), "value": deepcopy(value), "group": group}
-    if mode == 5 and key in BFIELD_MT_FIELDS:
-        result["value"] = float(value) * 1000.
+    if mode == 5 and key in BFIELD_DISPLAY_SCALES:
+        result["value"] = float(value) * BFIELD_DISPLAY_SCALES[key]
+    if mode == 4 and key == "field_rate_t_per_min":
+        result["value"] = float(value) * BFIELD_RATE_DISPLAY_SCALE
     coordinate_key = key.removeprefix("raw_").removeprefix("derived_")
     for prefix, coordinate in (("doping", "Doping"), ("efield", "E-field"), ("vtg", "Vtg"), ("vbg", "Vbg"), ("vds", "Vds")):
         if coordinate_key == prefix or coordinate_key.startswith(prefix + "_"):
@@ -145,6 +160,12 @@ def descriptor(key, value, mode):
     elif key in CHOICES or key == "mode":
         options = CHOICES.get(key, ["Raw", "Derived"] if mode in (1, 4) else ["Grid", "Linked"])
         result.update(kind="choice", options=options)
+        if key == "aps100_no_overshoot_profile":
+            result["options"] = [dict(value="standard", label="Standard"),
+                                 dict(value="short_tail", label="Shorter slow approach (experimental)")]
+        if key == "aps100_polling_profile":
+            result["options"] = [dict(value="standard", label="Standard (A)"),
+                                 dict(value="reduced_mode_queries", label="Fewer mode queries (B)")]
     elif isinstance(value, int):
         result.update(kind="integer", min=0 if key == "ao_channel" else 1,
                       max=1000 if key == "n_sample" else 250000)
@@ -210,6 +231,9 @@ def schema(values, mode, errors=None):
         if mode == 5 and key in BFIELD_HYSTERESIS_LABELS:
             item["visible"] = (values.get("measurement_mode") == "stepped"
                                and values.get("magnet_backend", "1000") == "1000")
+        if mode == 5 and key in {"aps100_polling_profile", "aps100_no_overshoot_profile"}:
+            item["visible"] = (value != "standard" or
+                (values.get("measurement_mode") == "stepped" and values.get("magnet_backend", "1000") == "1000"))
         if mode == 2:
             derived = values.get("coordinate_mode") == "Derived"
             if key.startswith(("doping_", "efield_", "derived_")):
@@ -239,11 +263,27 @@ def measurement_sections(values, mode, selected=None, errors=None, *, transport_
 
     def field(key, title=None):
         item = descriptor(key, current[key], mode)
+        if key == "field_approach":
+            item["options"] = [dict(value=k, label=v) for k, v in (("linear", "Linear"), ("no_overshoot", "No Overshoot"), ("oscillate", "Oscillate"))]
+            if mode == 5 and current.get("measurement_mode") == "stepped":
+                item["options"].append(dict(value="linear_no_backward", label="Linear — No Backward"))
+            if item["value"] == "auto":
+                item["value"] = "no_overshoot" if current.get("measurement_mode") == "stepped" else "linear"
+            if mode == 5 and current.get("measurement_mode") == "continuous":
+                item["label"] = "Endpoint approach"
+                item["options"] = item["options"][:2]
+                if item["value"] in ("oscillate", "linear_no_backward"):
+                    # Keep the saved value visible until the user corrects it.
+                    name = "Oscillate" if item["value"] == "oscillate" else "Linear — No Backward"
+                    item["options"].append(dict(value=item["value"], label=f"{name} (unsupported)"))
+                    item["error"] = "Continuous mode requires Linear or No Overshoot."
         if mode in (1, 4):
             if key in ("derived_axis", "derived_start", "derived_stop"):
                 item["coordinate"] = current["derived_axis"]
             elif key == "derived_fixed":
                 item["coordinate"] = "E-field" if current["derived_axis"] == "Doping" else "Doping"
+        if mode == 4 and key == "field_settle_s":
+            item["label"] = "Extra settle delay (s)"
         if title:
             item["label"] = title
         item.update(rowKey=row_key, rowIndex=row_index)
@@ -254,10 +294,28 @@ def measurement_sections(values, mode, selected=None, errors=None, *, transport_
         if key in ("axis_fast", "axis_slow"):
             axes = ["Doping", "E-field", "Vds"] if current["coordinate_mode"] == "Derived" else ["Vtg", "Vbg", "Vds"]
             item["options"] = ([{"value": "None", "label": "None — 1D"}] if key == "axis_slow" and current["coordinate_mode"] == "Raw" else []) + axes
-        if mode == 5 and magnet_backend == "2100" and key == "measurement_mode":
-            item["options"] = ["stepped"]
-        if mode == 5 and magnet_backend == "2100" and key == "sample_reversal_mode":
-            item["options"] = ["unchanged"]
+        if mode == 5 and key == "measurement_mode":
+            item["label"] = "Mode"
+            item["options"] = [dict(value=k, label=v) for k, v in (
+                ("continuous", "Continuous · measure while moving"),
+                ("stepped", "Stepped · settle, then measure")) if magnet_backend == "1000" or k == "stepped"]
+            item["columnSpan"] = 2
+        if mode == 5 and key == "sample_reversal_mode":
+            supported = magnet_backend == "1000" and values.get("measurement_mode") == "stepped"
+            item["label"] = "B current reversal"
+            item["options"] = [dict(value=k, label=v) for k, v in (
+                ("unchanged", "Keep current setting"), ("per_point", "OFF during each reading"),
+                ("whole_sweep", "OFF for whole sweep")) if supported or k == "unchanged" or k == current[key]]
+            if not supported and current[key] != "unchanged":
+                item["error"] = "Requires APS100 Stepped. Select Keep current setting."
+        if mode == 5:
+            short_labels = {"temperature_target_k": "Required temperature (K)" if magnet_backend == "1000" else "Temperature setpoint (K)",
+                "temperature_tolerance_k": "Tolerance (±K)", "temperature_window_s": "Stable for (s)",
+                "temperature_span_k": "Max variation (K)", "temperature_drift_k_per_min": "Max drift (K/min)",
+                "temperature_timeout_s": "Max temperature wait (s)", "field_settle_s": "Extra wait after stable (s)",
+                "field_stability_s": "Field stable for (s)", "field_timeout_s": "Max field wait (s)",
+                "sample_reversal_settle_s": "Wait after switching (s)", "round_trip": "Forward + return"}
+            item["label"] = short_labels.get(key, item["label"])
         if key == "cooldown_policy":
             item["options"] = [{"value": k, "label": v} for k, v in (
                 ("adaptive", "Adaptive (thermal permission)"), ("stay_driven", "Stay driven between conditions"),
@@ -305,7 +363,11 @@ def measurement_sections(values, mode, selected=None, errors=None, *, transport_
         return section, index
 
     if mode == 4:
-        add("Magnetic field targets", ["fields_t"], columns=1)
+        add("Magnetic field targets", ["fields_t"], columns=1,
+            description="Set field → wait for stability → extra settle → Gate Scan.")
+        if magnet_backend == "1000":
+            add("Field approach", ["field_rate_t_per_min", "field_approach", "field_settle_s"], columns=2,
+                description="No Overshoot slows near target; Oscillate crosses the target before settling.")
         condition_table, index = table("conditions", "Gate Scan conditions",
                          "Enabled conditions run at each field, in list order." if values["conditions"] else
                          "Settings below run at every field. Add saves them as a condition.")
@@ -409,54 +471,93 @@ def measurement_sections(values, mode, selected=None, errors=None, *, transport_
                 field_limit_text = f"Start/Stop limit: ±{aps100_transport_field_limit():g} T. "
             except (TypeError, ValueError):
                 field_limit_text = "Field limit unavailable; check magnet configuration. "
-        add("Magnetic field trajectory", ["measurement_mode", "start_field_t", "stop_field_t", "round_trip"],
-            description=(field_limit_text + "Requested maximum rate; the APS100 stored range limits can make actual rates slower. Continuous samples during motion; Stepped waits at each field." if magnet_backend == "1000" else "Stepped only; field ramp is managed by the SDK."))
+        stepped = current.get("measurement_mode") == "stepped"
+        trajectory = add("1 · Sweep", ["measurement_mode", "start_field_t", "stop_field_t", "round_trip"],
+            description=("Move → stabilize → measure → next point" if stepped else
+                         "Prepare → ramp + measure → return" if current.get("round_trip") else "Prepare → ramp + measure"))
         if magnet_backend == "1000":
             from app.engine.bfield_transport_sweep import effective_rate_limit_t_per_min
             try:
                 limit = effective_rate_limit_t_per_min()
-                limit_text = f"{limit * 10000 / 60:g} Oe/s ({limit:g} T/min)"
+                limit_text = f"{limit * BFIELD_RATE_DISPLAY_SCALE:g} Oe/s"
             except (ValueError, TypeError):
                 limit_text = "unavailable; check magnet configuration"
-            try:
-                requested = float(current.get("rate_t_per_min", 0))
-                equivalent = f"{requested * 10000 / 60:g} Oe/s"
-            except (TypeError, ValueError):
-                equivalent = "invalid input"
-            add("Sweep rate", ["rate_t_per_min"], columns=1,
-                description=f"Configured maximum: {limit_text}. Current request: {equivalent}. Stored RATE 0–4 and voltage limits may be slower; the final approach also slows down.")
-        if magnet_backend == "1000":
-            add("Sample B current reversal", ["sample_reversal_mode", "sample_reversal_settle_s"],
-            description="Unchanged preserves B. Automatic modes require APS100 Stepped and A already ON; A is never changed. Per point: qualify a full ON temperature window, confirm OFF and wait, acquire, then confirm ON, wait and qualify a new ON window. Before/after ON temperatures must differ by no more than the configured temperature span before the point is saved. OFF readings remain safety monitored but are not mixed into ON windows. Whole sweep: B OFF with the existing target, span and drift checks. The configured wait does not certify transient removal. Monitoring or thermal interruptions end the run; B is restored after cleanup. If restoration fails, ownership is retained and Stop retries.")
-        elif current.get("sample_reversal_mode") != "unchanged":
-            add("Unsupported saved sample reversal", ["sample_reversal_mode"],
-                description="This saved setting requires APS100. Choose unchanged to use attoDRY2100.")
-        if current.get("measurement_mode") == "stepped":
-            if magnet_backend == "1000":
-                add("Hysteresis: set, wait, measure", list(BFIELD_HYSTERESIS_LABELS),
-                    description="Stable offset points are measured at their readback field. Passed nominal points are logged, never revisited. History reversal, endpoint or actual-gap violations end the run. Gap 0 means twice the largest planned interval. Field and temperature have separate timeouts; protection holds still require review. Commission these limits on the magnet.")
-            step_section = add("Stepped field and temperature", ["field_step_t", "field_points", "temperature_target_k"],
-                description=("All points use one sample target; passive waiting only." if magnet_backend == "1000" else "SDK temperature control stays enabled at one sample target throughout the sweep.") + (" Temperature timeout ends the run; protection holds require review." if magnet_backend == "1000" else " Timeout pauses the run."))
-            stability_section = add("Temperature stability and timeout", ["temperature_tolerance_k", "temperature_window_s", "temperature_span_k", "temperature_drift_k_per_min", "temperature_timeout_s"],
-                description="Temperature qualification limits remain active for every point.")
-            if magnet_backend == "1000":
-                for item in stability_section["fields"]:
-                    if item["key"] == "temperature_timeout_s":
-                        item["label"] = "Temperature qualification timeout (s)"
+            trajectory["fields"].append(field("rate_t_per_min", "Max approach rate (Oe/s)" if stepped else "Sweep rate (Oe/s)"))
+            if stepped:
+                trajectory["fields"].append(field("field_approach"))
+                trajectory["description"] += ". No Overshoot slows near target; Oscillate crosses the target before settling. Linear — No Backward sweeps directly without reverse corrections; preparation follows the existing conservative path."
+            if not stepped and current.get("field_approach") in ("oscillate", "linear_no_backward"):
+                trajectory["description"] += ". The selected approach is unsupported in Continuous mode; change Endpoint approach in Additional settings."
+            trajectory["samplingText"] = field_limit_text + f"Rate limit: {limit_text}."
+        else:
+            trajectory["samplingText"] = "Field rate managed by the attoDRY2100 SDK."
+        if stepped:
+            trajectory["fields"].extend([field("field_step_t"), field("field_points")])
             try:
                 count, text = transport_sampling_summary(current, magnet_backend)
-                for item in step_section["fields"]:
+                for item in trajectory["fields"]:
                     if item["key"] == "field_points":
                         item["value"] = count
-                step_section.update(samplingText=text, samplingWarning=False)
+                trajectory["samplingText"] += "\n" + text
             except ValueError as exc:
-                for item in step_section["fields"]:
+                for item in trajectory["fields"]:
                     if item["key"] == "field_points":
                         item["value"] = "—"
-                step_section.update(samplingText=str(exc), samplingWarning=True)
+                trajectory.update(samplingText=str(exc), samplingWarning=True)
+            wait_keys = ["temperature_target_k", "temperature_tolerance_k"]
+            if magnet_backend == "1000":
+                wait_keys += ["field_stability_s", "field_settle_s"]
+            add("2 · Wait at each point", wait_keys,
+                description="Field + temperature stable → extra wait → measure." if magnet_backend == "1000" else
+                            "SDK sets temperature; wait for stable field and temperature.")
+        else:
+            wait_keys = ["wait_for_temperature"]
+            if current.get("wait_for_temperature"):
+                wait_keys += ["temperature_target_k", "temperature_tolerance_k"]
+            wait_keys += ["pre_sweep_settle_s"]
+            if current.get("round_trip"):
+                wait_keys += ["turnaround_delay_s"]
+            add("2 · Wait before ramp", wait_keys,
+                description="Before each branch. Field keeps moving during readings.")
+        acquisition = add("3 · Measure", ["averages", "read_delay_s"] + ([] if stepped else ["acquisition_delay_s"]),
+            description=("Acquire at a stationary field. " if stepped else "Acquire while moving. ") +
+                        "Delay between DAQ readings; average N readings.")
+        for item in acquisition["fields"]:
+            if item["key"] == "acquisition_delay_s":
+                item["label"] = "Min sample interval (s)"
+        if not stepped and magnet_backend == "1000":
+            rate = current.get("rate_t_per_min", 0.) * BFIELD_RATE_DISPLAY_SCALE
+            if rate > 0:
+                ramp_s = abs(current["stop_field_t"] - current["start_field_t"]) * 10000. / rate
+                acquisition["samplingText"] = f"Ideal ramp: {ramp_s:g} s / branch. Field changes {rate:g} Oe per second of acquisition."
+                if current.get("field_approach", "auto") not in {"auto", "linear"}:
+                    acquisition["samplingText"] = f"Requested rate: {rate:g} Oe/s. Endpoint approach adds time and changes the rate."
+        reversal = current.get("sample_reversal_mode", "unchanged")
+        if magnet_backend == "1000" or reversal != "unchanged":
+            descriptions = {"unchanged": "Readout stays on. Reversal setting stays fixed.",
+                "per_point": "ON + stable → OFF + wait → read → ON + wait + recheck.",
+                "whole_sweep": "B reversal OFF throughout; temperature readout continues."}
+            section = add("Sample temperature · Input B", ["sample_reversal_mode"] +
+                (["sample_reversal_settle_s"] if reversal != "unchanged" else []),
+                description=descriptions[reversal] + (" OFF loses thermal-EMF compensation. A stays unchanged." if reversal != "unchanged" else ""))
+            section["collapsedByDefault"] = reversal == "unchanged"
+        if not stepped and magnet_backend == "1000":
+            add("Endpoint approach", ["field_approach"], advanced=True,
+                description="No Overshoot slows near endpoints.")
+        if stepped or current.get("wait_for_temperature"):
+            add("Temperature limits", ["temperature_window_s", "temperature_span_k", "temperature_drift_k_per_min", "temperature_timeout_s"],
+                advanced=True, description="Required before each point." if stepped else "Required before each branch; thermal protection stays active during motion.")
+        if stepped and magnet_backend == "1000":
+            add("Field limits", [k for k in BFIELD_HYSTERESIS_LABELS if k not in {"field_stability_s", "field_settle_s"}],
+                advanced=True, description="Reversal, gaps and uncertain history are flagged. Duplicate or passed points are skipped; a stable endpoint offset is recorded at its actual readback. Qualification timeouts restart the wait. Readback is current-derived; motion and safety protections remain active.")
+        if (stepped and magnet_backend == "1000" and current.get("field_approach", "auto") in {"auto", "no_overshoot"}) or current.get("aps100_no_overshoot_profile", "standard") != "standard":
+            add("No Overshoot approach", ["aps100_no_overshoot_profile"], advanced=True,
+                description="Shorter reduced-rate segment, with the same rate ceiling and reversal warning threshold. Needs short hardware validation. Initial preparation, zero/cross-zero moves and rate-band transitions use Standard.")
+        if (stepped and magnet_backend == "1000") or current.get("aps100_polling_profile", "standard") != "standard":
+            add("Communication comparison", ["aps100_polling_profile"], advanced=True,
+                description="For APS100 Stepped No Overshoot / Linear — No Backward. B queries operating mode once per second during motion; mode changes may take 1 s plus communication time to detect. Fault, thermal and field checks remain on every loop. Preparation and instrument settings stay unchanged. Compare equivalent short runs with A and B.")
         conversion = add("Shared gate conversion", ["ratio", "ratio_target"],
-            description="Choose Vtg / Vbg to enter physical gate voltages, or Doping / E-field to enter weighted gate voltages. Switching views keeps the same gate setpoints. "
-                        + ("Changing r keeps Vtg / Vbg fixed in this view." if transport_coordinates == "Raw" else "One ratio applies to all conditions."))
+            description="One ratio for all conditions. Switching views keeps gate setpoints.")
         conversion["fields"].insert(0, dict(key="transport_coordinates", label="Fixed gate inputs", kind="choice", value=transport_coordinates,
             options=[dict(value="Raw", label="Vtg / Vbg"), dict(value="Derived", label="Doping / E-field")], columnSpan=2))
         section, index = table("conditions", "Fixed bias conditions")
@@ -483,13 +584,19 @@ def measurement_sections(values, mode, selected=None, errors=None, *, transport_
                     item.update(readOnly=True, description="Calculated from Vtg / Vbg")
             row_key, row_index, current = "", -1, values
         if magnet_backend == "1000":
-            add("Cooldown and completion", ["cooldown_policy", "final_mode"], advanced=True,
-                description="Successful completion stays driven (heater ON). Stop, error and interlock retain persistent cleanup.")
+            add("After sweep", ["cooldown_policy"], advanced=True,
+                description="Success: stay driven. Stop or fault: protected cleanup.")
 
     if mode in (0, 1, 2, 4):
         add("Vds source", ["vds_source"] + (["ao_channel"] if current["vds_source"] == "NI DAQ AO" else []))
         add("Bias 2", bias2_keys(current), description=bias2_summary(current))
-    add("Acquisition", ["n_sample", "delay", "averages", "acquisition_delay_s"])
+    if mode != 5:
+        acquisition = add("Acquisition", ["n_sample", "delay", "averages", "acquisition_delay_s"])
+        if mode == 4:
+            for item in acquisition["fields"]:
+                if item["key"] == "delay":
+                    item["label"] = "Gate settle delay (s)"
+            acquisition["description"] = "Wait after each gate move before readings; field settling occurs before the Gate Scan."
     ramp_keys = ["vg_ramp"] + (["vds_ramp"] if current.get("vds_source") != "None" and (mode != 3 or values["use_vds"]) else [])
     if mode in (1, 4) and current["mode"] == "Raw":
         ramp_keys += ["derived_ratio", "derived_ratio_target"]
@@ -522,9 +629,10 @@ def measurement_sections(values, mode, selected=None, errors=None, *, transport_
         2: {"Acquisition", "Additional gate regions", "Gate conversion"},
         3: {"Acquisition"},
         4: {"Acquisition"},
-        5: {"Acquisition", "Shared gate conversion", "Sample B current reversal",
-            "Hysteresis: set, wait, measure", "Temperature stability and timeout"},
+        5: {"Shared gate conversion"},
     }.get(mode, set())
+    if mode == 5:
+        sections = [s for s in sections if not s.get("advanced")] + [s for s in sections if s.get("advanced")]
     for section in sections:
         if section["title"] in collapsed or section.get("advanced"):
             if section["title"] in collapsed:
@@ -577,9 +685,17 @@ def convert(value, default, key, mode):
             rows.append({k: convert(row.get(k, v), v, k, mode) for k, v in example.items()})
         return rows
     text = str(value)
+    if key == "field_approach" and mode == 5 and text in ("auto", "linear_no_backward"):
+        return text
     options = descriptor(key, default, mode).get("options")
-    if options and text not in options:
-        raise ValueError(f"{label(key)} must be one of {', '.join(options)}")
+    if options:
+        # Choice descriptors can carry separate stored values and display labels.
+        # Validate the stored value emitted by FieldEditor, not the option dict.
+        allowed = [option["value"] if isinstance(option, dict) else option for option in options]
+        if text not in allowed:
+            labels = [str(option.get("label", option["value"])) if isinstance(option, dict)
+                      else str(option) for option in options]
+            raise ValueError(f"{label(key)} must be one of {', '.join(labels)}")
     return text
 
 
